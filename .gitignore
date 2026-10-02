@@ -1,4 +1,7 @@
 target/
 *.md
 !README.md
+!BENCHMARKS.md
 __pycache__/
+scripts/
+bench-results/

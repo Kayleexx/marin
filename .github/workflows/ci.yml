@@ -31,8 +31,35 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: scripts/check-line-limit.sh
-      - run: scripts/check-unsafe.sh
+      - name: Rust files stay under 425 lines
+        run: |
+          status=0
+          while IFS= read -r -d '' file; do
+            lines=$(wc -l < "$file")
+            if (( lines > 425 )); then
+              echo "error: $file has $lines lines (limit 425)"
+              status=1
+            fi
+          done < <(git ls-files -z -- '*.rs')
+          exit "$status"
+      - name: Unsafe stays inside the cuda crate
+        run: |
+          status=0
+          while IFS= read -r -d '' file; do
+            if grep -nE '\bunsafe\b' "$file" | grep -v 'forbid(unsafe_code)' > /dev/null; then
+              echo "error: $file uses unsafe outside crates/cuda"
+              status=1
+            fi
+          done < <(git ls-files -z -- 'crates/*.rs' ':!:crates/cuda/**')
+          for root in crates/*/src/lib.rs crates/*/src/main.rs; do
+            [[ -e "$root" ]] || continue
+            [[ "$root" == crates/cuda/* ]] && continue
+            if ! grep -q '^#!\[forbid(unsafe_code)\]' "$root"; then
+              echo "error: $root is missing #![forbid(unsafe_code)]"
+              status=1
+            fi
+          done
+          exit "$status"
 
   rust:
     name: Rust
