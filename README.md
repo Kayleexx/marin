@@ -1,4 +1,5 @@
 # Marin
+<img width="532" height="331" alt="image" src="https://github.com/user-attachments/assets/ad91e0dd-1ff3-424b-8d2b-91652ac77165" />
 
 Marin is a private, local-first intelligence layer built on a hardware-adaptive inference runtime for ordinary consumer hardware.
 
