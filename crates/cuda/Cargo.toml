@@ -1,0 +1,17 @@
+[package]
+name = "cuda"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cudarc = { version = "0.19.10", default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-12080"] }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+tensor = { version = "0.0.0", path = "../tensor" }

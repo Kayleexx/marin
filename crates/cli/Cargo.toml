@@ -1,0 +1,34 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "marin"
+path = "src/bin/marin.rs"
+
+[[bin]]
+name = "marin-run"
+path = "src/bin/marin-run.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+chat = { version = "0.0.0", path = "../chat" }
+clap = { version = "4.6.7", features = ["derive", "wrap_help"] }
+crossterm = { version = "0.29.0", default-features = false, features = ["events", "bracketed-paste"] }
+ctrlc = "3.5.2"
+kv = { version = "0.0.0", path = "../kv" }
+loader = { version = "0.0.0", path = "../loader" }
+metrics = { version = "0.0.0", path = "../metrics" }
+model = { version = "0.0.0", path = "../model" }
+runtime = { version = "0.0.0", path = "../runtime" }
+sampler = { version = "0.0.0", path = "../sampler" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+unicode-width = "0.2.2"

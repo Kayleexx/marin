@@ -1,0 +1,15 @@
+[package]
+name = "runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+kv = { version = "0.0.0", path = "../kv" }
+sampler = { version = "0.0.0", path = "../sampler" }
+thiserror = "2.0.21"

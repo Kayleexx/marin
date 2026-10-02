@@ -1,0 +1,247 @@
+use super::menu::{Item, Menu};
+use crate::CliError;
+use crate::session::Settings;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Inspect,
+    Tokens,
+    NextTokens,
+    Temperature,
+    TopK,
+    TopP,
+    MaxTokens,
+    Seed,
+    SwitchModel,
+    SwitchBackend,
+    NewChat,
+    Clear,
+    Shortcuts,
+    Quit,
+}
+
+pub const SHORTCUTS: [&str; 5] = [
+    "enter send · alt+enter or ctrl+j new line · ↑/↓ history",
+    "/ open actions · ctrl+o inspect the last reply",
+    "ctrl+c cancels a reply; press it twice at an empty prompt to exit · ctrl+d exits",
+    "ctrl+a / ctrl+e start / end of line · ctrl+u / ctrl+k delete to start / end · ctrl+w delete word",
+    "type after / to search the actions, enter runs the highlighted one",
+];
+
+pub fn palette() -> Menu<Action> {
+    let item = |label: &str, detail: &str, value| Item {
+        label: label.to_string(),
+        detail: detail.to_string(),
+        value,
+    };
+    Menu::new(vec![
+        item(
+            "Inspect last reply",
+            "metrics, tokens, next tokens, KV, model  (ctrl+o)",
+            Action::Inspect,
+        ),
+        item(
+            "Show tokens…",
+            "how a text is split into tokens",
+            Action::Tokens,
+        ),
+        item(
+            "Next-token probabilities…",
+            "the 5 likeliest tokens after a text",
+            Action::NextTokens,
+        ),
+        item(
+            "Temperature…",
+            "randomness; 0 always picks the likeliest token",
+            Action::Temperature,
+        ),
+        item(
+            "Top-k…",
+            "only consider the K likeliest tokens (0 = off)",
+            Action::TopK,
+        ),
+        item(
+            "Top-p…",
+            "only consider tokens adding up to probability P",
+            Action::TopP,
+        ),
+        item("Max tokens…", "longest reply", Action::MaxTokens),
+        item(
+            "Seed…",
+            "the same seed repeats the same text; random = new each time",
+            Action::Seed,
+        ),
+        item(
+            "Switch model…",
+            "pick another model folder",
+            Action::SwitchModel,
+        ),
+        item(
+            "Switch backend…",
+            "auto, cpu or cuda",
+            Action::SwitchBackend,
+        ),
+        item(
+            "New conversation",
+            "forget the conversation so far",
+            Action::NewChat,
+        ),
+        item("Clear screen", "", Action::Clear),
+        item("Keyboard shortcuts", "", Action::Shortcuts),
+        item("Quit", "ctrl+d", Action::Quit),
+    ])
+}
+
+impl Action {
+    /// The one-line question for actions that need a typed value.
+    pub fn question(self) -> Option<&'static str> {
+        Some(match self {
+            Action::Tokens => "Text to split into tokens",
+            Action::NextTokens => "Text to continue",
+            Action::Temperature => "Temperature",
+            Action::TopK => "Top-k",
+            Action::TopP => "Top-p",
+            Action::MaxTokens => "Max tokens",
+            Action::Seed => "Seed (number or random)",
+            _ => return None,
+        })
+    }
+}
+
+/// The value shown when a setting is edited.
+pub fn current_value(settings: &Settings, action: Action) -> String {
+    match action {
+        Action::Temperature => settings.temperature.to_string(),
+        Action::TopK => settings.top_k.to_string(),
+        Action::TopP => settings.top_p.to_string(),
+        Action::MaxTokens => settings.max_tokens.to_string(),
+        Action::Seed => settings
+            .seed
+            .map_or("random".to_string(), |s| s.to_string()),
+        _ => String::new(),
+    }
+}
+
+/// Applies a typed value to `settings`, leaving them untouched if it is invalid.
+pub fn apply_setting(
+    settings: &mut Settings,
+    action: Action,
+    text: &str,
+) -> Result<String, CliError> {
+    let value = text.trim();
+    let bad = |what: &str| CliError::BadOption(format!("expected {what}, got `{value}`"));
+    let mut next = *settings;
+    let name = match action {
+        Action::Temperature => {
+            next.temperature = value.parse().map_err(|_| bad("a number"))?;
+            "temperature"
+        }
+        Action::TopK => {
+            next.top_k = value.parse().map_err(|_| bad("a whole number"))?;
+            "top-k"
+        }
+        Action::TopP => {
+            next.top_p = value.parse().map_err(|_| bad("a number"))?;
+            "top-p"
+        }
+        Action::MaxTokens => {
+            next.max_tokens = value.parse().map_err(|_| bad("a whole number"))?;
+            "max tokens"
+        }
+        Action::Seed if value == "random" => {
+            next.seed = None;
+            "seed"
+        }
+        Action::Seed => {
+            next.seed = Some(
+                value
+                    .parse()
+                    .map_err(|_| bad("a whole number or `random`"))?,
+            );
+            "seed"
+        }
+        _ => return Err(CliError::BadOption("that action has no value".into())),
+    };
+    next.sampler_config(0).validate()?;
+    *settings = next;
+    Ok(format!("{name} = {value}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings() -> Settings {
+        Settings {
+            max_tokens: 128,
+            temperature: 0.7,
+            top_k: 0,
+            top_p: 0.9,
+            seed: None,
+        }
+    }
+
+    #[test]
+    fn valid_values_are_applied_and_reported() {
+        let mut s = settings();
+        assert_eq!(
+            apply_setting(&mut s, Action::Temperature, " 0.2 ").unwrap(),
+            "temperature = 0.2"
+        );
+        assert_eq!(s.temperature, 0.2);
+        apply_setting(&mut s, Action::MaxTokens, "16").unwrap();
+        apply_setting(&mut s, Action::TopK, "40").unwrap();
+        apply_setting(&mut s, Action::Seed, "7").unwrap();
+        assert_eq!((s.max_tokens, s.top_k, s.seed), (16, 40, Some(7)));
+        apply_setting(&mut s, Action::Seed, "random").unwrap();
+        assert_eq!(s.seed, None);
+    }
+
+    #[test]
+    fn invalid_values_leave_settings_unchanged() {
+        let mut s = settings();
+        for (action, text) in [
+            (Action::Temperature, "hot"),
+            (Action::Temperature, "-1"),
+            (Action::TopP, "0"),
+            (Action::TopP, "1.5"),
+            (Action::MaxTokens, "-3"),
+            (Action::TopK, "1.5"),
+            (Action::Seed, "abc"),
+            (Action::Quit, "x"),
+        ] {
+            assert!(
+                apply_setting(&mut s, action, text).is_err(),
+                "{action:?} {text}"
+            );
+        }
+        assert_eq!(s.temperature, 0.7);
+        assert_eq!(s.top_p, 0.9);
+        assert_eq!(s.max_tokens, 128);
+    }
+
+    #[test]
+    fn current_values_prefill_the_question() {
+        let s = settings();
+        assert_eq!(current_value(&s, Action::Temperature), "0.7");
+        assert_eq!(current_value(&s, Action::Seed), "random");
+        assert_eq!(Action::Tokens.question(), Some("Text to split into tokens"));
+        assert_eq!(Action::Clear.question(), None);
+    }
+
+    #[test]
+    fn palette_lists_every_action_once() {
+        let mut menu = palette();
+        let mut seen = Vec::new();
+        for _ in 0..14 {
+            seen.push(*menu.current().unwrap());
+            menu.down();
+        }
+        seen.dedup();
+        assert_eq!(seen.len(), 14);
+        for c in "tok".chars() {
+            menu.push(c);
+        }
+        assert_eq!(menu.current(), Some(&Action::Tokens));
+    }
+}

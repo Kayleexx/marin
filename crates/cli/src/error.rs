@@ -1,0 +1,113 @@
+use loader::LoaderError;
+use model::ModelError;
+use runtime::GenerateError;
+use sampler::SamplerError;
+use thiserror::Error;
+
+use crate::units;
+
+#[derive(Debug, Error)]
+pub enum CliError {
+    #[error(transparent)]
+    Loader(#[from] LoaderError),
+    #[error(transparent)]
+    Model(#[from] ModelError),
+    #[error(transparent)]
+    Generate(#[from] GenerateError<ModelError>),
+    #[error(transparent)]
+    Sampler(#[from] SamplerError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("nothing to complete: the prompt is empty")]
+    EmptyPrompt,
+    #[error("the prompt is {tokens} tokens long but the context window is {ctx}")]
+    PromptTooLong { tokens: usize, ctx: usize },
+    #[error("--ctx {ctx} is above what this model supports ({max})")]
+    ContextTooLarge { ctx: usize, max: usize },
+    #[error("{0}")]
+    BadOption(String),
+    #[error("this needs about {} of memory but only {} is available", units::bytes(*.needed), units::bytes(*.available))]
+    NotEnoughMemory { needed: u64, available: u64 },
+    #[error("cannot use reference file {path}: {reason}")]
+    Reference { path: String, reason: String },
+    #[error("no model found")]
+    NoModel,
+    #[error("no chat model found{}", base_note(.base))]
+    NoChatModel { base: Vec<String> },
+    #[error("{0} is a base model: it continues text and cannot hold a conversation")]
+    NotAChatModel(String),
+    #[error("several models found: {0}")]
+    ChooseModel(String),
+    #[error("{0} is not a model folder (it needs config.json, tokenizer.json and weights)")]
+    NotAModel(String),
+    #[error("no model is loaded")]
+    ModelNotLoaded,
+    #[error("no prompt given")]
+    NoPrompt,
+    #[error("cancelled")]
+    Cancelled,
+    #[error("the model does not match the reference output")]
+    VerifyFailed,
+}
+
+fn base_note(base: &[String]) -> String {
+    match base {
+        [] => String::new(),
+        [one] => {
+            format!("; {one} is a base model (it continues text and cannot hold a conversation)")
+        }
+        many => format!(
+            "; {} are base models (they continue text and cannot hold a conversation)",
+            many.join(", ")
+        ),
+    }
+}
+
+impl CliError {
+    pub fn hint(&self) -> Option<&'static str> {
+        match self {
+            Self::Loader(LoaderError::MissingFiles { .. }) => Some(
+                "download the whole model folder (config.json, tokenizer.json, model.safetensors) from Hugging Face",
+            ),
+            Self::ModelNotLoaded => Some("open / actions and choose Switch model"),
+            Self::Loader(LoaderError::NotADirectory(_)) => {
+                Some("pass the folder that contains config.json, not a file inside it")
+            }
+            Self::Loader(LoaderError::Safetensors { .. }) => {
+                Some("the file may be a partial download; fetch it again")
+            }
+            Self::Model(ModelError::UnsupportedModelType { .. }) => {
+                Some("only Qwen3 models work so far; Qwen3-1.7B-Base is the tested one")
+            }
+            Self::Model(ModelError::InvalidWeights(_)) => {
+                Some("the download may be incomplete or mix files from different versions")
+            }
+            Self::Model(ModelError::Cuda(_)) => {
+                Some("run with --backend cpu, or install the CUDA toolkit (it provides libnvrtc)")
+            }
+            Self::Model(ModelError::GpuMemory { .. }) => {
+                Some("try a smaller --ctx, or run with --backend cpu")
+            }
+            Self::NoChatModel { .. } => Some(
+                "install one: huggingface-cli download Qwen/Qwen3-1.7B --local-dir ~/models/Qwen3-1.7B (or use marin-run for base models)",
+            ),
+            Self::NotAChatModel(_) => {
+                Some("use marin-run for base models, or pick a chat model such as Qwen/Qwen3-1.7B")
+            }
+            Self::NoModel => Some("put a model folder in ~/models, or run `marin model PATH`"),
+            Self::ChooseModel(_) => Some("pick one with `marin model PATH` or --model PATH"),
+            Self::NotAModel(_) => Some("download the whole model folder from Hugging Face"),
+            Self::NoPrompt => Some("pass the text after `run`, or pipe it in"),
+            Self::EmptyPrompt => Some("type some text for the model to continue"),
+            Self::PromptTooLong { .. } => Some("shorten the prompt or raise --ctx"),
+            Self::ContextTooLarge { .. } => Some("pick a smaller --ctx"),
+            Self::NotEnoughMemory { .. } => Some("try a smaller --ctx or close other programs"),
+            Self::VerifyFailed => Some("the lines above show the first step that disagrees"),
+            _ => None,
+        }
+    }
+
+    pub fn is_broken_pipe(&self) -> bool {
+        matches!(self, Self::Io(e) if e.kind() == std::io::ErrorKind::BrokenPipe)
+    }
+}

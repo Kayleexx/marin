@@ -1,0 +1,205 @@
+{
+  "format": 1,
+  "unix_time": 1790978160,
+  "model": "Qwen3-1.7B-Base",
+  "precision": "bf16 weights, f32 math",
+  "quantization": "none",
+  "context_length": 577,
+  "batch_size": 1,
+  "prompt_tokens": 512,
+  "output_tokens": 64,
+  "warmup_runs": 1,
+  "measured_runs": 5,
+  "runtime": "marin 0.0.0",
+  "hardware": {
+    "cpu": "AMD Ryzen 7 260 w/ Radeon 780M Graphics",
+    "logical_cores": 16,
+    "ram_bytes": 16023531520,
+    "backend": "cuda (NVIDIA GeForce RTX 5050 Laptop GPU)",
+    "os": "linux 7.2.4-arch1-2"
+  },
+  "load": {
+    "seconds": 2.565398456,
+    "weights_bytes": 3441149952,
+    "kv_reserved_bytes": 132349952,
+    "rss_growth_bytes": 241786880,
+    "gpu_growth_bytes": 3590324224
+  },
+  "results": {
+    "first_token_ms": {
+      "min": 1456.65995,
+      "median": 1466.47452,
+      "max": 1506.537805
+    },
+    "prefill_tokens_per_s": {
+      "min": 340.7063063055725,
+      "median": 350.027653893777,
+      "max": 352.3907050231349
+    },
+    "decode_tokens_per_s": {
+      "min": 49.149450426838406,
+      "median": 49.38131645726791,
+      "max": 49.571916287593375
+    },
+    "token_latency_p50_ms": {
+      "min": 20.110803,
+      "median": 20.257851,
+      "max": 20.352821
+    },
+    "token_latency_p95_ms": {
+      "min": 20.769969,
+      "median": 20.906156,
+      "max": 21.10523
+    },
+    "sampling_ms_per_token": {
+      "min": 3.7131219687500003,
+      "median": 3.749906515625,
+      "max": 3.757477296875
+    },
+    "gpu": {
+      "launches_per_token": 479.0,
+      "allocations_per_token": 283.0,
+      "download_bytes_per_token": 607744.0,
+      "download_ms_per_token": 0.11305106250000001,
+      "wait_for_gpu_ms_per_token": 37.003624625
+    },
+    "peak_rss_bytes": 839036928
+  },
+  "profile": {
+    "clock": "GPU clock",
+    "prefill": {
+      "tokens": 512,
+      "wall_ms": 1462.484525,
+      "stages": [
+        {
+          "stage": "embedding",
+          "total_ms": 0.049248,
+          "calls": 1,
+          "share_of_wall_percent": 0.0033674202467202175
+        },
+        {
+          "stage": "norm",
+          "total_ms": 4.958048,
+          "calls": 85,
+          "share_of_wall_percent": 0.33901541624859244
+        },
+        {
+          "stage": "qkv projections",
+          "total_ms": 208.83808000000002,
+          "calls": 28,
+          "share_of_wall_percent": 14.279677933686171
+        },
+        {
+          "stage": "rope",
+          "total_ms": 1.1215680000000001,
+          "calls": 28,
+          "share_of_wall_percent": 0.07668922172014095
+        },
+        {
+          "stage": "kv cache write",
+          "total_ms": 0.324192,
+          "calls": 28,
+          "share_of_wall_percent": 0.022167208914569535
+        },
+        {
+          "stage": "attention",
+          "total_ms": 201.599168,
+          "calls": 28,
+          "share_of_wall_percent": 13.784704354393082
+        },
+        {
+          "stage": "attention output proj",
+          "total_ms": 104.743712,
+          "calls": 28,
+          "share_of_wall_percent": 7.162038996617759
+        },
+        {
+          "stage": "mlp",
+          "total_ms": 928.364488,
+          "calls": 28,
+          "share_of_wall_percent": 63.47858538879241
+        },
+        {
+          "stage": "residual add",
+          "total_ms": 1.75872,
+          "calls": 56,
+          "share_of_wall_percent": 0.12025563142283506
+        },
+        {
+          "stage": "lm head",
+          "total_ms": 1.7117440000000002,
+          "calls": 1,
+          "share_of_wall_percent": 0.11704356324727606
+        }
+      ],
+      "outside_stages_ms": 9.015557000000172
+    },
+    "decode": {
+      "tokens": 63,
+      "wall_ms": 1108.189903,
+      "stages": [
+        {
+          "stage": "embedding",
+          "total_ms": 3.037536,
+          "calls": 63,
+          "share_of_wall_percent": 0.27409886985768717
+        },
+        {
+          "stage": "norm",
+          "total_ms": 48.230976,
+          "calls": 5355,
+          "share_of_wall_percent": 4.352230233232868
+        },
+        {
+          "stage": "qkv projections",
+          "total_ms": 116.303136,
+          "calls": 1764,
+          "share_of_wall_percent": 10.494874180422848
+        },
+        {
+          "stage": "rope",
+          "total_ms": 9.120576,
+          "calls": 1764,
+          "share_of_wall_percent": 0.8230156199140175
+        },
+        {
+          "stage": "kv cache write",
+          "total_ms": 7.5502720000000005,
+          "calls": 1764,
+          "share_of_wall_percent": 0.6813157185028061
+        },
+        {
+          "stage": "attention",
+          "total_ms": 282.537536,
+          "calls": 1764,
+          "share_of_wall_percent": 25.49540789310007
+        },
+        {
+          "stage": "attention output proj",
+          "total_ms": 53.76688,
+          "calls": 1764,
+          "share_of_wall_percent": 4.851774939876888
+        },
+        {
+          "stage": "mlp",
+          "total_ms": 418.764736,
+          "calls": 1764,
+          "share_of_wall_percent": 37.788174650062665
+        },
+        {
+          "stage": "residual add",
+          "total_ms": 12.4744,
+          "calls": 3528,
+          "share_of_wall_percent": 1.125655446438407
+        },
+        {
+          "stage": "lm head",
+          "total_ms": 108.737696,
+          "calls": 63,
+          "share_of_wall_percent": 9.812189743439669
+        }
+      ],
+      "outside_stages_ms": 47.66615900000011
+    }
+  }
+}

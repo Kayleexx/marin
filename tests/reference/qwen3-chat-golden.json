@@ -1,0 +1,266 @@
+{
+ "format": 1,
+ "meta": {
+  "eos_token": "<|im_end|>",
+  "special_tokens": {
+   "<|im_start|>": 151644,
+   "<|im_end|>": 151645,
+   "<|endoftext|>": 151643
+  }
+ },
+ "cases": [
+  {
+   "name": "single user turn",
+   "messages": [
+    {
+     "role": "user",
+     "content": "hi"
+    }
+   ],
+   "text": "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+   "ids": [
+    151644,
+    872,
+    198,
+    6023,
+    151645,
+    198,
+    151644,
+    77091,
+    198,
+    151667,
+    271,
+    151668,
+    271
+   ]
+  },
+  {
+   "name": "system and user",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Marin, a private assistant running on the user's own machine."
+    },
+    {
+     "role": "user",
+     "content": "who are you?"
+    }
+   ],
+   "text": "<|im_start|>system\nYou are Marin, a private assistant running on the user's own machine.<|im_end|>\n<|im_start|>user\nwho are you?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+   "ids": [
+    151644,
+    8948,
+    198,
+    2610,
+    525,
+    63377,
+    11,
+    264,
+    869,
+    17847,
+    4303,
+    389,
+    279,
+    1196,
+    594,
+    1828,
+    5662,
+    13,
+    151645,
+    198,
+    151644,
+    872,
+    198,
+    14623,
+    525,
+    498,
+    30,
+    151645,
+    198,
+    151644,
+    77091,
+    198,
+    151667,
+    271,
+    151668,
+    271
+   ]
+  },
+  {
+   "name": "multi turn",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Marin, a private assistant running on the user's own machine."
+    },
+    {
+     "role": "user",
+     "content": "explain what a mutex is briefly"
+    },
+    {
+     "role": "assistant",
+     "content": "A mutex lets only one thread use a resource at a time."
+    },
+    {
+     "role": "user",
+     "content": "2+2?"
+    }
+   ],
+   "text": "<|im_start|>system\nYou are Marin, a private assistant running on the user's own machine.<|im_end|>\n<|im_start|>user\nexplain what a mutex is briefly<|im_end|>\n<|im_start|>assistant\nA mutex lets only one thread use a resource at a time.<|im_end|>\n<|im_start|>user\n2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+   "ids": [
+    151644,
+    8948,
+    198,
+    2610,
+    525,
+    63377,
+    11,
+    264,
+    869,
+    17847,
+    4303,
+    389,
+    279,
+    1196,
+    594,
+    1828,
+    5662,
+    13,
+    151645,
+    198,
+    151644,
+    872,
+    198,
+    94344,
+    1128,
+    264,
+    30863,
+    374,
+    26753,
+    151645,
+    198,
+    151644,
+    77091,
+    198,
+    32,
+    30863,
+    15354,
+    1172,
+    825,
+    4516,
+    990,
+    264,
+    5101,
+    518,
+    264,
+    882,
+    13,
+    151645,
+    198,
+    151644,
+    872,
+    198,
+    17,
+    10,
+    17,
+    30,
+    151645,
+    198,
+    151644,
+    77091,
+    198,
+    151667,
+    271,
+    151668,
+    271
+   ]
+  },
+  {
+   "name": "reasoning in an earlier reply is dropped",
+   "messages": [
+    {
+     "role": "user",
+     "content": "q1"
+    },
+    {
+     "role": "assistant",
+     "content": "<think>\nsome plan\n</think>\n\nThe answer."
+    },
+    {
+     "role": "user",
+     "content": "q2"
+    }
+   ],
+   "text": "<|im_start|>user\nq1<|im_end|>\n<|im_start|>assistant\nThe answer.<|im_end|>\n<|im_start|>user\nq2<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+   "ids": [
+    151644,
+    872,
+    198,
+    80,
+    16,
+    151645,
+    198,
+    151644,
+    77091,
+    198,
+    785,
+    4226,
+    13,
+    151645,
+    198,
+    151644,
+    872,
+    198,
+    80,
+    17,
+    151645,
+    198,
+    151644,
+    77091,
+    198,
+    151667,
+    271,
+    151668,
+    271
+   ]
+  },
+  {
+   "name": "multiline and unicode",
+   "messages": [
+    {
+     "role": "user",
+     "content": "line one\nline two\n\nnaïve café ☕ 你好"
+    }
+   ],
+   "text": "<|im_start|>user\nline one\nline two\n\nnaïve café ☕ 你好<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+   "ids": [
+    151644,
+    872,
+    198,
+    1056,
+    825,
+    198,
+    1056,
+    1378,
+    271,
+    3376,
+    37572,
+    586,
+    51950,
+    25125,
+    243,
+    220,
+    108386,
+    151645,
+    198,
+    151644,
+    77091,
+    198,
+    151667,
+    271,
+    151668,
+    271
+   ]
+  }
+ ]
+}
