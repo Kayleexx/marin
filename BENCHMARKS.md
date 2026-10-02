@@ -5,7 +5,7 @@ Numbers for the current engine, so later changes can be judged against them. Not
 ## Setup
 
 - Model: Qwen3-1.7B-Base, bf16 weights, f32 math, greedy decoding, batch size 1
-- Machine: AMD Ryzen 7 260, 16 GB RAM, NVIDIA GeForce RTX 5050 Laptop GPU (8 GB)
+- Machine: AMD Ryzen 7 260, 16 GB RAM, NVIDIA GeForce RTX 5060 Laptop GPU (8 GB)
 - Prompt of 32, 128 or 512 tokens, then exactly 64 generated tokens
 - 1 warmup run, then the median of 5 runs
 
