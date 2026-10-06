@@ -23,6 +23,9 @@ pub struct RunRecord {
     pub guessed: usize,
     pub drafted: usize,
     pub accepted: usize,
+    /// Time spent choosing tokens on the CPU over the whole reply.
+    #[serde(default)]
+    pub sampling_ms: f64,
     pub guesser_ms: f64,
     pub rollback_ms: f64,
     /// Time between one generated token and the next; tokens settled by one check of guesses arrive together.
@@ -95,6 +98,7 @@ pub fn record(
         guessed: stats.guessed_passes,
         drafted: stats.drafted,
         accepted: stats.accepted,
+        sampling_ms: ms(outcome.sampling),
         guesser_ms: ms(stats.guesser),
         rollback_ms: ms(stats.rollback),
         gap_p50_ms: percentile(&gaps, 0.5),

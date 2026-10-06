@@ -91,6 +91,7 @@ fn cells(all: &[RunRecord], class: &str, mode: &str) -> Vec<String> {
     let joules = mean(runs.iter().filter_map(|r| r.joules_per_token));
     let watts = mean(runs.iter().filter_map(|r| r.power_w));
     let p95 = median(runs.iter().map(|r| r.gap_p95_ms).collect());
+    let p50 = median(runs.iter().map(|r| r.gap_p50_ms).collect());
     let gain = if mode == baseline {
         "-".to_string()
     } else {
@@ -116,9 +117,15 @@ fn cells(all: &[RunRecord], class: &str, mode: &str) -> Vec<String> {
             "{:.0}%",
             div(sum(&runs, |r| r.guessed as f64), passes) * 100.0
         ),
+        format!("{:.1}", p50.unwrap_or(0.0)),
         format!("{:.1}", p95.unwrap_or(0.0)),
-        format!("{:.1}", div(sum(&runs, |r| r.guesser_ms) * 1000.0, tokens)),
-        format!("{:.1}", div(sum(&runs, |r| r.rollback_ms) * 1000.0, tokens)),
+        format!(
+            "{:.3}",
+            div(
+                sum(&runs, |r| r.sampling_ms),
+                sum(&runs, |r| r.tokens as f64 + 1.0)
+            )
+        ),
         watts.map_or("-".into(), |w| format!("{w:.1}")),
         joules.map_or("-".into(), |j| format!("{j:.3}")),
         format!("{same}/{}", runs.len()),
@@ -129,11 +136,11 @@ fn cells(all: &[RunRecord], class: &str, mode: &str) -> Vec<String> {
 pub fn table(runs: &[RunRecord]) -> String {
     let head = [
         "scenario", "mode", "tok/s", "vs plain", "paired", "tok/pass", "guess ok", "guessed",
-        "gap p95", "guesser", "rollback", "W", "J/tok", "same",
+        "gap p50", "gap p95", "sample", "W", "J/tok", "same",
     ];
-    let widths = [16, 7, 6, 8, 11, 8, 8, 7, 8, 7, 8, 5, 6, 6];
+    let widths = [16, 11, 6, 8, 11, 8, 8, 7, 8, 8, 7, 5, 6, 6];
     let mut out = row(&head.map(String::from), &widths);
-    out.push_str("\n                                                                                 (ms)  (us/tok) (us/tok)");
+    out.push_str("\n                                                                                        (ms)     (ms)  (ms/tok)");
     let mut modes = unique(runs, |r| &r.mode);
     modes.sort_unstable();
     for class in unique(runs, |r| &r.class) {

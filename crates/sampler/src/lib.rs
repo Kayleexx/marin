@@ -47,6 +47,41 @@ fn best_index(values: &[f32]) -> Option<u32> {
     best.map(|(id, _)| id)
 }
 
+/// Largest `top_k` for which the best tokens are found in one scan with a short sorted list; a larger one sorts.
+const BOUNDED_TOP_K: usize = 128;
+
+/// With no top-k, a token whose logit is more than this many temperatures below the best has a weight under 2^-24
+/// (e^-18 is about 1.5e-8). The sum of the weights starts at the best token's 1.0, and adding anything under 2^-24 to
+/// a float that is at least 1.0 changes nothing, so such tokens leave the probability sum exactly as it was.
+const FAR: f32 = 18.0;
+
+/// Most likely first: higher logit, and the lower id among equal logits.
+fn ranked(mut tokens: Vec<(u32, f32)>) -> Vec<(u32, f32)> {
+    tokens.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    tokens
+}
+
+/// The `k` best tokens in the order `ranked` gives, from one scan. Ids arrive in increasing order, so a token that
+/// ties with one already held ranks behind it.
+fn best_k(logits: &[f32], k: usize) -> Vec<(u32, f32)> {
+    let mut best: Vec<(u32, f32)> = Vec::with_capacity(k.saturating_add(1));
+    for (id, &value) in (0..).zip(logits) {
+        if best.len() == k
+            && best
+                .last()
+                .is_none_or(|(_, worst)| value.total_cmp(worst).is_le())
+        {
+            continue;
+        }
+        let at = best.partition_point(|(_, held)| held.total_cmp(&value).is_ge());
+        if best.len() == k {
+            best.pop();
+        }
+        best.insert(at, (id, value));
+    }
+    best
+}
+
 #[derive(Debug)]
 pub struct Sampler {
     config: SamplerConfig,
@@ -104,16 +139,34 @@ impl Sampler {
             let best = best_index(candidates).ok_or(no_candidates)?;
             return Ok(vec![(best, 1.0)]);
         }
-        let mut ranked: Vec<(u32, f32)> = (0..).zip(candidates.iter().copied()).collect();
-        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        if self.config.top_k > 0 {
-            ranked.truncate(self.config.top_k);
+        let k = self.config.top_k;
+        if k > 0 && k <= BOUNDED_TOP_K {
+            return Ok(self.nucleus(&best_k(candidates, k)).0);
         }
-        Ok(self.nucleus(&ranked))
+        if k == 0 && self.config.top_p < 1.0 {
+            // Only tokens within `FAR * temperature` of the best can change the probability sum (see `FAR`), so only
+            // those are ranked; if the nucleus is not complete inside them, the whole vocabulary decides.
+            let top = candidates.iter().copied().fold(f32::MIN, f32::max);
+            let cutoff = top - FAR * self.config.temperature;
+            let near: Vec<(u32, f32)> = (0..)
+                .zip(candidates.iter().copied())
+                .filter(|(_, l)| *l >= cutoff)
+                .collect();
+            let (kept, complete) = self.nucleus(&ranked(near));
+            if complete {
+                return Ok(kept);
+            }
+        }
+        let mut all = ranked((0..).zip(candidates.iter().copied()).collect());
+        if k > 0 {
+            all.truncate(k);
+        }
+        Ok(self.nucleus(&all).0)
     }
 
-    /// Temperature-scaled probabilities of the top-p set, renormalized.
-    fn nucleus(&self, ranked: &[(u32, f32)]) -> Vec<(u32, f32)> {
+    /// Temperature-scaled probabilities of the top-p set, renormalized; and whether the set was complete, that is,
+    /// whether the probability mass reached `top_p` inside `ranked` rather than running out of it.
+    fn nucleus(&self, ranked: &[(u32, f32)]) -> (Vec<(u32, f32)>, bool) {
         let top = ranked.first().map_or(0.0, |(_, l)| *l);
         let weights: Vec<(u32, f32)> = ranked
             .iter()
@@ -122,16 +175,21 @@ impl Sampler {
         let total: f32 = weights.iter().map(|(_, w)| w).sum();
         let mut kept = Vec::new();
         let mut mass = 0.0;
+        let mut complete = false;
         for (id, w) in weights {
             let p = w / total;
             kept.push((id, p));
             mass += p;
             if mass >= self.config.top_p {
+                complete = true;
                 break;
             }
         }
         let kept_mass: f32 = kept.iter().map(|(_, p)| p).sum();
-        kept.iter().map(|(id, p)| (*id, p / kept_mass)).collect()
+        (
+            kept.iter().map(|(id, p)| (*id, p / kept_mass)).collect(),
+            complete,
+        )
     }
 
     /// splitmix64, mapped to [0, 1) using the top 24 bits.
