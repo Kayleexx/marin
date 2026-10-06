@@ -297,25 +297,31 @@ fn a_pause_after_each_token_is_recorded_and_kept_out_of_the_engine_timings()
         "--runs",
         "2",
         "--token-pause-ms",
-        "40",
+        "100",
         "--json",
         &path,
     ])?;
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(
-        text(&out.stdout).contains("40.0 ms pause after every token"),
+        text(&out.stdout).contains("100.0 ms pause after every token"),
         "{}",
         text(&out.stdout)
     );
     let json: Value = serde_json::from_str(&std::fs::read_to_string(&file)?)?;
-    assert_eq!(json["token_pause_ms"], 40.0);
+    assert_eq!(json["token_pause_ms"], 100.0);
+    // A leaked pause adds all 100 ms, while a debug build of this model already needs 16 to 20 ms for a first token,
+    // so the limit is half the pause.
     for run in json["runs"].as_array().ok_or("no runs")? {
         let gaps = run["token_gaps_ms"].as_array().ok_or("no gaps")?;
         assert!(
-            gaps.iter().all(|g| g.as_f64().is_some_and(|ms| ms < 20.0)),
+            gaps.iter().all(|g| g.as_f64().is_some_and(|ms| ms < 50.0)),
             "the pause leaked into the gaps: {gaps:?}"
         );
-        assert!(run["first_token_ms"].as_f64().is_some_and(|ms| ms < 20.0));
+        assert!(
+            run["first_token_ms"].as_f64().is_some_and(|ms| ms < 50.0),
+            "the pause leaked into the first token: {}",
+            run["first_token_ms"]
+        );
     }
     assert!(
         json["results"]["gpu_energy_per_token_joules"].is_null(),
