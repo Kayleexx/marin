@@ -128,10 +128,6 @@ impl<T> Menu<T> {
             })
             .collect()
     }
-
-    pub fn match_count(&self) -> usize {
-        self.visible().len()
-    }
 }
 
 #[cfg(test)]
@@ -159,7 +155,7 @@ mod tests {
     #[test]
     fn empty_query_lists_everything_in_order() {
         let m = menu();
-        assert_eq!(m.match_count(), 4);
+        assert_eq!(m.visible().len(), 4);
         assert_eq!(m.current(), Some(&1));
     }
 
@@ -187,7 +183,7 @@ mod tests {
         assert_eq!(m.current(), Some(&4));
         let mut m = menu();
         type_query(&mut m, "zzz");
-        assert_eq!(m.match_count(), 0);
+        assert_eq!(m.visible().len(), 0);
         assert_eq!(m.current(), None);
     }
 

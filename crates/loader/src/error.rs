@@ -24,8 +24,6 @@ pub enum LoaderError {
     UnsupportedDtype { name: String, found: String },
     #[error("tensor {0} is not in the weights")]
     UnknownTensor(String),
-    #[error("{path}: weight index lists tensor {tensor} in a shard that does not contain it")]
-    IndexMismatch { path: PathBuf, tensor: String },
     #[error("tensor {0} appears in more than one shard")]
     DuplicateTensor(String),
     #[error("tokenizer {path}: {reason}")]
