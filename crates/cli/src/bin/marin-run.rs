@@ -200,6 +200,30 @@ fn run(cli: Cli, style: &Style) -> Result<ExitCode, CliError> {
             &interrupt()?,
         )
         .map(|()| ExitCode::SUCCESS),
+        Some(Command::Turns {
+            model_dir,
+            backend,
+            history,
+            reply_tokens,
+            rounds,
+            ctx,
+            no_energy,
+            quant,
+        }) => cli::turns::run_turns(
+            &model_dir,
+            backend_choice(backend),
+            &cli::turns::Options {
+                history,
+                reply_tokens,
+                rounds,
+                ctx,
+                energy: !no_energy,
+                quant: quant.scheme()?,
+            },
+            style,
+            &interrupt()?,
+        )
+        .map(|()| ExitCode::SUCCESS),
         Some(Command::SpecBench {
             model_dir,
             prompts,

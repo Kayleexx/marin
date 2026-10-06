@@ -74,11 +74,11 @@ fn memory(s: &Session) {
 fn kv(s: &Session) {
     println!(
         "  window       {} tokens",
-        units::count(SequenceCache::capacity(&s.kv) as u64)
+        units::count(SequenceCache::capacity(s.kv()) as u64)
     );
     println!(
         "  last reply   used {} positions",
-        units::count(s.kv.used() as u64)
+        units::count(s.kv().used() as u64)
     );
 }
 
@@ -97,15 +97,11 @@ fn profile(s: &mut Session) -> Result<(), CliError> {
         println!("nothing generated yet");
         return Ok(());
     }
-    let room = s.last_prompt.len() < SequenceCache::capacity(&s.kv);
+    let room = s.last_prompt.len() < SequenceCache::capacity(s.kv());
     let vocab = s.loaded.dir.tokenizer.vocab_size();
-    let report = bench::profile_report(
-        &s.loaded.model,
-        &mut s.kv,
-        &s.last_prompt,
-        if room { 2 } else { 1 },
-        vocab,
-    )?;
+    let prompt = s.last_prompt.clone();
+    let (engine, kv) = s.engine_and_kv();
+    let report = bench::profile_report(engine, kv, &prompt, if room { 2 } else { 1 }, vocab)?;
     for line in report.lines() {
         println!("  {line}");
     }

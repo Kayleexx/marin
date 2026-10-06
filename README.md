@@ -37,6 +37,7 @@ marin-run bench MODEL --profile           # speed and where the time goes
 marin-run bench MODEL --sample-gpu        # also GPU load, power and clock
 marin-run trace MODEL                     # time every stage of every layer
 marin-run compare before.json after.json  # did it change, or is it noise?
+marin-run turns MODEL                     # first token of a chat turn, cache kept vs rebuilt
 marin-run probe                           # what the GPU itself can do
 ```
 

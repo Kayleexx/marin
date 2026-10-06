@@ -4,11 +4,17 @@ mod generate;
 #[cfg(test)]
 mod generate_tests;
 mod ngram;
+mod reuse;
+#[cfg(test)]
+mod reuse_tests;
 mod speculate;
 #[cfg(test)]
 mod speculate_tests;
 
-pub use generate::{GenerateError, GenerateParams, Outcome, StopReason, generate};
+pub use generate::{
+    GenerateError, GenerateParams, Outcome, StopReason, generate, generate_reusing,
+};
+pub use reuse::Retained;
 pub use speculate::{Speculation, SpeculationStats};
 
 use kv::KvCache;

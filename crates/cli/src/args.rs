@@ -222,6 +222,31 @@ pub enum Command {
         #[command(flatten)]
         quant: QuantArgs,
     },
+    /// Time the first token of a chat turn built on the cached conversation, against reading it all again
+    Turns {
+        /// Chat model folder, such as Qwen3-1.7B
+        model_dir: PathBuf,
+        /// Where the math runs
+        #[arg(long, value_enum, default_value_t = BackendArg::Auto)]
+        backend: BackendArg,
+        /// Conversation lengths in tokens before the new message (0 = a short first turn)
+        #[arg(long, value_delimiter = ',', default_value = "0,2048,4096")]
+        history: Vec<usize>,
+        /// Most tokens in each reply (greedy)
+        #[arg(long, default_value_t = 32)]
+        reply_tokens: usize,
+        /// Rounds timed (one more runs first and is thrown away)
+        #[arg(long, default_value_t = 3)]
+        rounds: usize,
+        /// Context window: the longest conversation plus two replies
+        #[arg(long, default_value_t = 5120)]
+        ctx: usize,
+        /// Do not read the GPU's power
+        #[arg(long)]
+        no_energy: bool,
+        #[command(flatten)]
+        quant: QuantArgs,
+    },
     /// Experiment: decode real replies with and without guessing tokens ahead, interleaved, and compare (GPU only)
     SpecBench {
         /// Chat model folder, such as Qwen3-1.7B

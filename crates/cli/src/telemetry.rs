@@ -22,8 +22,18 @@ pub fn rate(tokens: usize, duration: Duration) -> Option<f64> {
 
 /// Where the time of one reply went: first token, prompt pass, decode, per-token latency, sampling.
 pub fn request_lines(o: &Outcome) -> Vec<String> {
+    let prompt = if o.reused > 0 {
+        format!(
+            "prompt          {} tokens   ({} kept from the last reply, {} read)",
+            o.prompt_tokens,
+            o.reused,
+            o.prompt_tokens.saturating_sub(o.reused)
+        )
+    } else {
+        format!("prompt          {} tokens", o.prompt_tokens)
+    };
     let mut lines = vec![
-        format!("prompt          {} tokens", o.prompt_tokens),
+        prompt,
         format!("generated       {} tokens", o.generated),
         format!(
             "first token     {}   (prompt pass {} + first sample)",
@@ -31,7 +41,7 @@ pub fn request_lines(o: &Outcome) -> Vec<String> {
             time(o.prompt_forward)
         ),
     ];
-    if let Some(tps) = rate(o.prompt_tokens, o.prompt_forward) {
+    if let Some(tps) = rate(o.prompt_tokens.saturating_sub(o.reused), o.prompt_forward) {
         lines.push(format!("prefill         {tps:.1} tok/s"));
     }
     let decoded = o.generated.saturating_sub(1);
@@ -79,7 +89,7 @@ pub fn resource_lines(s: &Session) -> Vec<String> {
         s.loaded.model.config().layers,
         s.loaded.model.config().kv_heads,
         s.loaded.model.config().head_dim,
-        s.kv.used(),
+        s.kv().used(),
     )
     .and_then(|b| u64::try_from(b).ok())
     .unwrap_or(0);
@@ -89,8 +99,8 @@ pub fn resource_lines(s: &Session) -> Vec<String> {
             "kv cache        {} reserved · {} in use ({} of {} positions)",
             units::bytes(fp.kv),
             units::bytes(used),
-            units::count(s.kv.used() as u64),
-            units::count(SequenceCache::capacity(&s.kv) as u64)
+            units::count(s.kv().used() as u64),
+            units::count(SequenceCache::capacity(s.kv()) as u64)
         ),
     ];
     if let Some(m) = process_memory() {
@@ -118,6 +128,7 @@ mod tests {
     fn outcome() -> Outcome {
         Outcome {
             prompt_tokens: 100,
+            reused: 0,
             generated: 11,
             stop: StopReason::MaxTokens,
             prefill: Duration::from_millis(520),

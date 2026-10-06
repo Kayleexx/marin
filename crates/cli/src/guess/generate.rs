@@ -114,6 +114,8 @@ pub fn run(
     let modes = modes(options.max_tokens);
     let [(_, first), _] = modes;
     let mut session = Session::new(loaded, first, *style)?;
+    // Each mode answers the same prompt read from scratch, as recorded transcripts always were.
+    session.reuse = false;
     let mut chat = Chat::new(&session);
     let mut runs = Vec::new();
     'prompts: for (index, prompt) in prompts.iter().enumerate() {

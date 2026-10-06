@@ -36,6 +36,7 @@ Method:
 | Faster top-k / top-p sampler | 3.7 ms to 0.2 ms per token | plain decode 1 to 5% slower, guessing up to 17% faster |
 | One-token attention | load more rows at once | 4k chat +13% (bf16), +17% (int8) |
 | Prefill attention | fix the load pattern | 2048-token TTFT -35%, a real 3.6k prompt -40% |
+| Keeping the cache between chat turns | read only what is new in each turn | not yet measured on the GPU (section 10) |
 
 The rows that did not simply get faster all have the same cause, the power cap, explained next.
 
@@ -317,6 +318,29 @@ A real 3,563-token prompt through the normal path (old, new, new, old): bf16 fir
 - Tests added to `attention.rs`: more than 8 tokens (the only way to reach this kernel), awkward history lengths, head sizes 10, 13, 18 and 30. A wrong weight, a dropped tail loop and the vector load for every head size each make them fail. Removing the barrier does not, which is why the race check was run.
 - Still the largest stage: attention is 56% of the 2048-token pass (1,581 of 2,843 ms). Candidates, not measured: the two query heads that share keys read the same rows in separate blocks, and no key or value row is reused across tokens, which a tile-based kernel would fix.
 
+### 10. Keeping the cache between chat turns
+
+**Problem.** `generate` emptied the KV cache at the start of every reply, so each chat turn read the whole conversation again: system message, every earlier question and answer, then the new question. A turn after 4,000 tokens of history paid a 4,000-token prefill (about 7 s on this laptop, section 9) to read one new sentence.
+
+**Change.** The chat session keeps a record of the exact token ids the cache holds. The next prompt keeps the cached positions it shares with that record from the first token on (the longest common prefix, compared id by id), forgets the rest, and reads only what follows. Nothing else changes: no paging, the same contiguous f32 cache, the same kernels.
+
+- At least one prompt token is always read again, because the pass needs a token to produce the logits of the first reply token.
+- Qwen3's template drops the empty reasoning block from earlier answers, so a turn keeps everything up to the last `<|im_start|>assistant` marker and reads the last answer, the new question and the framing again (74 to 88 tokens in the run below).
+- The record is written only when a reply returns normally (stop token, length limit, full context, or cancelled). It then holds the prompt and every generated token that was fed back: all of them after a stop token, all but the last otherwise, never the stop token. A reply that fails leaves it empty, so whatever the failed pass wrote is never trusted.
+- Anything else that writes to the cache (`/profile`, the next-token view, `spec-bench`) goes through `Session::engine_and_kv`, which forgets the record. A new model, tokenizer or `--ctx` makes a new session and so an empty record. `bench`, `spec-bench` and `guess generate` still read every prompt from scratch.
+
+**Correctness.** On the CPU every reply equals a full replay of the same conversation (greedy and chat sampling, 6-turn chats, a new chat that shares only the system message, dropped old turns when the window fills, a reply cut off mid-way, tools that touch the cache). Breaking the prefix match, the truncation, the record after a guess rollback or a failure, or the forgetting in the session tools makes the tests fail (13 deliberate breaks, all caught). On the GPU, a reused position was computed by a pass of a different length than a full replay would use, so logits can differ in rounding, the same as for guessing ahead; the benchmark below reports whether the replies matched.
+
+**Functional run** (CPU, the 2-layer test model in `tests/fixtures/tiny-chat`, `turns --backend cpu --history 0,700 --reply-tokens 16 --rounds 2 --ctx 1024`). This checks the tool and the token counts only; the times say nothing about the real model:
+
+| turn | prompt | kept | read | TTFT keep / replay | replies |
+|---|---|---|---|---|---|
+| short first turn, then a short second | 202 | 128 | 74 | 1.8 / 4.2 ms | same |
+| same, first message edited | 210 | 91 (system message) | 119 | 2.9 / 4.5 ms | same |
+| after 940 tokens of history | 1022 | 934 | 88 | 7.5 / 68.2 ms | same |
+
+**Not yet measured:** TTFT, VRAM and energy for Qwen3-1.7B on the GPU at short, 2k and 4k history, bf16 and int8. The command below measures exactly that, with full replay of the same turn interleaved as the baseline. The cache is reserved in full at load whatever it holds, so keeping it between turns should not change idle or peak VRAM; the run reports the device's peak to check.
+
 ## Tried and not adopted
 
 - **16-bit KV cache**: fails `verify` at the existing tolerances (see section 1).
@@ -343,6 +367,8 @@ marin-run pass-cost MODEL --text LONG_TEXT_FILE --contexts 128,1024,2048,4096 --
 marin-run bench MODEL --backend cuda --prompt-tokens 2048 --tokens 2 --runs 3 --warmup 1 --profile --sample-gpu --ctx 4096
 # a real long prompt
 marin-run MODEL -p LONG_PROMPT --temp 0 --ctx 5120 --max-tokens 8 --metrics
+# chat turns built on the cached conversation vs read from scratch (add --quantize int8 for int8)
+marin-run turns MODEL --history 0,2048,4096 --reply-tokens 32 --rounds 3 --ctx 5120
 # plain vs guessing on real replies (PROMPT_FOLDER holds one folder per scenario, one text file per prompt)
 marin-run spec-bench MODEL --sampling chat --max-tokens 120 --prompts PROMPT_FOLDER --rounds 1
 # accuracy of quantized weights

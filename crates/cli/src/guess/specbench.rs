@@ -124,9 +124,9 @@ pub fn run(
             .map_err(|e| CliError::BadOption(format!("{}/{}: {e}", file.class, file.name)))?;
         encoded.push(ids);
     }
-    let engine = &session.loaded.model;
-    let stop = engine.config().eos_tokens.clone();
     let usable_vocab = session.loaded.dir.tokenizer.vocab_size();
+    let (engine, kv) = session.engine_and_kv();
+    let stop = engine.config().eos_tokens.clone();
     let cancel = interrupt.cancel_flag();
     let mut records: Vec<RunRecord> = Vec::new();
     let total = options.rounds.saturating_add(1);
@@ -151,7 +151,7 @@ pub fn run(
                 let mut tokens = Vec::new();
                 let outcome = generate(
                     engine,
-                    &mut session.kv,
+                    kv,
                     &mut Sampler::new(mode.sampling)?,
                     ids,
                     &params,

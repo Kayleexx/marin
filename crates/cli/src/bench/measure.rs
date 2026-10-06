@@ -250,6 +250,7 @@ mod tests {
         Run {
             outcome: Outcome {
                 prompt_tokens: 8,
+                reused: 0,
                 generated,
                 stop: StopReason::MaxTokens,
                 prefill: Duration::ZERO,

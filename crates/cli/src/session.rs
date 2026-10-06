@@ -1,9 +1,10 @@
 use std::io::{IsTerminal, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use model::EngineCache;
+use model::{Engine, EngineCache};
 use runtime::{
-    CausalLm, GenerateParams, Outcome, SequenceCache, Speculation, StopReason, generate,
+    CausalLm, GenerateParams, Outcome, Retained, SequenceCache, Speculation, StopReason,
+    generate_reusing,
 };
 use sampler::{Sampler, SamplerConfig};
 
@@ -36,7 +37,13 @@ impl Settings {
 
 pub struct Session {
     pub loaded: Loaded,
-    pub kv: EngineCache,
+    /// Private, so every change to it outside a reply goes through `engine_and_kv`, which forgets `retained`.
+    kv: EngineCache,
+    /// The token ids `kv` holds after the last reply. Lives and dies with `loaded`: a new model, tokenizer or context
+    /// size means a new `Session`.
+    retained: Retained,
+    /// Keep the cached positions that the next prompt starts with exactly (on unless a tool needs full replays).
+    pub reuse: bool,
     pub settings: Settings,
     pub ctx: usize,
     pub last: Option<Outcome>,
@@ -74,6 +81,8 @@ impl Session {
         Ok(Self {
             loaded,
             kv,
+            retained: Retained::default(),
+            reuse: true,
             settings,
             ctx,
             last: None,
@@ -84,6 +93,21 @@ impl Session {
             speculate: false,
             sanitize: std::io::stdout().is_terminal(),
         })
+    }
+
+    pub fn kv(&self) -> &EngineCache {
+        &self.kv
+    }
+
+    /// The model and its cache, for a caller that changes the cache; the next reply then reads its whole prompt again.
+    pub fn engine_and_kv(&mut self) -> (&Engine, &mut EngineCache) {
+        self.retained.forget();
+        (&self.loaded.model, &mut self.kv)
+    }
+
+    /// The token ids whose keys and values the cache holds for the next reply to build on.
+    pub fn retained(&self) -> &Retained {
+        &self.retained
     }
 
     pub fn encode(&self, text: &str) -> Result<Vec<u32>, CliError> {
@@ -135,10 +159,14 @@ impl Session {
         let mut last_char = None;
         let mut text = String::new();
         let mut generated = Vec::new();
+        if !self.reuse {
+            self.retained.forget();
+        }
         interrupt.generating();
-        let result = generate(
+        let result = generate_reusing(
             &self.loaded.model,
             &mut self.kv,
+            &mut self.retained,
             &mut sampler,
             &prompt,
             &params,
@@ -207,6 +235,7 @@ impl Session {
 
     /// The model's logits for the token after `prompt` (the cache is rebuilt from scratch).
     pub fn next_logits(&mut self, prompt: &[u32]) -> Result<Vec<f32>, CliError> {
+        self.retained.forget();
         self.kv.clear();
         let logits = self
             .loaded

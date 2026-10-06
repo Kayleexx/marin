@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use sampler::{Sampler, SamplerError};
 use thiserror::Error;
 
+use crate::reuse::Retained;
 use crate::speculate::{Drafter, Speculation, SpeculationStats};
 use crate::{CausalLm, RollbackError, SequenceCache};
 
@@ -45,6 +46,8 @@ pub enum StopReason {
 #[derive(Debug, Clone)]
 pub struct Outcome {
     pub prompt_tokens: usize,
+    /// Leading prompt tokens whose keys and values were kept from the run before instead of being read again.
+    pub reused: usize,
     pub generated: usize,
     pub stop: StopReason,
     /// Time until the first token was ready: prompt processing plus the first sample.
@@ -86,6 +89,37 @@ pub fn generate<M: CausalLm>(
     prompt: &[u32],
     params: &GenerateParams,
     cancel: &AtomicBool,
+    on_token: impl FnMut(u32),
+) -> Result<Outcome, GenerateError<M::Error>> {
+    let mut nothing = Retained::default();
+    generate_reusing(
+        model,
+        kv,
+        &mut nothing,
+        sampler,
+        prompt,
+        params,
+        cancel,
+        on_token,
+    )
+}
+
+/// `generate` that keeps the cached positions whose ids, recorded in `retained`, exactly match the start of `prompt`
+/// and reads only the rest. Afterwards `retained` holds the ids the cache holds: the prompt and the generated tokens
+/// already fed back (every one but a final token that was sampled and not fed, and never the stop token). An error
+/// leaves it empty. The tokens are the ones a fresh run gives, up to the rounding of passes of different lengths.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "generate's arguments plus the record of the cache"
+)]
+pub fn generate_reusing<M: CausalLm>(
+    model: &M,
+    kv: &mut M::Cache,
+    retained: &mut Retained,
+    sampler: &mut Sampler,
+    prompt: &[u32],
+    params: &GenerateParams,
+    cancel: &AtomicBool,
     mut on_token: impl FnMut(u32),
 ) -> Result<Outcome, GenerateError<M::Error>> {
     if prompt.is_empty() {
@@ -103,9 +137,18 @@ pub fn generate<M: CausalLm>(
     {
         return Err(GenerateError::BadSpeculation);
     }
-    kv.clear();
+    let keep = retained.reusable(prompt, kv.used());
+    // Taken now, so an early return leaves the record empty and the cache untrusted.
+    let mut ids = retained.take();
+    if keep == 0 {
+        kv.clear();
+    } else {
+        kv.truncate(keep)?;
+    }
+    ids.truncate(keep);
     let mut outcome = Outcome {
         prompt_tokens: prompt.len(),
+        reused: keep,
         generated: 0,
         stop: StopReason::MaxTokens,
         prefill: Duration::ZERO,
@@ -116,11 +159,14 @@ pub fn generate<M: CausalLm>(
         speculation: SpeculationStats::default(),
     };
     if params.max_tokens == 0 {
+        retained.set(ids);
         return Ok(outcome);
     }
+    let fresh = prompt.get(keep..).unwrap_or(prompt);
     let start = Instant::now();
-    let logits = model.forward(prompt, kv).map_err(GenerateError::Model)?;
+    let logits = model.forward(fresh, kv).map_err(GenerateError::Model)?;
     outcome.prompt_forward = start.elapsed();
+    ids.extend_from_slice(fresh);
     let mut drafter = params
         .speculation
         .filter(|_| model.max_rows() >= 2)
@@ -191,6 +237,7 @@ pub fn generate<M: CausalLm>(
         if rows.count > 1 {
             let rolling_back = Instant::now();
             kv.truncate(valid_base.saturating_add(consumed))?;
+            ids.truncate(valid_base.saturating_add(consumed));
             let spent = rolling_back.elapsed();
             outcome.speculation.rollback = outcome.speculation.rollback.saturating_add(spent);
             outcome.speculation.accepted = outcome.speculation.accepted.saturating_add(consumed);
@@ -210,6 +257,7 @@ pub fn generate<M: CausalLm>(
         outcome.speculation.passes = outcome.speculation.passes.saturating_add(1);
         if draft.is_empty() {
             let logits = model.forward(&[last], kv).map_err(GenerateError::Model)?;
+            ids.push(last);
             rows = Rows {
                 values: logits,
                 count: 1,
@@ -220,6 +268,7 @@ pub fn generate<M: CausalLm>(
             fed.extend(&draft);
             let before = kv.used();
             let values = model.forward_rows(&fed, kv).map_err(GenerateError::Model)?;
+            ids.extend_from_slice(&fed);
             rows = Rows {
                 values,
                 count: fed.len(),
@@ -233,5 +282,8 @@ pub fn generate<M: CausalLm>(
     let total = start.elapsed().saturating_sub(consumer);
     outcome.prefill = first_token_at.unwrap_or(total);
     outcome.decode = total.saturating_sub(outcome.prefill);
+    if ids.len() == kv.used() {
+        retained.set(ids);
+    }
     Ok(outcome)
 }

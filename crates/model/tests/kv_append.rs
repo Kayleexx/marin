@@ -1,6 +1,6 @@
 //! Tokens appended to a cache must land at the right positions: processing a sequence in one
-//! pass, in chunks, or one token at a time must give the same logits, and rebuilding the cache
-//! from scratch (what marin does for every chat turn) must too.
+//! pass, in chunks, or one token at a time must give the same logits, and so must appending to a
+//! kept cache (what a chat turn does) or rebuilding it from scratch.
 
 use std::error::Error;
 use std::path::Path;

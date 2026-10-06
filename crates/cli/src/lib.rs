@@ -25,6 +25,7 @@ pub mod style;
 pub mod telemetry;
 pub mod term;
 pub mod trace;
+pub mod turns;
 pub mod units;
 pub mod verify;
 
