@@ -6,7 +6,7 @@ mod vt;
 
 use std::path::{Path, PathBuf};
 
-use pty::{Res, Sandbox, have, on_terminal};
+use pty::{Check, Res, Sandbox, Step, have, on_terminal};
 use unicode_width::UnicodeWidthStr;
 
 fn fixture(name: &str) -> PathBuf {
@@ -29,18 +29,58 @@ fn chat_command() -> String {
     )
 }
 
+/// A check that the emulated screen satisfies `want`; if not, the failure message is the screen as it was.
+fn screen_is(
+    cols: usize,
+    want: impl Fn(&[String]) -> bool,
+) -> impl Fn(&[u8], &[u8]) -> Result<(), String> {
+    move |all, _| {
+        let lines = screen_after(all, all.len(), cols).lines();
+        if want(&lines) {
+            Ok(())
+        } else {
+            Err(lines.join("\n"))
+        }
+    }
+}
+
+fn seen<'a>(keys: &'a str, what: &'a str, check: Check<'a>) -> Step<'a> {
+    Step {
+        keys,
+        until: Some((what, check)),
+    }
+}
+
+fn some_row(lines: &[String], matches: impl Fn(&String) -> bool) -> bool {
+    lines.iter().any(matches)
+}
+
 /// A chat turn followed by the palette, the inspect panel and both closed again; returns the screen after each.
+/// Every step waits for the screen it needs instead of for a fixed time, so a slow machine only makes it slower.
 fn chat_session(cols: usize, color: bool, sandbox: &Sandbox) -> Res<Vec<vt::Screen>> {
+    // The first prompt sits to the right of the portrait, so it does not start its row.
+    let prompt = screen_is(cols, |l| some_row(l, |r| r.contains("you >")));
+    let reply_started = screen_is(cols, |l| some_row(l, |r| r.starts_with("marin > ")));
+    let reply_done = screen_is(cols, |l| {
+        l.iter()
+            .position(|r| r.starts_with("stopped at"))
+            .and_then(|stop| l.get(stop.saturating_add(1)..))
+            .is_some_and(|after| some_row(after, |r| r.starts_with("you >")))
+    });
+    let palette = screen_is(cols, |l| some_row(l, |r| r.contains("Inspect last reply")));
+    let palette_gone = screen_is(cols, |l| !some_row(l, |r| r.contains("Inspect last reply")));
+    let panel = screen_is(cols, |l| some_row(l, |r| r.contains("[Reply]")));
+    let panel_gone = screen_is(cols, |l| !some_row(l, |r| r.contains("[Reply]")));
     let steps = [
-        ("", 1500),
-        ("hello there\r", 100),
-        ("", 1800),
-        ("/", 300),
-        ("\x1b", 300),
-        ("\x0f", 300),
-        ("\x1b", 300),
+        seen("", "the first prompt", &prompt),
+        seen("hello there\r", "the reply to start", &reply_started),
+        seen("", "the reply to finish", &reply_done),
+        seen("/", "the palette to open", &palette),
+        seen("\x1b", "the palette to close", &palette_gone),
+        seen("\x0f", "the inspect panel to open", &panel),
+        seen("\x1b", "the inspect panel to close", &panel_gone),
     ];
-    let (bytes, marks) = on_terminal(&chat_command(), cols, sandbox, color, &steps)?;
+    let (bytes, marks, _) = on_terminal(&chat_command(), (cols, 40), sandbox, color, &steps)?;
     Ok(marks
         .iter()
         .map(|m| screen_after(&bytes, *m, cols))

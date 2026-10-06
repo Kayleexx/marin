@@ -283,43 +283,66 @@ fn piped_bench_prints_no_progress_line() -> io::Result<()> {
     Ok(())
 }
 
+/// The slowest first token or gap of the runs in a saved result, in milliseconds.
+fn slowest_timing(json: &Value) -> Result<f64, Box<dyn std::error::Error>> {
+    let mut slowest = 0.0_f64;
+    for run in json["runs"].as_array().ok_or("no runs")? {
+        let first = run["first_token_ms"].as_f64().ok_or("no first token")?;
+        slowest = slowest.max(first);
+        for gap in run["token_gaps_ms"].as_array().ok_or("no gaps")? {
+            slowest = slowest.max(gap.as_f64().ok_or("gap is not a number")?);
+        }
+    }
+    Ok(slowest)
+}
+
 #[test]
 fn a_pause_after_each_token_is_recorded_and_kept_out_of_the_engine_timings()
 -> Result<(), Box<dyn std::error::Error>> {
     let sandbox = Sandbox::new("bench-pause")?;
+    let args = ["--prompt-tokens", "8", "--tokens", "6", "--runs", "2"];
+    let baseline_file = sandbox.0.join("baseline.json");
+    let baseline_path = baseline_file.display().to_string();
+    let out = bench(&[&args[..], &["--json", &baseline_path]].concat())?;
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let baseline: Value = serde_json::from_str(&std::fs::read_to_string(&baseline_file)?)?;
+
+    // The pause belongs to the consumer, so it must stay out of every timing. How long an ordinary first token or
+    // gap takes depends on the machine and its load, so this run measures that first (the slowest one without a
+    // pause) and pauses for ten times as long, capped at the largest pause allowed. A leaked pause then adds ten
+    // times the machine's own timing to a gap (with the exclusion broken on purpose and a 100 ms pause the gaps
+    // read about 103 ms), and half the pause is the limit: five times the machine's own timing. Normal timings
+    // are far below it and a leak is far above it, whatever the machine is doing.
+    let pause = (slowest_timing(&baseline)? * 10.0)
+        .ceil()
+        .clamp(100.0, 1000.0);
+    let limit = pause / 2.0;
     let file = sandbox.0.join("pause.json");
     let path = file.display().to_string();
-    let out = bench(&[
-        "--prompt-tokens",
-        "8",
-        "--tokens",
-        "6",
-        "--runs",
-        "2",
-        "--token-pause-ms",
-        "100",
-        "--json",
-        &path,
-    ])?;
+    let out = bench(
+        &[
+            &args[..],
+            &["--token-pause-ms", &pause.to_string(), "--json", &path],
+        ]
+        .concat(),
+    )?;
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(
-        text(&out.stdout).contains("100.0 ms pause after every token"),
+        text(&out.stdout).contains(&format!("{pause:.1} ms pause after every token")),
         "{}",
         text(&out.stdout)
     );
     let json: Value = serde_json::from_str(&std::fs::read_to_string(&file)?)?;
-    assert_eq!(json["token_pause_ms"], 100.0);
-    // A leaked pause adds all 100 ms, while a debug build of this model already needs 16 to 20 ms for a first token,
-    // so the limit is half the pause.
+    assert_eq!(json["token_pause_ms"], pause);
     for run in json["runs"].as_array().ok_or("no runs")? {
         let gaps = run["token_gaps_ms"].as_array().ok_or("no gaps")?;
         assert!(
-            gaps.iter().all(|g| g.as_f64().is_some_and(|ms| ms < 50.0)),
-            "the pause leaked into the gaps: {gaps:?}"
+            gaps.iter().all(|g| g.as_f64().is_some_and(|ms| ms < limit)),
+            "the pause leaked into the gaps (limit {limit} ms): {gaps:?}"
         );
         assert!(
-            run["first_token_ms"].as_f64().is_some_and(|ms| ms < 50.0),
-            "the pause leaked into the first token: {}",
+            run["first_token_ms"].as_f64().is_some_and(|ms| ms < limit),
+            "the pause leaked into the first token (limit {limit} ms): {}",
             run["first_token_ms"]
         );
     }

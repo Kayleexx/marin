@@ -16,7 +16,7 @@ const SAMPLE: &str = "# Mutexes in Rust\n\nA **mutex** (short for *mutual exclus
 
 fn view(file: &str, cols: usize, color: bool, sandbox: &Sandbox) -> Res<(Vec<u8>, vt::Screen)> {
     let command = format!("{} show {file}", env!("CARGO_BIN_EXE_marin"));
-    let (bytes, _) = on_terminal(&command, cols, sandbox, color, &[])?;
+    let (bytes, _, _) = on_terminal(&command, (cols, 40), sandbox, color, &[])?;
     let mut screen = vt::Screen::new(cols);
     screen.feed(&bytes);
     Ok((bytes, screen))
@@ -107,7 +107,7 @@ fn streamed(
         env!("CARGO_BIN_EXE_marin"),
         fifo.display()
     );
-    let mut child = spawn_script(&line, cols, sandbox, color)?;
+    let mut child = spawn_script(&line, (cols, 40), sandbox, color)?;
     let (drawn, reader) = collect(&mut child)?;
     let pieces = chunks.to_vec();
     let writer = std::thread::spawn(move || -> io::Result<Instant> {
