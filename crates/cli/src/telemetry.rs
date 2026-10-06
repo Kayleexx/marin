@@ -49,6 +49,17 @@ pub fn request_lines(o: &Outcome) -> Vec<String> {
             time(s.max)
         ));
     }
+    let guess = &o.speculation;
+    if guess.guessed_passes > 0 {
+        lines.push(format!(
+            "guessing        {} of {} passes checked guesses, {} of {} guessed tokens right ({:.2} tokens per pass)",
+            guess.guessed_passes,
+            guess.passes,
+            guess.accepted,
+            guess.drafted,
+            decoded as f64 / guess.passes.max(1) as f64
+        ));
+    }
     let total = o.prefill.saturating_add(o.decode);
     if !total.is_zero() {
         lines.push(format!(
@@ -114,7 +125,25 @@ mod tests {
             prompt_forward: Duration::from_millis(500),
             sampling: Duration::from_millis(36),
             gaps: vec![Duration::from_millis(20); 10],
+            speculation: Default::default(),
         }
+    }
+
+    #[test]
+    fn guessing_is_reported_only_when_it_happened() {
+        assert!(!request_lines(&outcome()).join("\n").contains("guessing"));
+        let mut guessed = outcome();
+        guessed.speculation.passes = 4;
+        guessed.speculation.guessed_passes = 2;
+        guessed.speculation.drafted = 14;
+        guessed.speculation.accepted = 6;
+        let text = request_lines(&guessed).join("\n");
+        assert!(
+            text.contains(
+                "2 of 4 passes checked guesses, 6 of 14 guessed tokens right (2.50 tokens per pass)"
+            ),
+            "{text}"
+        );
     }
 
     #[test]

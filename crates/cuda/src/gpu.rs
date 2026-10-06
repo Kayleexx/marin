@@ -1,29 +1,50 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use cudarc::driver::sys::CUdevice_attribute;
 use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchArgs, LaunchConfig};
-use cudarc::nvrtc::compile_ptx;
+use cudarc::nvrtc::{CompileOptions, compile_ptx_with_opts};
 
 use crate::CudaError;
 use crate::counters::Counters;
 
-const KERNELS: &str = include_str!("kernels.cu");
+const KERNELS: &str = concat!(
+    include_str!("kernels.cu"),
+    include_str!("mma.cu"),
+    include_str!("quant.cu")
+);
 
 pub(crate) struct Kernels {
     pub embed: CudaFunction,
     pub rms_norm: CudaFunction,
+    pub rms_norm_to: CudaFunction,
     pub matmul: CudaFunction,
     pub rope: CudaFunction,
     pub attention: CudaFunction,
     pub silu_mul: CudaFunction,
     pub add: CudaFunction,
+    pub attention_partial: CudaFunction,
+    /// The few-token attention built for 8, 16 and 32 rows.
+    pub attention_multi_partial: [CudaFunction; 3],
+    pub attention_merge: CudaFunction,
+    pub matmul_mma: CudaFunction,
+    pub matmul_x2: CudaFunction,
+    pub matmul_x3: CudaFunction,
+    pub embed_q8: CudaFunction,
+    pub matvec_q8: CudaFunction,
+    pub matvec_q4: CudaFunction,
+    pub matmul_q8: CudaFunction,
+    pub matmul_q4: CudaFunction,
+    pub matmul_q8_mma: CudaFunction,
+    pub matmul_q4_mma: CudaFunction,
 }
 
 pub struct Gpu {
-    ctx: Arc<CudaContext>,
+    pub(crate) ctx: Arc<CudaContext>,
     pub(crate) stream: Arc<CudaStream>,
     pub(crate) kernels: Kernels,
     pub(crate) counters: Counters,
+    pub(crate) sm_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +60,12 @@ pub struct DeviceMatrix {
     pub(crate) rows: usize,
     pub(crate) cols: usize,
     pub(crate) data: CudaSlice<u16>,
+}
+
+/// Device memory for the token ids of one pass, so the embedding does not allocate.
+pub struct Tokens {
+    pub(crate) data: CudaSlice<u32>,
+    pub(crate) capacity: usize,
 }
 
 /// A flat f32 array in GPU memory.
@@ -88,21 +115,48 @@ impl Gpu {
         libraries_present()?;
         let ctx = CudaContext::new(0)?;
         let stream = ctx.default_stream();
-        let module = ctx.load_module(compile_ptx(KERNELS)?)?;
+        // bf16 tensor-core instructions need at least compute_80; the driver compiles the PTX for the actual GPU.
+        let options = CompileOptions {
+            arch: Some("compute_80"),
+            ..CompileOptions::default()
+        };
+        let module = ctx.load_module(compile_ptx_with_opts(KERNELS, options)?)?;
         let kernels = Kernels {
             embed: module.load_function("embed")?,
             rms_norm: module.load_function("rms_norm")?,
+            rms_norm_to: module.load_function("rms_norm_to")?,
             matmul: module.load_function("matmul_bf16")?,
             rope: module.load_function("rope")?,
             attention: module.load_function("attention")?,
             silu_mul: module.load_function("silu_mul")?,
             add: module.load_function("add_in_place")?,
+            attention_partial: module.load_function("attention_partial")?,
+            attention_multi_partial: [
+                module.load_function("attention_multi_partial_8")?,
+                module.load_function("attention_multi_partial_16")?,
+                module.load_function("attention_multi_partial_32")?,
+            ],
+            attention_merge: module.load_function("attention_merge")?,
+            matmul_mma: module.load_function("matmul_bf16_mma")?,
+            matmul_x2: module.load_function("matmul_bf16_x2")?,
+            matmul_x3: module.load_function("matmul_bf16_x3")?,
+            embed_q8: module.load_function("embed_q8")?,
+            matvec_q8: module.load_function("matvec_q8")?,
+            matvec_q4: module.load_function("matvec_q4")?,
+            matmul_q8: module.load_function("matmul_q8")?,
+            matmul_q4: module.load_function("matmul_q4")?,
+            matmul_q8_mma: module.load_function("matmul_q8_mma")?,
+            matmul_q4_mma: module.load_function("matmul_q4_mma")?,
         };
+        let sm_count = ctx
+            .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)?
+            .max(1);
         Ok(Self {
             ctx,
             stream,
             kernels,
             counters: Counters::default(),
+            sm_count: usize::try_from(sm_count).unwrap_or(1),
         })
     }
 
@@ -202,31 +256,33 @@ impl Gpu {
         })
     }
 
-    /// Copies `len` values starting at `start` into a new buffer without leaving the GPU.
-    pub fn copy_range(
+    /// Copies `dst.len()` values starting at `start` into `dst` without leaving the GPU.
+    pub fn copy_range_into(
         &self,
         buffer: &Buffer,
         start: usize,
-        len: usize,
-    ) -> Result<Buffer, CudaError> {
+        dst: &mut Buffer,
+    ) -> Result<(), CudaError> {
         let end = start
-            .checked_add(len)
+            .checked_add(dst.len)
             .filter(|end| *end <= buffer.len)
             .ok_or(CudaError::Shape {
                 what: "copy range",
                 expected: buffer.len,
-                actual: start.saturating_add(len),
+                actual: start.saturating_add(dst.len),
             })?;
-        let mut copy = self.zeros(len)?;
         self.stream
-            .memcpy_dtod(&buffer.data.slice(start..end), &mut copy.data)?;
-        Ok(copy)
+            .memcpy_dtod(&buffer.data.slice(start..end), &mut dst.data)?;
+        Ok(())
     }
 
-    pub fn duplicate(&self, buffer: &Buffer) -> Result<Buffer, CudaError> {
-        let mut copy = self.zeros(buffer.len)?;
-        self.stream.memcpy_dtod(&buffer.data, &mut copy.data)?;
-        Ok(copy)
+    /// Room for `capacity` token ids on the GPU, reused by every `embed`.
+    pub fn tokens(&self, capacity: usize) -> Result<Tokens, CudaError> {
+        self.counters.allocation();
+        Ok(Tokens {
+            data: self.stream.alloc_zeros::<u32>(capacity)?,
+            capacity,
+        })
     }
 
     pub(crate) fn launch<'a>(
@@ -238,7 +294,7 @@ impl Gpu {
         self.counters.launch();
         let mut args = self.stream.launch_builder(function);
         push_args(&mut args);
-        // SAFETY: only the wrappers in `ops` call this. Each one verifies that every buffer
+        // SAFETY: only the wrappers in `ops` and `probe` call this. Each one verifies that every buffer
         // holds at least the number of elements its kernel indexes for the given sizes, that
         // scalar arguments fit in u32, and that the kernel's argument list matches `push_args`.
         unsafe { args.launch(config) }?;

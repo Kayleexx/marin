@@ -8,7 +8,8 @@ use crate::ModelError;
 pub(super) struct GpuProbe<'a> {
     gpu: &'a Gpu,
     times: Option<&'a mut StageTimes>,
-    marks: Vec<(Stage, Mark, Mark)>,
+    layer: Option<usize>,
+    marks: Vec<(Option<usize>, Stage, Mark, Mark)>,
 }
 
 impl<'a> GpuProbe<'a> {
@@ -16,8 +17,14 @@ impl<'a> GpuProbe<'a> {
         Self {
             gpu,
             times,
+            layer: None,
             marks: Vec::new(),
         }
+    }
+
+    /// Tags the stages timed from now on with `layer`.
+    pub(super) fn layer(&mut self, layer: Option<usize>) {
+        self.layer = layer;
     }
 
     pub(super) fn stage<T>(
@@ -31,15 +38,17 @@ impl<'a> GpuProbe<'a> {
         let before = self.gpu.mark()?;
         let out = work()?;
         let after = self.gpu.mark()?;
-        self.marks.push((stage, before, after));
+        self.marks.push((self.layer, stage, before, after));
         Ok(out)
     }
 
     pub(super) fn finish(self) -> Result<(), ModelError> {
         if let Some(times) = self.times {
-            for (stage, before, after) in &self.marks {
+            for (layer, stage, before, after) in &self.marks {
+                times.set_layer(*layer);
                 times.add(*stage, after.since(before)?);
             }
+            times.set_layer(None);
         }
         Ok(())
     }

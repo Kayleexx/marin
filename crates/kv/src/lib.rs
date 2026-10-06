@@ -14,6 +14,8 @@ pub enum KvError {
     },
     #[error("layer {layer} is out of range (cache has {layers})")]
     Layer { layer: usize, layers: usize },
+    #[error("cannot roll back to {len} positions: only {held} are held")]
+    RollbackPastEnd { len: usize, held: usize },
     #[error("cache size arithmetic overflowed")]
     Overflow,
 }
@@ -143,6 +145,18 @@ impl KvCache {
         Ok(())
     }
 
+    /// Forgets every position from `len` on, so the next write lands there.
+    pub fn truncate(&mut self, len: usize) -> Result<(), KvError> {
+        if len > self.len {
+            return Err(KvError::RollbackPastEnd {
+                len,
+                held: self.len,
+            });
+        }
+        self.len = len;
+        Ok(())
+    }
+
     fn tokens_in(&self, data: &[f32], what: &'static str) -> Result<usize, KvError> {
         let shape = KvError::Shape {
             what,
@@ -202,6 +216,22 @@ mod tests {
         let mut kv = cache();
         kv.advance(3).unwrap();
         assert!(kv.advance(1).is_err());
+    }
+
+    #[test]
+    fn truncate_forgets_the_tail_and_the_next_write_replaces_it() {
+        let mut kv = cache();
+        kv.write(0, &[1.0, 2.0, 3.0, 4.0], &[0.0; 4]).unwrap();
+        kv.advance(2).unwrap();
+        kv.truncate(1).unwrap();
+        assert_eq!(kv.len(), 1);
+        kv.write(0, &[7.0, 8.0], &[0.0; 2]).unwrap();
+        kv.advance(1).unwrap();
+        assert_eq!(kv.read(0, 2).unwrap().0, [1.0, 2.0, 7.0, 8.0]);
+        assert_eq!(
+            kv.truncate(3),
+            Err(KvError::RollbackPastEnd { len: 3, held: 2 })
+        );
     }
 
     #[test]

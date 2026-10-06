@@ -2,7 +2,9 @@ use std::io::{IsTerminal, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use model::EngineCache;
-use runtime::{CausalLm, GenerateParams, Outcome, SequenceCache, StopReason, generate};
+use runtime::{
+    CausalLm, GenerateParams, Outcome, SequenceCache, Speculation, StopReason, generate,
+};
 use sampler::{Sampler, SamplerConfig};
 
 use crate::CliError;
@@ -44,6 +46,8 @@ pub struct Session {
     /// KV positions in use right after the most recent reply.
     pub kv_used: usize,
     pub style: Style,
+    /// Guess ahead by copying earlier text (GPU only, otherwise ignored). Off unless a tool turns it on.
+    pub speculate: bool,
     /// Replace control characters in replies, so model output cannot drive the terminal.
     sanitize: bool,
 }
@@ -77,6 +81,7 @@ impl Session {
             last_prompt: Vec::new(),
             kv_used: 0,
             style,
+            speculate: false,
             sanitize: std::io::stdout().is_terminal(),
         })
     }
@@ -121,6 +126,7 @@ impl Session {
             max_tokens: self.settings.max_tokens,
             stop_tokens: self.loaded.model.config().eos_tokens.clone(),
             usable_vocab: tokenizer.vocab_size(),
+            speculation: self.speculate.then_some(Speculation::MEASURED),
         };
         let sanitize = self.sanitize;
         let mut stream = tokenizer.stream();

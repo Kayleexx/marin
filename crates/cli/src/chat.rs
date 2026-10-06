@@ -48,12 +48,15 @@ impl Chat {
         result
     }
 
-    fn answer(
-        &mut self,
-        session: &mut Session,
-        interrupt: &Interrupt,
-        out: &mut impl Write,
-    ) -> Result<Reply, CliError> {
+    /// The tokens of the prompt that asking `text` would send, without asking.
+    pub fn prompt_tokens(&mut self, session: &Session, text: &str) -> Result<Vec<u32>, CliError> {
+        self.conversation.push_user(text);
+        let ids = self.render(session);
+        self.conversation.pop();
+        ids
+    }
+
+    fn render(&mut self, session: &Session) -> Result<Vec<u32>, CliError> {
         let reserved = session.settings.max_tokens.min(session.ctx / 2);
         let budget = session.ctx.saturating_sub(reserved);
         let tokenizer = &session.loaded.dir.tokenizer;
@@ -68,7 +71,16 @@ impl Chat {
             FitError::Chat(e) => CliError::BadOption(e.to_string()),
             FitError::Count(e) => CliError::Loader(e),
         })?;
-        let ids = tokenizer.encode(&prompt)?;
+        Ok(tokenizer.encode(&prompt)?)
+    }
+
+    fn answer(
+        &mut self,
+        session: &mut Session,
+        interrupt: &Interrupt,
+        out: &mut impl Write,
+    ) -> Result<Reply, CliError> {
+        let ids = self.render(session)?;
         session.complete_tokens(ids, interrupt, out)
     }
 }

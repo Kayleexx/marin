@@ -12,6 +12,8 @@ pub enum TensorError {
     Overflow { what: &'static str },
     #[error("{what}: contains NaN or infinity")]
     NotFinite { what: &'static str },
+    #[error("quantization: {0}")]
+    Quantization(String),
     #[error("{what}: head size {size} must be even and non-zero")]
     OddHeadSize { what: &'static str, size: usize },
 }

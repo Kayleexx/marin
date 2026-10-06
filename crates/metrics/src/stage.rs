@@ -45,14 +45,49 @@ impl Stage {
     }
 }
 
+/// One timed stage call: which layer it ran in (`None` for embedding, final norm and LM head).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceEntry {
+    pub layer: Option<usize>,
+    pub stage: Stage,
+    pub time: Duration,
+}
+
 /// Time and call count per stage, summed over every pass that was recorded.
+/// A traced one also keeps every call in order; use that for a single pass, since it grows with each call.
 #[derive(Debug, Clone, Default)]
 pub struct StageTimes {
     entries: Vec<(Stage, Duration, u64)>,
+    trace: Option<Vec<TraceEntry>>,
+    layer: Option<usize>,
 }
 
 impl StageTimes {
+    pub fn traced() -> Self {
+        Self {
+            trace: Some(Vec::new()),
+            ..Self::default()
+        }
+    }
+
+    /// Tags the stages recorded from now on with `layer`.
+    pub fn set_layer(&mut self, layer: Option<usize>) {
+        self.layer = layer;
+    }
+
+    /// Every call in the order it was recorded; empty unless built with `traced`.
+    pub fn trace(&self) -> &[TraceEntry] {
+        self.trace.as_deref().unwrap_or(&[])
+    }
+
     pub fn add(&mut self, stage: Stage, time: Duration) {
+        if let Some(trace) = &mut self.trace {
+            trace.push(TraceEntry {
+                layer: self.layer,
+                stage,
+                time,
+            });
+        }
         match self.entries.iter_mut().find(|(s, _, _)| *s == stage) {
             Some((_, total, calls)) => {
                 *total = total.saturating_add(time);
@@ -113,6 +148,13 @@ impl<'a> Probe<'a> {
         }
     }
 
+    /// Tags the stages timed from now on with `layer`; no-op when off.
+    pub fn layer(&mut self, layer: Option<usize>) {
+        if let Some(times) = &mut self.0 {
+            times.set_layer(layer);
+        }
+    }
+
     pub fn record(&mut self, stage: Stage, time: Duration) {
         if let Some(times) = &mut self.0 {
             times.add(stage, time);
@@ -146,6 +188,43 @@ mod tests {
         on.time(Stage::Rope, || std::thread::sleep(Duration::from_millis(2)));
         assert!(times.total(Stage::Rope) >= Duration::from_millis(2));
         assert_eq!(times.calls(Stage::Rope), 1);
+    }
+
+    #[test]
+    fn a_traced_run_keeps_each_call_with_its_layer() {
+        let mut times = StageTimes::traced();
+        let mut probe = Probe::on(&mut times);
+        probe.record(Stage::Embedding, Duration::from_millis(1));
+        probe.layer(Some(0));
+        probe.record(Stage::Norm, Duration::from_millis(2));
+        probe.record(Stage::Norm, Duration::from_millis(3));
+        probe.layer(Some(1));
+        probe.record(Stage::Mlp, Duration::from_millis(4));
+        probe.layer(None);
+        probe.record(Stage::LmHead, Duration::from_millis(5));
+        let layers: Vec<_> = times.trace().iter().map(|e| (e.layer, e.stage)).collect();
+        assert_eq!(
+            layers,
+            [
+                (None, Stage::Embedding),
+                (Some(0), Stage::Norm),
+                (Some(0), Stage::Norm),
+                (Some(1), Stage::Mlp),
+                (None, Stage::LmHead),
+            ]
+        );
+        assert_eq!(times.total(Stage::Norm), Duration::from_millis(5));
+    }
+
+    #[test]
+    fn an_untraced_run_keeps_no_calls_and_ignores_layers() {
+        let mut times = StageTimes::default();
+        times.set_layer(Some(3));
+        times.add(Stage::Rope, Duration::from_millis(1));
+        assert!(times.trace().is_empty());
+        let mut off = Probe::off();
+        off.layer(Some(1));
+        off.record(Stage::Rope, Duration::from_millis(1));
     }
 
     #[test]

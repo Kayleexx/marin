@@ -1,13 +1,18 @@
 use cudarc::driver::CudaSlice;
 
+use crate::attention::split_scratch;
 use crate::{Buffer, CudaError, Gpu};
 
 /// Per-layer key/value cache in GPU memory, laid out as `[position][kv_head][head_dim]`.
 pub struct DeviceKv {
     pub(crate) keys: Vec<CudaSlice<f32>>,
     pub(crate) values: Vec<CudaSlice<f32>>,
+    pub(crate) heads: usize,
     pub(crate) kv_heads: usize,
     pub(crate) head_dim: usize,
+    /// Partial results of the split decode attention, sized once for the longest context so a pass never allocates.
+    pub(crate) partial_acc: Buffer,
+    pub(crate) partial_ml: Buffer,
     pub(crate) capacity: usize,
     pub(crate) len: usize,
 }
@@ -16,8 +21,7 @@ impl DeviceKv {
     pub fn new(
         gpu: &Gpu,
         layers: usize,
-        kv_heads: usize,
-        head_dim: usize,
+        (heads, kv_heads, head_dim): (usize, usize, usize),
         capacity: usize,
     ) -> Result<Self, CudaError> {
         let overflow = CudaError::Overflow { what: "kv cache" };
@@ -31,11 +35,15 @@ impl DeviceKv {
             keys.push(gpu.stream.alloc_zeros::<f32>(floats)?);
             values.push(gpu.stream.alloc_zeros::<f32>(floats)?);
         }
+        let (partial_acc, partial_ml) = split_scratch(gpu, (heads, kv_heads, head_dim), capacity)?;
         Ok(Self {
             keys,
             values,
+            heads,
             kv_heads,
             head_dim,
+            partial_acc,
+            partial_ml,
             capacity,
             len: 0,
         })
@@ -55,6 +63,19 @@ impl DeviceKv {
 
     pub fn clear(&mut self) {
         self.len = 0;
+    }
+
+    /// Forgets every position from `len` on, so the next write lands there.
+    pub fn truncate(&mut self, len: usize) -> Result<(), CudaError> {
+        if len > self.len {
+            return Err(CudaError::Shape {
+                what: "kv rollback",
+                expected: self.len,
+                actual: len,
+            });
+        }
+        self.len = len;
+        Ok(())
     }
 
     pub fn advance(&mut self, tokens: usize) -> Result<(), CudaError> {

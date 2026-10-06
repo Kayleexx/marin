@@ -1,5 +1,5 @@
 use loader::{Dtype, Weights};
-use tensor::{Matrix, bf16_to_f32};
+use tensor::{Matrix, QuantScheme, bf16_to_f32};
 
 use super::config::Qwen3Config;
 use crate::ModelError;
@@ -17,6 +17,16 @@ pub(crate) trait Store {
         cols: usize,
         bits: Vec<u16>,
     ) -> Result<Self::Matrix, ModelError>;
+    /// A layer's projection matrix, which a store that quantizes quantizes as asked; `matrix` is the embedding and
+    /// the output head, which it treats separately.
+    fn projection(
+        &mut self,
+        rows: usize,
+        cols: usize,
+        bits: Vec<u16>,
+    ) -> Result<Self::Matrix, ModelError> {
+        self.matrix(rows, cols, bits)
+    }
     fn vector(&mut self, values: Vec<f32>) -> Result<Self::Vector, ModelError>;
 }
 
@@ -154,6 +164,16 @@ impl<S: Store, F: FnMut(u64, u64)> Reader<'_, S, F> {
         self.store.matrix(rows, cols, bits)
     }
 
+    fn projection(
+        &mut self,
+        name: &str,
+        rows: usize,
+        cols: usize,
+    ) -> Result<S::Matrix, ModelError> {
+        let bits = self.read(name)?;
+        self.store.projection(rows, cols, bits)
+    }
+
     fn vector(&mut self, name: &str) -> Result<S::Vector, ModelError> {
         let bits = self.read(name)?;
         self.store
@@ -161,9 +181,53 @@ impl<S: Store, F: FnMut(u64, u64)> Reader<'_, S, F> {
     }
 }
 
-/// Bytes of the tensors this model actually loads (shards may hold extras such as an unused `lm_head`).
-pub(crate) fn loaded_bytes(weights: &Weights, cfg: &Qwen3Config) -> Result<u64, ModelError> {
-    validate(weights, &expected_tensors(cfg)?)
+/// Bytes of the tensors this model actually loads (shards may hold extras such as an unused `lm_head`). With a
+/// quantization scheme the projection matrices count as they are stored once quantized.
+pub(crate) fn loaded_bytes(
+    weights: &Weights,
+    cfg: &Qwen3Config,
+    quant: Option<QuantScheme>,
+) -> Result<u64, ModelError> {
+    let read = validate(weights, &expected_tensors(cfg)?)?;
+    let Some(scheme) = quant else {
+        return Ok(read);
+    };
+    let (h, i) = (cfg.hidden_size, cfg.intermediate_size);
+    let (q, kv) = (cfg.q_dim()?, cfg.kv_dim()?);
+    let (mut original, mut quantized) = (0_u64, 0_u64);
+    for (rows, cols) in [(q, h), (kv, h), (kv, h), (h, q), (i, h), (i, h), (h, i)] {
+        if cols.checked_rem(scheme.group) != Some(0) {
+            return Err(ModelError::Unsupported(format!(
+                "a projection matrix has {cols} columns, which is not a multiple of the quantization group size {}",
+                scheme.group
+            )));
+        }
+        let (Some(bf16), Some(packed)) = (
+            rows.checked_mul(cols)
+                .and_then(|n| n.checked_mul(2))
+                .and_then(|n| u64::try_from(n).ok()),
+            scheme.matrix_bytes(rows, cols),
+        ) else {
+            return Err(ModelError::InvalidConfig("weight size overflows".into()));
+        };
+        original = original.saturating_add(bf16);
+        quantized = quantized.saturating_add(packed);
+    }
+    let layers = u64::try_from(cfg.layers).unwrap_or(u64::MAX);
+    let mut saved = original.saturating_sub(quantized).saturating_mul(layers);
+    let table = scheme.table();
+    let tables = if cfg.tie_embeddings { 1 } else { 2 };
+    let (Some(bf16), Some(packed)) = (
+        cfg.vocab_size
+            .checked_mul(h)
+            .and_then(|n| n.checked_mul(2))
+            .and_then(|n| u64::try_from(n).ok()),
+        table.matrix_bytes(cfg.vocab_size, h),
+    ) else {
+        return Err(ModelError::InvalidConfig("weight size overflows".into()));
+    };
+    saved = saved.saturating_add(bf16.saturating_sub(packed).saturating_mul(tables));
+    Ok(read.saturating_sub(saved))
 }
 
 impl<M, V> Qwen3Weights<M, V> {
@@ -190,16 +254,16 @@ impl<M, V> Qwen3Weights<M, V> {
             let name = |suffix: &str| format!("model.layers.{n}.{suffix}");
             layers.push(LayerWeights {
                 input_norm: read.vector(&name("input_layernorm.weight"))?,
-                q_proj: read.matrix(&name("self_attn.q_proj.weight"), q, h)?,
-                k_proj: read.matrix(&name("self_attn.k_proj.weight"), kv, h)?,
-                v_proj: read.matrix(&name("self_attn.v_proj.weight"), kv, h)?,
-                o_proj: read.matrix(&name("self_attn.o_proj.weight"), h, q)?,
+                q_proj: read.projection(&name("self_attn.q_proj.weight"), q, h)?,
+                k_proj: read.projection(&name("self_attn.k_proj.weight"), kv, h)?,
+                v_proj: read.projection(&name("self_attn.v_proj.weight"), kv, h)?,
+                o_proj: read.projection(&name("self_attn.o_proj.weight"), h, q)?,
                 q_norm: read.vector(&name("self_attn.q_norm.weight"))?,
                 k_norm: read.vector(&name("self_attn.k_norm.weight"))?,
                 post_norm: read.vector(&name("post_attention_layernorm.weight"))?,
-                gate_proj: read.matrix(&name("mlp.gate_proj.weight"), i, h)?,
-                up_proj: read.matrix(&name("mlp.up_proj.weight"), i, h)?,
-                down_proj: read.matrix(&name("mlp.down_proj.weight"), h, i)?,
+                gate_proj: read.projection(&name("mlp.gate_proj.weight"), i, h)?,
+                up_proj: read.projection(&name("mlp.up_proj.weight"), i, h)?,
+                down_proj: read.projection(&name("mlp.down_proj.weight"), h, i)?,
             });
         }
         let final_norm = read.vector("model.norm.weight")?;

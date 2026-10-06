@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use loader::ModelDir;
-use model::{Backend, BackendChoice, Engine, Qwen3Config};
+use model::{Backend, BackendChoice, Engine, QuantScheme, Qwen3Config};
 
 use crate::CliError;
 use crate::memory::{Footprint, footprint, resolve_ctx};
@@ -37,13 +37,19 @@ pub fn load(
     ctx: Option<usize>,
     default_ctx: usize,
     backend: BackendChoice,
+    quant: Option<QuantScheme>,
     style: &Style,
     chrome: bool,
 ) -> Result<Loaded, CliError> {
+    if quant.is_some() && backend == BackendChoice::Cpu {
+        return Err(CliError::BadOption(
+            "--quantize needs the GPU, but --backend cpu was given".into(),
+        ));
+    }
     let dir = ModelDir::open(path)?;
     let config = Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref())?;
     let ctx = resolve_ctx(&config, ctx, default_ctx)?;
-    let footprint = footprint(&dir, &config, ctx)?;
+    let footprint = footprint(&dir, &config, ctx, quant)?;
     let selected = Backend::select(backend, footprint.weights.saturating_add(footprint.kv))?;
     if matches!(selected.backend, Backend::Cpu) {
         footprint.ensure_fits()?;
@@ -66,7 +72,7 @@ pub fn load(
         Backend::Cpu => None,
     };
     let mut progress = Progress::new(*style, chrome);
-    let model = Engine::load(&dir, selected.backend, |done, total| {
+    let model = Engine::load(&dir, selected.backend, quant, |done, total| {
         progress.update(done, total)
     })?;
     progress.finish();

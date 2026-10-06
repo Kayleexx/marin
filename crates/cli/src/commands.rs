@@ -1,6 +1,7 @@
 use runtime::SequenceCache;
 
 use crate::CliError;
+use crate::bench;
 use crate::inspect::describe;
 use crate::memory::available_bytes;
 use crate::session::Session;
@@ -16,6 +17,7 @@ Type text and the model continues it. Each prompt starts fresh.
   /kv                   the context window (the model's short-term memory)
   /backend              where the math runs
   /metrics              speed of the last reply
+  /profile              where the time went for the last prompt, stage by stage
   /tokens TEXT          show how TEXT is split into tokens
   /top TEXT             show the 5 likeliest next tokens after TEXT
   /set NAME VALUE       change temp, top_k, top_p, max_tokens or seed (random)
@@ -36,10 +38,12 @@ pub fn run(session: &mut Session, line: &str) -> Result<Next, CliError> {
         "/memory" => memory(session),
         "/kv" => kv(session),
         "/backend" => println!(
-            "{} (bf16 weights, f32 math)",
-            session.loaded.model.backend_name()
+            "{} ({})",
+            session.loaded.model.backend_name(),
+            model::PRECISION
         ),
         "/metrics" => metrics(session),
+        "/profile" => profile(session)?,
         "/tokens" => tokens(session, rest)?,
         "/top" => top(session, rest)?,
         "/set" => set(session, rest)?,
@@ -86,6 +90,26 @@ fn metrics(s: &Session) {
     for line in telemetry::request_lines(o) {
         println!("  {line}");
     }
+}
+
+fn profile(s: &mut Session) -> Result<(), CliError> {
+    if s.last_prompt.is_empty() {
+        println!("nothing generated yet");
+        return Ok(());
+    }
+    let room = s.last_prompt.len() < SequenceCache::capacity(&s.kv);
+    let vocab = s.loaded.dir.tokenizer.vocab_size();
+    let report = bench::profile_report(
+        &s.loaded.model,
+        &mut s.kv,
+        &s.last_prompt,
+        if room { 2 } else { 1 },
+        vocab,
+    )?;
+    for line in report.lines() {
+        println!("  {line}");
+    }
+    Ok(())
 }
 
 fn tokens(s: &Session, text: &str) -> Result<(), CliError> {

@@ -18,6 +18,7 @@ fn session(seed: u64) -> Result<Session> {
         Some(512),
         512,
         BackendChoice::Cpu,
+        None,
         &Style::plain(),
         false,
     )?;

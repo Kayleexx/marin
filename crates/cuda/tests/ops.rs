@@ -1,45 +1,14 @@
-//! Compares every GPU kernel with the CPU implementation (or a plain f64 reference).
+//! Compares the GPU kernels (other than attention) with the CPU implementation.
 //! Without a GPU these tests skip; set MARIN_REQUIRE_CUDA=1 to make that a failure.
 
-use cuda::{CudaError, DeviceKv, Gpu};
+mod common;
+
+use common::{assert_close, gpu, values};
+use cuda::{Buffer, CudaError, Gpu};
 use tensor::Matrix;
-
-fn gpu() -> Result<Option<Gpu>, String> {
-    match Gpu::new() {
-        Ok(gpu) => Ok(Some(gpu)),
-        Err(CudaError::Unavailable(why)) if std::env::var_os("MARIN_REQUIRE_CUDA").is_none() => {
-            eprintln!("skipping GPU test: {why}");
-            Ok(None)
-        }
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-/// Deterministic values in [-1, 1).
-fn values(count: usize, seed: u64) -> Vec<f32> {
-    let mut state = seed;
-    (0..count)
-        .map(|_| {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            ((state >> 40) as f32 / 16_777_216.0) * 2.0 - 1.0
-        })
-        .collect()
-}
 
 fn bf16_bits(values: &[f32]) -> Vec<u16> {
     values.iter().map(|v| (v.to_bits() >> 16) as u16).collect()
-}
-
-fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
-    assert_eq!(actual.len(), expected.len());
-    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (a - e).abs() <= tolerance * (1.0 + e.abs()),
-            "element {i}: gpu {a} vs cpu {e}"
-        );
-    }
 }
 
 #[test]
@@ -50,10 +19,6 @@ fn buffers_round_trip_and_ranges_are_checked() {
     assert_eq!(gpu.download(&buffer).unwrap(), data);
     assert_eq!(gpu.download_range(&buffer, 2, 3).unwrap(), data[2..5]);
     assert!(gpu.download_range(&buffer, 8, 3).is_err());
-    assert_eq!(
-        gpu.download(&gpu.duplicate(&buffer).unwrap()).unwrap(),
-        data
-    );
     assert!(gpu.upload_matrix(2, 3, &[0; 5]).is_err());
 }
 
@@ -66,6 +31,12 @@ fn matmul_matches_the_cpu_for_aligned_and_odd_shapes_and_token_tiles() {
         (9, 13, 11),
         (33, 24, 17),
         (4, 256, 3),
+        // from 16 tokens with cols a multiple of 16 the tensor-core kernel runs; these cross its 64-row and 64-token tiles
+        (9, 16, 16),
+        (70, 48, 65),
+        (130, 256, 129),
+        (64, 2048, 64),
+        (33, 24, 40),
     ] {
         let weights = bf16_bits(&values(rows * cols, 7));
         let x = values(tokens * cols, 9);
@@ -80,6 +51,95 @@ fn matmul_matches_the_cpu_for_aligned_and_odd_shapes_and_token_tiles() {
         gpu.matmul(&device, &input, tokens, &mut out).unwrap();
         assert_close(&gpu.download(&out).unwrap(), &expected, 1e-4);
     }
+}
+
+/// Matrices of the given row counts over the same input, run as separate matmuls and as one grouped launch.
+fn grouped_case(gpu: &Gpu, rows: &[usize], cols: usize, tokens: usize) -> Result<(), CudaError> {
+    let x = gpu.upload(&values(tokens.saturating_mul(cols), 51))?;
+    let mut ws = Vec::new();
+    for (i, r) in (60..).zip(rows) {
+        let bits = bf16_bits(&values(r.saturating_mul(cols), i));
+        ws.push(gpu.upload_matrix(*r, cols, &bits)?);
+    }
+    let zeros = |gpu: &Gpu| -> Result<Vec<Buffer>, CudaError> {
+        rows.iter()
+            .map(|r| gpu.zeros(tokens.saturating_mul(*r)))
+            .collect()
+    };
+    let mut separate = zeros(gpu)?;
+    for (w, out) in ws.iter().zip(&mut separate) {
+        gpu.matmul(w, &x, tokens, out)?;
+    }
+    let mut grouped = zeros(gpu)?;
+    match (&ws[..], &mut grouped[..]) {
+        ([w0, w1], [y0, y1]) => gpu.matmul_pair((w0, w1), &x, tokens, (y0, y1))?,
+        ([w0, w1, w2], [y0, y1, y2]) => {
+            gpu.matmul_triple((w0, w1, w2), &x, tokens, (y0, y1, y2))?
+        }
+        _ => {
+            return Err(CudaError::Shape {
+                what: "grouped_case matrices",
+                expected: 3,
+                actual: rows.len(),
+            });
+        }
+    }
+    for (a, b) in grouped.iter().zip(&separate) {
+        assert_eq!(
+            gpu.download(a)?,
+            gpu.download(b)?,
+            "rows {rows:?}, cols {cols}, tokens {tokens}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn grouped_matmuls_give_the_same_bits_as_separate_ones() {
+    let Some(gpu) = gpu().unwrap() else { return };
+    // row counts that do not fill a 4-row block, so one block spans two matrices; odd columns take the scalar path;
+    // 16 tokens and up leave the one-launch kernel
+    for tokens in [1, 3, 8, 9, 15, 16, 40] {
+        for cols in [64, 13, 2048] {
+            grouped_case(&gpu, &[5, 7], cols, tokens).unwrap();
+            grouped_case(&gpu, &[6, 1, 9], cols, tokens).unwrap();
+        }
+    }
+    grouped_case(&gpu, &[128, 64, 64], 128, 1).unwrap();
+    grouped_case(&gpu, &[96, 96], 64, 2).unwrap();
+}
+
+#[test]
+fn grouped_matmuls_reject_mismatched_shapes_instead_of_launching() {
+    let Some(gpu) = gpu().unwrap() else { return };
+    let w = |rows, cols| {
+        gpu.upload_matrix(rows, cols, &vec![0; rows * cols])
+            .unwrap()
+    };
+    let x = gpu.zeros(8).unwrap();
+    let (mut a, mut b) = (gpu.zeros(2).unwrap(), gpu.zeros(3).unwrap());
+    assert!(
+        gpu.matmul_pair((&w(2, 8), &w(3, 4)), &x, 1, (&mut a, &mut b))
+            .is_err(),
+        "columns differ"
+    );
+    assert!(
+        gpu.matmul_pair((&w(2, 8), &w(4, 8)), &x, 1, (&mut a, &mut b))
+            .is_err(),
+        "output too short"
+    );
+    assert!(
+        gpu.matmul_pair(
+            (&w(2, 8), &w(3, 8)),
+            &gpu.zeros(7).unwrap(),
+            1,
+            (&mut a, &mut b)
+        )
+        .is_err(),
+        "input too short"
+    );
+    gpu.matmul_pair((&w(2, 8), &w(3, 8)), &x, 1, (&mut a, &mut b))
+        .unwrap();
 }
 
 #[test]
@@ -109,6 +169,31 @@ fn rms_norm_matches_the_cpu_including_dims_that_are_not_a_warp_multiple() {
     let mut ragged = gpu.zeros(10).unwrap();
     assert!(
         gpu.rms_norm(&mut ragged, &gpu.zeros(4).unwrap(), 1e-6)
+            .is_err()
+    );
+}
+
+#[test]
+fn rms_norm_into_matches_the_in_place_norm_and_leaves_its_input_alone() {
+    let Some(gpu) = gpu().unwrap() else { return };
+    for dim in [17, 128, 2048] {
+        let x = values(3 * dim, 3);
+        let weight = gpu.upload(&values(dim, 4)).unwrap();
+        let mut in_place = gpu.upload(&x).unwrap();
+        gpu.rms_norm(&mut in_place, &weight, 1e-6).unwrap();
+        let input = gpu.upload(&x).unwrap();
+        let mut out = gpu.zeros(x.len()).unwrap();
+        gpu.rms_norm_into(&input, &weight, &mut out, 1e-6).unwrap();
+        assert_eq!(
+            gpu.download(&out).unwrap(),
+            gpu.download(&in_place).unwrap()
+        );
+        assert_eq!(gpu.download(&input).unwrap(), x);
+    }
+    let weight = gpu.zeros(4).unwrap();
+    let mut short = gpu.zeros(4).unwrap();
+    assert!(
+        gpu.rms_norm_into(&gpu.zeros(8).unwrap(), &weight, &mut short, 1e-6)
             .is_err()
     );
 }
@@ -153,7 +238,8 @@ fn silu_mul_add_and_embed_match_the_cpu() {
     let bits = bf16_bits(&table_values);
     let table = gpu.upload_matrix(10, 16, &bits).unwrap();
     let mut out = gpu.zeros(3 * 16).unwrap();
-    gpu.embed(&table, &[4, 0, 9], &mut out).unwrap();
+    let mut ids = gpu.tokens(4).unwrap();
+    gpu.embed(&table, &[4, 0, 9], &mut ids, &mut out).unwrap();
     let cpu = Matrix::new(10, 16, bits).unwrap();
     let mut row = vec![0.0; 16];
     let mut expected = Vec::new();
@@ -162,137 +248,13 @@ fn silu_mul_add_and_embed_match_the_cpu() {
         expected.extend_from_slice(&row);
     }
     assert_eq!(gpu.download(&out).unwrap(), expected);
-    assert!(
-        gpu.embed(&table, &[10], &mut gpu.zeros(16).unwrap())
-            .is_err()
-    );
-}
-
-/// Plain f64 causal grouped-query attention for the last `tokens` positions.
-fn reference_attention(
-    q: &[f32],
-    keys: &[f32],
-    values: &[f32],
-    (heads, kv_heads, head_dim, start, tokens): (usize, usize, usize, usize, usize),
-) -> Vec<f32> {
-    let kv_stride = kv_heads.saturating_mul(head_dim);
-    let group = heads.checked_div(kv_heads).unwrap_or(1);
-    let q_dim = heads.saturating_mul(head_dim);
-    let mut out = Vec::new();
-    for (t, q_token) in q.chunks_exact(q_dim).enumerate().take(tokens) {
-        let visible = start.saturating_add(t).saturating_add(1);
-        for (h, query) in q_token.chunks_exact(head_dim).enumerate() {
-            let kv_head = h.checked_div(group).unwrap_or(0);
-            let head_rows = |data: &'_ [f32]| -> Vec<Vec<f32>> {
-                data.chunks_exact(kv_stride)
-                    .take(visible)
-                    .map(|row| {
-                        row.chunks_exact(head_dim)
-                            .nth(kv_head)
-                            .unwrap_or(&[])
-                            .to_vec()
-                    })
-                    .collect()
-            };
-            let (head_keys, head_values) = (head_rows(keys), head_rows(values));
-            let scores: Vec<f64> = head_keys
-                .iter()
-                .map(|key| {
-                    let dot: f64 = query.iter().zip(key).map(|(a, b)| f64::from(a * b)).sum();
-                    dot / (head_dim as f64).sqrt()
-                })
-                .collect();
-            let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let weights: Vec<f64> = scores.iter().map(|s| (s - max).exp()).collect();
-            let total: f64 = weights.iter().sum();
-            for d in 0..head_dim {
-                let acc: f64 = weights
-                    .iter()
-                    .zip(&head_values)
-                    .map(|(w, v)| w * f64::from(v.get(d).copied().unwrap_or(0.0)))
-                    .sum();
-                out.push((acc / total) as f32);
-            }
-        }
-    }
-    out
-}
-
-#[test]
-fn attention_matches_a_reference_across_cache_chunks_and_context_lengths() {
-    let Some(gpu) = gpu().unwrap() else { return };
-    for (head_dim, history, tokens) in [
-        (16, 0, 1),
-        (16, 97, 3),
-        (16, 5, 9),
-        (64, 40, 4),
-        (128, 70, 2),
-    ] {
-        let (heads, kv_heads) = (4, 2);
-        let stride = kv_heads * head_dim;
-        let total = history + tokens;
-        let keys = values(total * stride, 21);
-        let vals = values(total * stride, 22);
-        let q = values(tokens * heads * head_dim, 23);
-
-        let mut kv = DeviceKv::new(&gpu, 2, kv_heads, head_dim, total + 3).unwrap();
-        if history > 0 {
-            let k = gpu.upload(&keys[..history * stride]).unwrap();
-            let v = gpu.upload(&vals[..history * stride]).unwrap();
-            kv.write(&gpu, 1, &k, &v).unwrap();
-            kv.advance(history).unwrap();
-        }
-        let k = gpu.upload(&keys[history * stride..]).unwrap();
-        let v = gpu.upload(&vals[history * stride..]).unwrap();
-        kv.write(&gpu, 1, &k, &v).unwrap();
-
-        let q_device = gpu.upload(&q).unwrap();
-        let mut out = gpu.zeros(q.len()).unwrap();
-        gpu.attention(&q_device, &kv, 1, heads, tokens, &mut out)
-            .unwrap();
-        let expected = reference_attention(
-            &q,
-            &keys,
-            &vals,
-            (heads, kv_heads, head_dim, history, tokens),
-        );
-        assert_close(&gpu.download(&out).unwrap(), &expected, 1e-4);
-    }
-}
-
-#[test]
-fn kv_cache_and_attention_reject_invalid_requests() {
-    let Some(gpu) = gpu().unwrap() else { return };
-    let mut kv = DeviceKv::new(&gpu, 1, 2, 16, 4).unwrap();
-    let chunk = gpu.zeros(5 * 32).unwrap();
-    assert!(kv.write(&gpu, 0, &chunk, &chunk).is_err(), "over capacity");
-    let two = gpu.zeros(2 * 32).unwrap();
-    assert!(kv.write(&gpu, 3, &two, &two).is_err(), "bad layer");
-    assert!(
-        kv.write(&gpu, 0, &gpu.zeros(33).unwrap(), &gpu.zeros(33).unwrap())
-            .is_err()
-    );
-    assert!(kv.advance(5).is_err());
-    kv.write(&gpu, 0, &two, &two).unwrap();
-    kv.advance(2).unwrap();
-    assert_eq!(kv.len(), 2);
-    kv.clear();
-    assert!(kv.is_empty());
-
-    let q = gpu.zeros(5 * 4 * 16).unwrap();
-    let mut out = gpu.zeros(5 * 4 * 16).unwrap();
-    assert!(
-        gpu.attention(&q, &kv, 0, 4, 5, &mut out).is_err(),
-        "more tokens than capacity"
-    );
-    assert!(
-        gpu.attention(&q, &kv, 7, 4, 1, &mut out).is_err(),
-        "bad layer"
-    );
-    assert!(
-        gpu.attention(&q, &kv, 0, 3, 1, &mut out).is_err(),
-        "heads not a multiple of kv heads"
-    );
+    // the same scratch serves a shorter pass next, and an id or a count it cannot hold is refused
+    let mut one = gpu.zeros(16).unwrap();
+    gpu.embed(&table, &[9], &mut ids, &mut one).unwrap();
+    assert_eq!(gpu.download(&one).unwrap(), expected[32..]);
+    assert!(gpu.embed(&table, &[10], &mut ids, &mut one).is_err());
+    let mut five = gpu.zeros(5 * 16).unwrap();
+    assert!(gpu.embed(&table, &[0; 5], &mut ids, &mut five).is_err());
 }
 
 #[test]

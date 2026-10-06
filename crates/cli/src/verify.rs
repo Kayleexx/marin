@@ -172,7 +172,15 @@ pub fn run(
         })
         .max()
         .unwrap_or(1);
-    let loaded = load(model_dir, Some(ctx), DEFAULT_CTX, backend, style, true)?;
+    let loaded = load(
+        model_dir,
+        Some(ctx),
+        DEFAULT_CTX,
+        backend,
+        None,
+        style,
+        true,
+    )?;
     println!(
         "verifying {} on {} against float32 reference output (bf16 weights, float32 math)\n",
         style.bold(&loaded.name),
@@ -225,7 +233,7 @@ mod tests {
     #[test]
     fn tiny_model_matches_the_huggingface_reference() {
         let dir = ModelDir::open(&fixture()).unwrap();
-        let model = Engine::load(&dir, Backend::Cpu, |_, _| {}).unwrap();
+        let model = Engine::load(&dir, Backend::Cpu, None, |_, _| {}).unwrap();
         let reference = read_reference(&fixture().join("reference.json")).unwrap();
         assert!(!reference.cases.is_empty());
         for case in &reference.cases {
@@ -250,7 +258,7 @@ mod tests {
             Err(e) => panic!("{e}"),
         };
         let dir = ModelDir::open(&fixture()).unwrap();
-        let model = Engine::load(&dir, selected.backend, |_, _| {}).unwrap();
+        let model = Engine::load(&dir, selected.backend, None, |_, _| {}).unwrap();
         let reference = read_reference(&fixture().join("reference.json")).unwrap();
         for case in &reference.cases {
             let report = check_case(&model, &dir.tokenizer, case).unwrap();
@@ -264,7 +272,7 @@ mod tests {
 
     fn load_fixture() -> (ModelDir, Engine, Reference) {
         let dir = ModelDir::open(&fixture()).unwrap();
-        let model = Engine::load(&dir, Backend::Cpu, |_, _| {}).unwrap();
+        let model = Engine::load(&dir, Backend::Cpu, None, |_, _| {}).unwrap();
         let reference = read_reference(&fixture().join("reference.json")).unwrap();
         (dir, model, reference)
     }

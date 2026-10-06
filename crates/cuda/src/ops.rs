@@ -1,18 +1,15 @@
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
-use crate::{Buffer, CudaError, DeviceKv, DeviceMatrix, Gpu};
+use crate::{Buffer, CudaError, DeviceMatrix, Gpu, Tokens};
 
-const WARPS_PER_BLOCK: usize = 4;
-const TOKEN_TILE: usize = 8;
 const ELEMENTWISE_BLOCK: u32 = 256;
 const NORM_BLOCK: u32 = 256;
-const MAX_HEAD_DIM: usize = 256;
 
-fn to_u32(value: usize, what: &'static str) -> Result<u32, CudaError> {
+pub(crate) fn to_u32(value: usize, what: &'static str) -> Result<u32, CudaError> {
     u32::try_from(value).map_err(|_| CudaError::Overflow { what })
 }
 
-fn expect_len(
+pub(crate) fn expect_len(
     what: &'static str,
     expected: Option<usize>,
     buffer: &Buffer,
@@ -40,45 +37,73 @@ fn rows_of(len: usize, width: usize, what: &'static str) -> Result<usize, CudaEr
     }
 }
 
-fn blocks(count: usize, per_block: usize) -> Result<u32, CudaError> {
+/// One block per token.
+pub(crate) fn embed_config(tokens: usize) -> Result<LaunchConfig, CudaError> {
+    Ok(LaunchConfig {
+        grid_dim: (to_u32(tokens, "token count")?, 1, 1),
+        block_dim: (NORM_BLOCK, 1, 1),
+        shared_mem_bytes: 0,
+    })
+}
+
+pub(crate) fn blocks(count: usize, per_block: usize) -> Result<u32, CudaError> {
     to_u32(count.div_ceil(per_block.max(1)), "grid size")
 }
 
 impl Gpu {
-    /// `out[t] = table[ids[t]]` converted to f32. `ids` must be below `table.rows()`.
+    /// `out[t] = table[ids[t]]` converted to f32. `ids` must be below `table.rows()`; `scratch` holds them on the GPU.
     pub fn embed(
         &self,
         table: &DeviceMatrix,
         ids: &[u32],
+        scratch: &mut Tokens,
         out: &mut Buffer,
     ) -> Result<(), CudaError> {
-        expect_len("embed output", ids.len().checked_mul(table.cols), out)?;
+        if !self.stage_ids((table.rows, table.cols), ids, scratch, out)? {
+            return Ok(());
+        }
+        let hidden = to_u32(table.cols, "hidden size")?;
+        self.launch(&self.kernels.embed, embed_config(ids.len())?, |a| {
+            a.arg(&table.data)
+                .arg(&scratch.data)
+                .arg(&mut out.data)
+                .arg(&hidden);
+        })
+    }
+
+    /// Checks `ids` against a table of `rows` by `cols` and the size of `out`, and copies them into `scratch`. False
+    /// when there is nothing to embed.
+    pub(crate) fn stage_ids(
+        &self,
+        (rows, cols): (usize, usize),
+        ids: &[u32],
+        scratch: &mut Tokens,
+        out: &Buffer,
+    ) -> Result<bool, CudaError> {
+        expect_len("embed output", ids.len().checked_mul(cols), out)?;
         if let Some(bad) = ids
             .iter()
-            .find(|id| usize::try_from(**id).map_or(true, |i| i >= table.rows))
+            .find(|id| usize::try_from(**id).map_or(true, |i| i >= rows))
         {
             return Err(CudaError::Shape {
                 what: "token id",
-                expected: table.rows,
+                expected: rows,
                 actual: *bad as usize,
             });
         }
         if ids.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
-        let device_ids = self.stream.clone_htod(ids)?;
-        let config = LaunchConfig {
-            grid_dim: (to_u32(ids.len(), "token count")?, 1, 1),
-            block_dim: (NORM_BLOCK, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        let hidden = to_u32(table.cols, "hidden size")?;
-        self.launch(&self.kernels.embed, config, |a| {
-            a.arg(&table.data)
-                .arg(&device_ids)
-                .arg(&mut out.data)
-                .arg(&hidden);
-        })
+        if ids.len() > scratch.capacity {
+            return Err(CudaError::Shape {
+                what: "embed token capacity",
+                expected: scratch.capacity,
+                actual: ids.len(),
+            });
+        }
+        self.stream
+            .memcpy_htod(ids, &mut scratch.data.slice_mut(..ids.len()))?;
+        Ok(true)
     }
 
     /// RMSNorm in place over each `weight.len()`-sized row of `x`.
@@ -99,40 +124,32 @@ impl Gpu {
         })
     }
 
-    /// `out[t][r] = dot(w[r], x[t])` for `tokens` input rows.
-    pub fn matmul(
+    /// RMSNorm of each `weight.len()`-sized row of `x` into `out`, which must be as long as `x`.
+    pub fn rms_norm_into(
         &self,
-        w: &DeviceMatrix,
         x: &Buffer,
-        tokens: usize,
+        weight: &Buffer,
         out: &mut Buffer,
+        eps: f32,
     ) -> Result<(), CudaError> {
-        expect_len("matmul input", tokens.checked_mul(w.cols), x)?;
-        expect_len("matmul output", tokens.checked_mul(w.rows), out)?;
-        if tokens == 0 || w.rows == 0 || w.cols == 0 {
+        let dim = weight.len;
+        let rows = rows_of(x.len, dim, "rms_norm input")?;
+        expect_len("rms_norm output", Some(x.len), out)?;
+        if rows == 0 {
             return Ok(());
         }
         let config = LaunchConfig {
-            grid_dim: (
-                blocks(w.rows, WARPS_PER_BLOCK)?,
-                blocks(tokens, TOKEN_TILE)?,
-                1,
-            ),
-            block_dim: (
-                to_u32(WARPS_PER_BLOCK.saturating_mul(32), "block size")?,
-                1,
-                1,
-            ),
+            grid_dim: (to_u32(rows, "row count")?, 1, 1),
+            block_dim: (NORM_BLOCK, 1, 1),
             shared_mem_bytes: 0,
         };
-        let (rows, cols, tokens) = (
-            to_u32(w.rows, "rows")?,
-            to_u32(w.cols, "cols")?,
-            to_u32(tokens, "tokens")?,
-        );
-        self.launch(&self.kernels.matmul, config, |a| {
-            a.arg(&w.data).arg(&x.data).arg(&mut out.data);
-            a.arg(&rows).arg(&cols).arg(&tokens);
+        let dim = to_u32(dim, "norm size")?;
+        self.launch(&self.kernels.rms_norm_to, config, |a| {
+            a.arg(&x.data)
+                .arg(&mut out.data)
+                .arg(&weight.data)
+                .arg(&dim)
+                .arg(&eps);
         })
     }
 
@@ -183,85 +200,6 @@ impl Gpu {
                 .arg(&head_dim)
                 .arg(&start)
                 .arg(&theta);
-        })
-    }
-
-    /// Causal grouped-query attention for the `tokens` new tokens at `start..`, reading
-    /// cached keys and values of `layer` (which must already include these tokens).
-    pub fn attention(
-        &self,
-        q: &Buffer,
-        kv: &DeviceKv,
-        layer: usize,
-        heads: usize,
-        tokens: usize,
-        out: &mut Buffer,
-    ) -> Result<(), CudaError> {
-        let (head_dim, kv_heads, start) = (kv.head_dim, kv.kv_heads, kv.len);
-        if head_dim == 0
-            || head_dim > MAX_HEAD_DIM
-            || kv_heads == 0
-            || heads == 0
-            || heads.checked_rem(kv_heads) != Some(0)
-        {
-            return Err(CudaError::Unsupported {
-                what: "head layout",
-                max: MAX_HEAD_DIM,
-                actual: head_dim,
-            });
-        }
-        let q_len = tokens
-            .checked_mul(heads)
-            .and_then(|n| n.checked_mul(head_dim));
-        expect_len("attention queries", q_len, q)?;
-        expect_len("attention output", q_len, out)?;
-        let visible = start.checked_add(tokens).filter(|n| *n <= kv.capacity);
-        let Some(visible) = visible else {
-            return Err(CudaError::Shape {
-                what: "attention positions",
-                expected: kv.capacity,
-                actual: start.saturating_add(tokens),
-            });
-        };
-        let layers = kv.keys.len();
-        let (Some(keys), Some(values)) = (kv.keys.get(layer), kv.values.get(layer)) else {
-            return Err(CudaError::Shape {
-                what: "attention layer",
-                expected: layers,
-                actual: layer,
-            });
-        };
-        if tokens == 0 || visible == 0 {
-            return Ok(());
-        }
-        let threads = head_dim.next_multiple_of(32);
-        let shared_floats = head_dim.saturating_add(threads).saturating_add(32);
-        let config = LaunchConfig {
-            grid_dim: (
-                to_u32(tokens.saturating_mul(heads), "attention blocks")?,
-                1,
-                1,
-            ),
-            block_dim: (to_u32(threads, "block size")?, 1, 1),
-            shared_mem_bytes: to_u32(
-                shared_floats.saturating_mul(size_of::<f32>()),
-                "shared memory",
-            )?,
-        };
-        let scale = 1.0 / (head_dim as f32).sqrt();
-        let (heads, kv_heads, head_dim, start) = (
-            to_u32(heads, "heads")?,
-            to_u32(kv_heads, "kv heads")?,
-            to_u32(head_dim, "head size")?,
-            to_u32(start, "start position")?,
-        );
-        self.launch(&self.kernels.attention, config, |a| {
-            a.arg(&q.data).arg(keys).arg(values).arg(&mut out.data);
-            a.arg(&heads)
-                .arg(&kv_heads)
-                .arg(&head_dim)
-                .arg(&start)
-                .arg(&scale);
         })
     }
 

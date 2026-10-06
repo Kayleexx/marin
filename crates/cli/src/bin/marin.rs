@@ -13,6 +13,7 @@ use cli::chat::Chat;
 use cli::config::{self, Choice, Config, Home};
 use cli::error::CliError;
 use cli::marin_args::{MarinCli, MarinCommand, Options};
+use cli::render::{MarkdownStream, MarkdownWriter, Theme};
 use cli::session::{Session, Settings};
 use cli::signal::{INTERRUPTED_EXIT_CODE, Interrupt};
 use cli::style::{Style, stderr_is_terminal, stdin_is_terminal};
@@ -20,8 +21,9 @@ use cli::term::app::{self, Launch};
 use cli::term::caps::Caps;
 use cli::term::menu::Item;
 use cli::term::picker;
+use cli::term::screen;
 use cli::term::splash;
-use cli::{load, report};
+use cli::{load, report, show};
 
 /// Chat keeps more history than a one-off completion, so it gets a larger window by default.
 const CHAT_CTX: usize = 4096;
@@ -43,6 +45,10 @@ fn run(cli: MarinCli, style: Style) -> Result<ExitCode, CliError> {
     let home = Home::detect();
     match cli.command {
         Some(MarinCommand::Model { path }) => model_command(path.as_deref(), home.as_ref()),
+        Some(MarinCommand::Show { path, kind }) => {
+            show::run(path.as_deref(), kind.as_deref(), cli.options.no_color)
+                .map(|()| ExitCode::SUCCESS)
+        }
         Some(MarinCommand::Run { prompt }) => {
             one_shot(&prompt.join(" "), &cli.options, home, style)
         }
@@ -175,6 +181,7 @@ fn open(
         options.ctx,
         CHAT_CTX,
         backend,
+        None,
         &style,
         stderr_is_terminal(),
     )?;
@@ -199,12 +206,22 @@ fn one_shot(
     settings(options)?;
     let interrupt = Interrupt::install().map_err(|e| CliError::Io(io::Error::other(e)))?;
     let mut session = open(options, home.as_ref(), false, style)?;
-    let reply = Chat::new(&session).ask(
-        &mut session,
-        text.trim_end(),
-        &interrupt,
-        &mut io::stdout().lock(),
-    )?;
+    let mut chat = Chat::new(&session);
+    let reply = if io::IsTerminal::is_terminal(&io::stdout()) {
+        let theme = Theme::new(&Caps::detect(options.no_color));
+        let stream = MarkdownStream::new(theme, screen::width().saturating_sub(1), 0, false);
+        let mut out = MarkdownWriter::new(io::stdout().lock(), stream);
+        let reply = chat.ask(&mut session, text.trim_end(), &interrupt, &mut out);
+        out.finish()?;
+        reply?
+    } else {
+        chat.ask(
+            &mut session,
+            text.trim_end(),
+            &interrupt,
+            &mut io::stdout().lock(),
+        )?
+    };
     Ok(if reply.outcome.stop == StopReason::Cancelled {
         ExitCode::from(u8::try_from(INTERRUPTED_EXIT_CODE).unwrap_or(130))
     } else {
@@ -228,6 +245,7 @@ fn session(options: &Options, home: Option<Home>, style: Style) -> Result<ExitCo
             home,
             backend: backend_choice(options.backend),
             style,
+            caps,
             splash: Some(splash),
         })?;
         return Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)));

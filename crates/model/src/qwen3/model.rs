@@ -63,6 +63,7 @@ impl Qwen3 {
         let mut hidden = probe.time(Stage::Embedding, || self.embed(tokens))?;
         notify(&mut observe, 0, last_row(&hidden, cfg.hidden_size));
         for (index, layer) in self.weights.layers.iter().enumerate() {
+            probe.layer(Some(index));
             layer.forward(cfg, index, &mut hidden, start, kv, probe)?;
             notify(
                 &mut observe,
@@ -70,6 +71,7 @@ impl Qwen3 {
                 last_row(&hidden, cfg.hidden_size),
             );
         }
+        probe.layer(None);
         let mut last = last_row(&hidden, cfg.hidden_size).to_vec();
         probe.time(Stage::Norm, || {
             rms_norm_rows(&mut last, &self.weights.final_norm, cfg.rms_eps)

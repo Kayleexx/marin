@@ -18,6 +18,8 @@ pub enum CudaError {
     },
     #[error("{what}: size arithmetic overflowed")]
     Overflow { what: &'static str },
+    #[error("the {what} probe computed a wrong result, so its timing cannot be trusted")]
+    SelfCheck { what: &'static str },
     #[error("{what} must be between 1 and {max}, got {actual}")]
     Unsupported {
         what: &'static str,

@@ -62,7 +62,7 @@ fn only_the_tensors_that_are_loaded_are_counted_not_unused_extras() {
 
     let weights = Weights::open(&dir).unwrap();
     let config = Qwen3Config::parse(CONFIG, None).unwrap();
-    let needed = weight_bytes(&weights, &config).unwrap();
+    let needed = weight_bytes(&weights, &config, None).unwrap();
 
     let extra_bytes: u64 = 10 * 8 * 2;
     assert_eq!(
@@ -81,7 +81,7 @@ fn only_the_tensors_that_are_loaded_are_counted_not_unused_extras() {
         .filter(|(n, _)| !n.contains("k_proj"))
         .collect::<Vec<_>>();
     write_safetensors(&dir, &missing).unwrap();
-    let err = weight_bytes(&Weights::open(&dir).unwrap(), &config)
+    let err = weight_bytes(&Weights::open(&dir).unwrap(), &config, None)
         .unwrap_err()
         .to_string();
     assert!(

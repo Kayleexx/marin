@@ -10,6 +10,7 @@ Examples:
   marin run Explain what a mutex is    ask once and print only the reply
   echo \"Say hi in French\" | marin run    read the question from stdin
   marin model ~/models/Qwen3-1.7B       choose the default chat model
+  marin show notes.md                   read a file with formatting, wrapped to your terminal
 
 Press / in a session for actions (settings, tokens, switching model). `marin` needs a chat model such as Qwen3-1.7B. Base models and debug tools live in `marin-run`.";
 
@@ -31,6 +32,14 @@ pub struct MarinCli {
 pub enum MarinCommand {
     /// Ask one question and print only the reply (question from the arguments or stdin)
     Run { prompt: Vec<String> },
+    /// Show a file (or text piped in) in the terminal: markdown, code, json, diffs, tables and logs, nicely
+    Show {
+        /// File to show; `-` or nothing reads standard input as it arrives
+        path: Option<PathBuf>,
+        /// Treat the text as this kind instead of detecting it: markdown, text, rust, python, json, diff, csv, log, ...
+        #[arg(long = "as", value_name = "KIND")]
+        kind: Option<String>,
+    },
     /// Show the default model, or set it to PATH
     Model { path: Option<PathBuf> },
 }

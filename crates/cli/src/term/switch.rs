@@ -38,6 +38,7 @@ impl App {
             Some(parked.ctx),
             parked.ctx,
             backend,
+            None,
             &self.style,
             true,
         )?;

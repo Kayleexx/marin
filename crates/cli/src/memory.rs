@@ -2,7 +2,7 @@ use std::fs;
 
 use kv::KvCache;
 use loader::ModelDir;
-use model::Qwen3Config;
+use model::{QuantScheme, Qwen3Config};
 
 use crate::CliError;
 
@@ -38,7 +38,12 @@ pub fn resolve_ctx(
     }
 }
 
-pub fn footprint(dir: &ModelDir, cfg: &Qwen3Config, ctx: usize) -> Result<Footprint, CliError> {
+pub fn footprint(
+    dir: &ModelDir,
+    cfg: &Qwen3Config,
+    ctx: usize,
+    quant: Option<QuantScheme>,
+) -> Result<Footprint, CliError> {
     if ctx > cfg.max_positions {
         return Err(CliError::ContextTooLarge {
             ctx,
@@ -48,7 +53,7 @@ pub fn footprint(dir: &ModelDir, cfg: &Qwen3Config, ctx: usize) -> Result<Footpr
     let kv = KvCache::bytes_for(cfg.layers, cfg.kv_heads, cfg.head_dim, ctx)
         .and_then(|b| u64::try_from(b).ok())
         .ok_or_else(|| CliError::BadOption(format!("--ctx {ctx} is too large")))?;
-    let weights = model::weight_bytes(&dir.weights, cfg)?;
+    let weights = model::weight_bytes(&dir.weights, cfg, quant)?;
     Ok(Footprint {
         weights,
         kv,

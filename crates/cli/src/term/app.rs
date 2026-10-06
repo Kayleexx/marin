@@ -4,6 +4,7 @@ use crossterm::event::{self, Event, KeyEventKind};
 use model::BackendChoice;
 
 use super::actions::Action;
+use super::caps::Caps;
 use super::editor::Editor;
 use super::menu::Menu;
 use super::panel::Tab;
@@ -23,6 +24,7 @@ pub struct Launch {
     pub home: Option<Home>,
     pub backend: BackendChoice,
     pub style: Style,
+    pub caps: Caps,
     /// The startup view is on screen, with the first prompt at this column (0 without a portrait).
     /// It stays in the scrollback; the first submitted prompt starts the conversation below it.
     pub splash: Option<usize>,
@@ -70,6 +72,7 @@ pub(super) struct App {
     pub(super) home: Option<Home>,
     pub(super) backend: BackendChoice,
     pub(super) style: Style,
+    pub(super) caps: Caps,
     pub(super) screen: Screen,
     pub(super) editor: Editor,
     pub(super) mode: Mode,
@@ -97,6 +100,7 @@ pub fn run(launch: Launch) -> Result<i32, CliError> {
         home: launch.home,
         backend: launch.backend,
         style: launch.style,
+        caps: launch.caps,
         editor: Editor::with_history(history),
         mode: Mode::Input,
         notice: None,

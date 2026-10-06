@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use loader::ModelDir;
-use model::Qwen3Config;
+use model::{QuantScheme, Qwen3Config};
 
 use crate::CliError;
 use crate::load::model_name;
@@ -101,11 +101,16 @@ pub fn describe(
         .join("\n")
 }
 
-pub fn run(path: &Path, ctx: Option<usize>, style: &Style) -> Result<(), CliError> {
+pub fn run(
+    path: &Path,
+    ctx: Option<usize>,
+    quant: Option<QuantScheme>,
+    style: &Style,
+) -> Result<(), CliError> {
     let dir = ModelDir::open(path)?;
     let cfg = Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref())?;
     let ctx = resolve_ctx(&cfg, ctx, DEFAULT_CTX)?;
-    let fp = footprint(&dir, &cfg, ctx)?;
+    let fp = footprint(&dir, &cfg, ctx, quant)?;
     let name = model_name(path);
     println!("{}", style.bold(&name));
     println!("  A decoder-only transformer: it reads tokens and predicts the next one.\n");
@@ -113,6 +118,13 @@ pub fn run(path: &Path, ctx: Option<usize>, style: &Style) -> Result<(), CliErro
         "{}\n",
         describe(&name, &cfg, dir.tokenizer.vocab_size(), ctx, &fp)
     );
+    if let Some(scheme) = quant {
+        println!(
+            "  quantized     {}: the weights take {} in memory\n",
+            scheme.label(),
+            units::bytes(fp.weights)
+        );
+    }
     let needed = format!("about {}", units::bytes(fp.needed));
     match fp.available {
         Some(available) if available < fp.needed => println!(

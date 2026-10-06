@@ -36,6 +36,17 @@ impl SamplerConfig {
     }
 }
 
+/// Index of the largest value under `f32::total_cmp`, the lowest index winning ties.
+fn best_index(values: &[f32]) -> Option<u32> {
+    let mut best: Option<(u32, f32)> = None;
+    for (id, &value) in (0..).zip(values) {
+        if best.is_none_or(|(_, top)| value.total_cmp(&top).is_gt()) {
+            best = Some((id, value));
+        }
+    }
+    best.map(|(id, _)| id)
+}
+
 #[derive(Debug)]
 pub struct Sampler {
     config: SamplerConfig,
@@ -89,14 +100,12 @@ impl Sampler {
         if candidates.iter().any(|v| !v.is_finite()) {
             return Err(SamplerError::NonFiniteLogits);
         }
-        let mut ranked: Vec<(u32, f32)> = (0..).zip(candidates.iter().copied()).collect();
-        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        let Some(&(best, _)) = ranked.first() else {
-            return Err(no_candidates);
-        };
         if self.config.temperature == 0.0 {
+            let best = best_index(candidates).ok_or(no_candidates)?;
             return Ok(vec![(best, 1.0)]);
         }
+        let mut ranked: Vec<(u32, f32)> = (0..).zip(candidates.iter().copied()).collect();
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         if self.config.top_k > 0 {
             ranked.truncate(self.config.top_k);
         }

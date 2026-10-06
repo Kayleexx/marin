@@ -3,10 +3,17 @@
 mod error;
 mod qwen3;
 
-pub use cuda::Traffic;
+/// What the engine does with the numbers today, before any quantization. Recorded by benchmarks, so change them with
+/// the engine.
+pub const PRECISION: &str = "bf16 weights, f32 math";
+/// Sequences the generate loop runs at once.
+pub const BATCH_SIZE: usize = 1;
+
+pub use cuda::{CopyTimes, CudaError, Gpu, GpuInfo, Traffic, Window};
 pub use error::ModelError;
-pub use metrics::{Probe, Stage, StageTimes};
+pub use metrics::{Probe, Stage, StageTimes, TraceEntry};
 pub use qwen3::{
     Backend, BackendChoice, Engine, EngineCache, GpuCache, Observer, Qwen3, Qwen3Config, Qwen3Gpu,
     Selected, weight_bytes,
 };
+pub use tensor::{DEFAULT_GROUP, QuantBits, QuantScheme};

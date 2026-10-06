@@ -582,6 +582,7 @@ dependencies = [
  "loader",
  "metrics",
  "runtime",
+ "sampler",
  "serde",
  "serde_json",
  "tensor",

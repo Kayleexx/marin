@@ -1,8 +1,9 @@
-use cuda::{CudaError, Gpu, Traffic};
+use cuda::{CudaError, Gpu, GpuInfo, Traffic};
 use kv::KvCache;
 use loader::ModelDir;
 use metrics::{Probe, StageTimes};
-use runtime::{CausalLm, SequenceCache};
+use runtime::{CausalLm, RollbackError, SequenceCache};
+use tensor::QuantScheme;
 
 use super::Observer;
 use super::config::Qwen3Config;
@@ -29,7 +30,7 @@ pub struct Selected {
 
 pub enum Backend {
     Cpu,
-    Cuda(Gpu),
+    Cuda(Box<Gpu>),
 }
 
 impl Backend {
@@ -53,12 +54,12 @@ impl Backend {
                 note: None,
             }),
             BackendChoice::Cuda => Ok(Selected {
-                backend: Backend::Cuda(try_gpu()?),
+                backend: Backend::Cuda(Box::new(try_gpu()?)),
                 note: None,
             }),
             BackendChoice::Auto => Ok(match try_gpu() {
                 Ok(gpu) => Selected {
-                    backend: Backend::Cuda(gpu),
+                    backend: Backend::Cuda(Box::new(gpu)),
                     note: None,
                 },
                 Err(ModelError::Cuda(CudaError::Unavailable(why))) => Selected {
@@ -83,19 +84,34 @@ pub enum Engine {
 
 pub enum EngineCache {
     Cpu(KvCache),
-    Cuda(GpuCache),
+    Cuda(Box<GpuCache>),
 }
 
 impl Engine {
+    /// Loads the weights onto `backend`, quantizing the layer projections with `quant` if given (GPU only).
     pub fn load(
         dir: &ModelDir,
         backend: Backend,
+        quant: Option<QuantScheme>,
         progress: impl FnMut(u64, u64),
     ) -> Result<Self, ModelError> {
         Ok(match backend {
+            Backend::Cpu if quant.is_some() => {
+                return Err(ModelError::Unsupported(
+                    "quantized weights need the GPU backend".into(),
+                ));
+            }
             Backend::Cpu => Self::Cpu(Box::new(Qwen3::load(dir, progress)?)),
-            Backend::Cuda(gpu) => Self::Cuda(Box::new(Qwen3Gpu::load(dir, gpu, progress)?)),
+            Backend::Cuda(gpu) => Self::Cuda(Box::new(Qwen3Gpu::load(dir, *gpu, quant, progress)?)),
         })
+    }
+
+    /// The scheme the layer projections were quantized with; `None` for bf16 weights.
+    pub fn quantization(&self) -> Option<QuantScheme> {
+        match self {
+            Self::Cpu(_) => None,
+            Self::Cuda(m) => m.quantization(),
+        }
     }
 
     pub fn config(&self) -> &Qwen3Config {
@@ -119,7 +135,7 @@ impl Engine {
     pub fn new_cache(&self, capacity: usize) -> Result<EngineCache, ModelError> {
         Ok(match self {
             Self::Cpu(m) => EngineCache::Cpu(m.new_cache(capacity)?),
-            Self::Cuda(m) => EngineCache::Cuda(m.new_cache(capacity)?),
+            Self::Cuda(m) => EngineCache::Cuda(Box::new(m.new_cache(capacity)?)),
         })
     }
 
@@ -128,6 +144,14 @@ impl Engine {
         match self {
             Self::Cpu(_) => None,
             Self::Cuda(m) => Some(m.gpu().traffic()),
+        }
+    }
+
+    /// The GPU's name, compute capability and memory; `None` on the CPU or when the driver cannot say.
+    pub fn gpu_info(&self) -> Option<GpuInfo> {
+        match self {
+            Self::Cpu(_) => None,
+            Self::Cuda(m) => m.gpu().info().ok(),
         }
     }
 
@@ -200,6 +224,13 @@ impl SequenceCache for EngineCache {
             Self::Cuda(c) => c.clear(),
         }
     }
+
+    fn truncate(&mut self, len: usize) -> Result<(), RollbackError> {
+        match self {
+            Self::Cpu(c) => SequenceCache::truncate(c, len),
+            Self::Cuda(c) => c.truncate(len),
+        }
+    }
 }
 
 impl CausalLm for Engine {
@@ -208,5 +239,25 @@ impl CausalLm for Engine {
 
     fn forward(&self, tokens: &[u32], cache: &mut EngineCache) -> Result<Vec<f32>, ModelError> {
         self.forward_observed(tokens, cache, None)
+    }
+
+    /// The GPU checks up to 8 tokens in one pass; the CPU has no such pass, so it never guesses ahead.
+    fn max_rows(&self) -> usize {
+        match self {
+            Self::Cpu(_) => 0,
+            Self::Cuda(m) => m.max_rows(),
+        }
+    }
+
+    fn forward_rows(
+        &self,
+        tokens: &[u32],
+        cache: &mut EngineCache,
+    ) -> Result<Vec<f32>, ModelError> {
+        match (self, cache) {
+            (Self::Cuda(m), EngineCache::Cuda(kv)) => m.forward_rows(tokens, kv),
+            (Self::Cpu(m), EngineCache::Cpu(kv)) => m.forward_rows(tokens, kv),
+            _ => Err(wrong_backend()),
+        }
     }
 }

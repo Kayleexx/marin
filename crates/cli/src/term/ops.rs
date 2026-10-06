@@ -13,34 +13,50 @@ use runtime::StopReason;
 
 use super::actions::{self, Action, SHORTCUTS};
 use super::app::{App, Flow, Mode};
+use super::caps::Caps;
 use super::editor::Editor;
 use super::menu::{Item, Menu};
 use super::panel::Tab;
 use super::raw::RawMode;
-use super::screen::{Kind, Line, width};
+use super::screen::{Kind, Line, display_width, width};
 use super::view::{PROMPT, REPLY_PREFIX, input_line};
 use crate::CliError;
 use crate::config;
+use crate::render::{MarkdownStream, MarkdownWriter, Theme};
 use crate::style::Style;
 
 /// Introduces the reply with the "marin >" prefix, once: a dim placeholder after it until the first token arrives.
+/// The reply itself is rendered as markdown, wrapped to the terminal and aligned under the prefix.
 struct ReplyWriter {
     placeholder: bool,
     prefix: String,
     out: io::Stdout,
+    markdown: MarkdownWriter<io::Stdout>,
 }
 
 impl ReplyWriter {
-    fn new(style: &Style) -> io::Result<Self> {
+    fn new(style: &Style, caps: &Caps) -> io::Result<Self> {
         let prefix = format!("{} ", style.cyan(REPLY_PREFIX.trim_end()));
         let mut out = io::stdout().lock();
         write!(out, "{prefix}{}", style.dim("…"))?;
         out.flush()?;
+        let stream = MarkdownStream::new(
+            Theme::new(caps),
+            width().saturating_sub(1),
+            display_width(REPLY_PREFIX),
+            true,
+        );
         Ok(Self {
             placeholder: true,
             prefix,
             out: io::stdout(),
+            markdown: MarkdownWriter::new(io::stdout(), stream),
         })
+    }
+
+    /// The reply is complete or cut short: what is held is written and the cursor rests at a line start.
+    fn finish_markdown(&mut self) -> io::Result<()> {
+        self.markdown.finish()
     }
 
     /// Replaces the placeholder line by the prefix alone, or by nothing when an error follows.
@@ -61,11 +77,11 @@ impl ReplyWriter {
 impl Write for ReplyWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.finish_placeholder(true)?;
-        self.out.write(buf)
+        self.markdown.write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.out.flush()
+        self.markdown.flush()
     }
 }
 
@@ -270,8 +286,9 @@ impl App {
             return Ok(());
         };
         raw.suspend()?;
-        let mut out = ReplyWriter::new(&self.style)?;
+        let mut out = ReplyWriter::new(&self.style, &self.caps)?;
         let result = self.chat.ask(session, text, &self.interrupt, &mut out);
+        out.finish_markdown()?;
         out.finish_placeholder(result.is_ok())?;
         match result {
             Ok(reply) => {

@@ -46,6 +46,16 @@ pub enum CliError {
     NoPrompt,
     #[error("cancelled")]
     Cancelled,
+    #[error("cannot read {path}: {reason}")]
+    Input { path: String, reason: String },
+    #[error("nothing to show: no file was given and nothing is piped in")]
+    NoInput,
+    #[error("cannot use result file {path}: {reason}")]
+    Saved { path: String, reason: String },
+    #[error("these results were measured under different setups ({0})")]
+    NotComparable(String),
+    #[error("cannot write {path}: {reason}")]
+    Output { path: String, reason: String },
     #[error("the model does not match the reference output")]
     VerifyFailed,
 }
@@ -102,6 +112,13 @@ impl CliError {
             Self::PromptTooLong { .. } => Some("shorten the prompt or raise --ctx"),
             Self::ContextTooLarge { .. } => Some("pick a smaller --ctx"),
             Self::NotEnoughMemory { .. } => Some("try a smaller --ctx or close other programs"),
+            Self::Input { .. } => Some("check that the path exists and is a readable file"),
+            Self::NoInput => Some("pass a file, or pipe text into `marin show`"),
+            Self::Saved { .. } => Some("pass files written by `marin-run bench --json`"),
+            Self::NotComparable(_) => Some("run both benchmarks again with the same options"),
+            Self::Output { .. } => {
+                Some("check that the folder exists and that you can write to it")
+            }
             Self::VerifyFailed => Some("the lines above show the first step that disagrees"),
             _ => None,
         }
