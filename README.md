@@ -1,4 +1,5 @@
 # Marin
+<img width="532" height="331" alt="image" src="https://github.com/user-attachments/assets/ad91e0dd-1ff3-424b-8d2b-91652ac77165" />
 
 Marin is a small language model engine written from scratch in Rust, built to run well on ordinary laptops and desktops. There is no Python and no outside inference library. The goal is to understand every step of running a model, measure it, and then make it faster on weak hardware. A chat assistant sits on top of the engine and gives it real work to be judged by.
 
