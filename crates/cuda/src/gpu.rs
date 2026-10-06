@@ -10,6 +10,7 @@ use crate::counters::Counters;
 
 const KERNELS: &str = concat!(
     include_str!("kernels.cu"),
+    include_str!("attention.cu"),
     include_str!("mma.cu"),
     include_str!("quant.cu")
 );

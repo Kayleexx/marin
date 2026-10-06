@@ -65,6 +65,17 @@ fn attention_matches_a_reference_across_cache_chunks_and_context_lengths() {
         (16, 5, 9),
         (64, 40, 4),
         (128, 70, 2),
+        // More than 8 tokens takes the general kernel; these cross its 128-position blocks at awkward counts and use
+        // head sizes that are not a multiple of 4.
+        (128, 0, 40),
+        (128, 300, 12),
+        (64, 127, 16),
+        (16, 129, 9),
+        (16, 255, 11),
+        (30, 130, 9),
+        (18, 260, 10),
+        (10, 130, 9),
+        (13, 70, 9),
     ] {
         let (heads, kv_heads) = (4, 2);
         let stride = kv_heads * head_dim;
