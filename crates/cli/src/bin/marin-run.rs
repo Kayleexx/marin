@@ -208,6 +208,8 @@ fn run(cli: Cli, style: &Style) -> Result<ExitCode, CliError> {
             rounds,
             ctx,
             no_energy,
+            speculate,
+            ask,
             quant,
         }) => cli::turns::run_turns(
             &model_dir,
@@ -218,6 +220,8 @@ fn run(cli: Cli, style: &Style) -> Result<ExitCode, CliError> {
                 rounds,
                 ctx,
                 energy: !no_energy,
+                speculate,
+                ask,
                 quant: quant.scheme()?,
             },
             style,

@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use model::{Engine, EngineCache};
 use runtime::{
-    CausalLm, GenerateParams, Outcome, Retained, SequenceCache, Speculation, StopReason,
+    CausalLm, GenerateParams, Kept, Outcome, Retained, SequenceCache, Speculation, StopReason,
     generate_reusing,
 };
 use sampler::{Sampler, SamplerConfig};
@@ -165,8 +165,10 @@ impl Session {
         interrupt.generating();
         let result = generate_reusing(
             &self.loaded.model,
-            &mut self.kv,
-            &mut self.retained,
+            Kept {
+                cache: &mut self.kv,
+                retained: &mut self.retained,
+            },
             &mut sampler,
             &prompt,
             &params,

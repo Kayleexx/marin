@@ -11,7 +11,7 @@ use sampler::{Sampler, SamplerConfig};
 use thiserror::Error;
 
 use crate::generate::{GenerateError, GenerateParams, Outcome, StopReason, generate};
-use crate::{CausalLm, Retained, SequenceCache, Speculation, generate_reusing};
+use crate::{CausalLm, Kept, Retained, SequenceCache, Speculation, generate_reusing};
 
 const VOCAB: usize = 7;
 
@@ -129,8 +129,10 @@ fn turn(
     let mut tokens = Vec::new();
     let outcome = generate_reusing(
         model,
-        kv,
-        retained,
+        Kept {
+            cache: kv,
+            retained,
+        },
         &mut sampler(0.8),
         prompt,
         params,
@@ -370,8 +372,10 @@ fn a_model_that_does_not_commit_what_it_reads_leaves_nothing_trusted() {
     let cancel = AtomicBool::new(false);
     generate_reusing(
         &model,
-        &mut kv,
-        &mut retained,
+        Kept {
+            cache: &mut kv,
+            retained: &mut retained,
+        },
         &mut sampler(0.0),
         &[1, 2, 3],
         &params(3, &[], false),

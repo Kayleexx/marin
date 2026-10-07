@@ -9,6 +9,12 @@ pub struct Retained {
     ids: Vec<u32>,
 }
 
+/// A cache with the record of what it holds, handed to `generate_reusing` as one.
+pub struct Kept<'a, C> {
+    pub cache: &'a mut C,
+    pub retained: &'a mut Retained,
+}
+
 impl Retained {
     /// The ids held, oldest first.
     pub fn tokens(&self) -> &[u32] {

@@ -14,7 +14,7 @@ mod speculate_tests;
 pub use generate::{
     GenerateError, GenerateParams, Outcome, StopReason, generate, generate_reusing,
 };
-pub use reuse::Retained;
+pub use reuse::{Kept, Retained};
 pub use speculate::{Speculation, SpeculationStats};
 
 use kv::KvCache;

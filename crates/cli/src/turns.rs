@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use chat::{DEFAULT_SYSTEM, Message, Role, render};
 use metrics::{Sampler as GpuSampler, spread};
 use model::{BackendChoice, Engine, EngineCache, QuantScheme};
-use runtime::{GenerateParams, Outcome, Retained, generate_reusing};
+use runtime::{GenerateParams, Kept, Outcome, Retained, Speculation, generate_reusing};
 
 use crate::CliError;
 use crate::bench::measure::{greedy, prompt};
@@ -21,6 +21,9 @@ pub struct Options {
     pub rounds: usize,
     pub ctx: usize,
     pub energy: bool,
+    pub speculate: bool,
+    /// The message of the timed turn.
+    pub ask: String,
     pub quant: Option<QuantScheme>,
 }
 
@@ -81,6 +84,7 @@ fn cases(
     loaded: &Loaded,
     cache: &mut EngineCache,
     target: usize,
+    ask: &str,
     params: &GenerateParams,
 ) -> Result<Vec<Case>, CliError> {
     let mut messages = history(loaded, target)?;
@@ -99,7 +103,7 @@ fn cases(
     )?;
     let text = loaded.dir.tokenizer.decode(&reply.tokens)?;
     messages.push(Message::new(Role::Assistant, text));
-    messages.push(Message::new(Role::User, "And what about at night?"));
+    messages.push(Message::new(Role::User, ask));
     let timed = encode(loaded, &messages)?;
     // An edit near the start of the conversation: only the system message is still shared.
     if let Some(first) = messages.get_mut(1) {
@@ -142,8 +146,7 @@ fn run(
     let started = Instant::now();
     let outcome = generate_reusing(
         engine,
-        cache,
-        retained,
+        Kept { cache, retained },
         &mut greedy()?,
         ids,
         params,
@@ -205,7 +208,7 @@ fn ms(d: Duration) -> String {
     format!("{:.1}", d.as_secs_f64() * 1000.0)
 }
 
-fn row(case: &Case, mode: Mode, samples: &[Sample], same: bool) -> String {
+fn row(case: &Case, mode: Mode, samples: &[Sample], same: bool, speculate: bool) -> String {
     let Some(first) = samples.first() else {
         return String::new();
     };
@@ -218,8 +221,17 @@ fn row(case: &Case, mode: Mode, samples: &[Sample], same: bool) -> String {
         .iter()
         .filter_map(|s| s.watts.map(|w| w * s.total.as_secs_f64()))
         .collect();
+    let guesses = if speculate {
+        let g = &o.speculation;
+        format!(
+            "  guessed {}/{} in {} of {} passes",
+            g.accepted, g.drafted, g.guessed_passes, g.passes
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{:<24} {:<6} {:>6} {:>6} {:>6}  {:>9} ({}..{})  {:>9}  {:>8}  {:>7}  {}",
+        "{:<24} {:<6} {:>6} {:>6} {:>6}  {:>9} ({}..{})  {:>9}  {:>8}  {:>7}  {}{}",
         case.label,
         if mode == Mode::Keep { "keep" } else { "replay" },
         o.prompt_tokens,
@@ -234,6 +246,7 @@ fn row(case: &Case, mode: Mode, samples: &[Sample], same: bool) -> String {
             .get(joules.len() / 2)
             .map_or_else(|| "-".into(), |j| format!("{j:.1} J")),
         if same { "same reply" } else { "REPLY DIFFERS" },
+        guesses,
     )
 }
 
@@ -259,11 +272,11 @@ pub fn run_turns(
         max_tokens: options.reply_tokens,
         stop_tokens: loaded.model.config().eos_tokens.clone(),
         usable_vocab: loaded.dir.tokenizer.vocab_size(),
-        speculation: None,
+        speculation: options.speculate.then_some(Speculation::MEASURED),
     };
     let mut all = Vec::new();
     for target in &options.history {
-        all.extend(cases(&loaded, &mut cache, *target, &params)?);
+        all.extend(cases(&loaded, &mut cache, *target, &options.ask, &params)?);
     }
     println!(
         "{:<24} {:<6} {:>6} {:>6} {:>6}  {:>9} (min..max)  {:>9}  {:>8}  {:>7}",
@@ -303,8 +316,11 @@ pub fn run_turns(
             .iter()
             .chain(replay)
             .all(|s| keep.first().is_some_and(|k| k.tokens == s.tokens));
-        println!("{}", row(case, Mode::Keep, keep, same));
-        println!("{}", row(case, Mode::Replay, replay, same));
+        println!("{}", row(case, Mode::Keep, keep, same, options.speculate));
+        println!(
+            "{}",
+            row(case, Mode::Replay, replay, same, options.speculate)
+        );
     }
     Ok(())
 }

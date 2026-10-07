@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use sampler::{Sampler, SamplerError};
 use thiserror::Error;
 
-use crate::reuse::Retained;
+use crate::reuse::{Kept, Retained};
 use crate::speculate::{Drafter, Speculation, SpeculationStats};
 use crate::{CausalLm, RollbackError, SequenceCache};
 
@@ -91,37 +91,30 @@ pub fn generate<M: CausalLm>(
     cancel: &AtomicBool,
     on_token: impl FnMut(u32),
 ) -> Result<Outcome, GenerateError<M::Error>> {
-    let mut nothing = Retained::default();
-    generate_reusing(
-        model,
-        kv,
-        &mut nothing,
-        sampler,
-        prompt,
-        params,
-        cancel,
-        on_token,
-    )
+    let kept = Kept {
+        cache: kv,
+        retained: &mut Retained::default(),
+    };
+    generate_reusing(model, kept, sampler, prompt, params, cancel, on_token)
 }
 
-/// `generate` that keeps the cached positions whose ids, recorded in `retained`, exactly match the start of `prompt`
-/// and reads only the rest. Afterwards `retained` holds the ids the cache holds: the prompt and the generated tokens
-/// already fed back (every one but a final token that was sampled and not fed, and never the stop token). An error
-/// leaves it empty. The tokens are the ones a fresh run gives, up to the rounding of passes of different lengths.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "generate's arguments plus the record of the cache"
-)]
+/// `generate` that keeps the cached positions whose ids, recorded in `kept.retained`, exactly match the start of
+/// `prompt` and reads only the rest. Afterwards the record holds the ids the cache holds: the prompt and the generated
+/// tokens already fed back (every one but a final token that was sampled and not fed, and never the stop token). An
+/// error leaves it empty. The tokens are the ones a fresh run gives, up to the rounding of passes of different lengths.
 pub fn generate_reusing<M: CausalLm>(
     model: &M,
-    kv: &mut M::Cache,
-    retained: &mut Retained,
+    kept: Kept<'_, M::Cache>,
     sampler: &mut Sampler,
     prompt: &[u32],
     params: &GenerateParams,
     cancel: &AtomicBool,
     mut on_token: impl FnMut(u32),
 ) -> Result<Outcome, GenerateError<M::Error>> {
+    let Kept {
+        cache: kv,
+        retained,
+    } = kept;
     if prompt.is_empty() {
         return Err(GenerateError::EmptyPrompt);
     }

@@ -244,6 +244,12 @@ pub enum Command {
         /// Do not read the GPU's power
         #[arg(long)]
         no_energy: bool,
+        /// Guess ahead by copying earlier text in both modes (GPU only), and show how many guesses were right
+        #[arg(long)]
+        speculate: bool,
+        /// The message of the timed turn
+        #[arg(long, default_value = "And what about at night?")]
+        ask: String,
         #[command(flatten)]
         quant: QuantArgs,
     },
