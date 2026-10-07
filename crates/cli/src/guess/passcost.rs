@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use model::{BackendChoice, QuantScheme, Stage, StageTimes};
+use model::{BackendChoice, Precision, Stage, StageTimes};
 use runtime::{CausalLm, SequenceCache};
 
 use super::data::{Costs, Curve, FORMAT, Point};
@@ -32,7 +32,7 @@ pub struct Options {
     pub save: Option<PathBuf>,
     /// Also profile each pass size stage by stage and print the attention time and key/value traffic.
     pub stages: bool,
-    pub quant: Option<QuantScheme>,
+    pub precision: Precision,
 }
 
 struct Samples {
@@ -122,7 +122,7 @@ pub fn run(
         Some(needed),
         needed,
         backend,
-        options.quant,
+        options.precision,
         style,
         true,
     )?;
@@ -187,7 +187,8 @@ pub fn run(
             format: FORMAT,
             model: loaded.name.clone(),
             quantization: options
-                .quant
+                .precision
+                .weights
                 .map_or_else(|| "none".to_string(), |q| q.label()),
             backend: engine.backend_name(),
             rounds: options.rounds,

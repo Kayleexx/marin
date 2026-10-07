@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use metrics::{disk_read_bytes, per_second, process_memory};
-use model::{BackendChoice, QuantScheme};
+use model::{BackendChoice, Precision};
 use runtime::SequenceCache;
 use sampler::SamplerConfig;
 
@@ -43,7 +43,7 @@ pub struct Options {
     pub token_pause_ms: f64,
     pub json: Option<PathBuf>,
     /// Store the layer weights quantized (GPU only).
-    pub quant: Option<QuantScheme>,
+    pub precision: Precision,
 }
 
 fn stat(values: &[f64]) -> Result<Stat, CliError> {
@@ -84,7 +84,7 @@ pub fn run(
         Some(ctx),
         ctx,
         backend,
-        options.quant,
+        options.precision,
         style,
         true,
     )?;
@@ -209,7 +209,8 @@ pub fn run(
         model: loaded.name.clone(),
         precision: model::PRECISION,
         quantization: options
-            .quant
+            .precision
+            .weights
             .map_or_else(|| "none".to_string(), |q| q.label()),
         context_length: cache.capacity(),
         batch_size: model::BATCH_SIZE,
@@ -229,7 +230,7 @@ pub fn run(
         load: Load {
             seconds: loaded.took.as_secs_f64(),
             weights_bytes: loaded.footprint.weights,
-            kv_reserved_bytes: loaded.footprint.kv,
+            kv_reserved_bytes: loaded.footprint.kv_window,
             kv_held_pages: cache
                 .kv_held()
                 .and_then(|(pages, _)| u64::try_from(pages).ok()),

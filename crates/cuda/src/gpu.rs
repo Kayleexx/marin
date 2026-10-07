@@ -2,14 +2,18 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use cudarc::driver::sys::CUdevice_attribute;
-use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchArgs, LaunchConfig};
+use cudarc::driver::{
+    CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchArgs, LaunchConfig,
+};
 use cudarc::nvrtc::{CompileOptions, compile_ptx_with_opts};
 
 use crate::CudaError;
+use crate::KvFormat;
 use crate::counters::Counters;
 
 const KERNELS: &str = concat!(
     include_str!("kernels.cu"),
+    include_str!("kv_format.cu"),
     include_str!("attention.cu"),
     include_str!("mma.cu"),
     include_str!("quant.cu")
@@ -21,12 +25,14 @@ pub(crate) struct Kernels {
     pub rms_norm_to: CudaFunction,
     pub matmul: CudaFunction,
     pub rope: CudaFunction,
-    pub attention: CudaFunction,
+    /// The kernels that touch the KV cache exist once per `KvFormat`, indexed by `KvFormat::index`.
+    pub attention: Vec<CudaFunction>,
     pub silu_mul: CudaFunction,
     pub add: CudaFunction,
-    pub attention_partial: CudaFunction,
+    pub attention_partial: Vec<CudaFunction>,
     /// The few-token attention built for 8, 16 and 32 rows.
-    pub attention_multi_partial: [CudaFunction; 3],
+    pub attention_multi_partial: [Vec<CudaFunction>; 3],
+    pub kv_store: Vec<CudaFunction>,
     pub attention_merge: CudaFunction,
     pub matmul_mma: CudaFunction,
     pub matmul_x2: CudaFunction,
@@ -111,6 +117,13 @@ fn libraries_present() -> Result<(), CudaError> {
     }
 }
 
+fn per_format(module: &Arc<CudaModule>, name: &str) -> Result<Vec<CudaFunction>, CudaError> {
+    KvFormat::ALL
+        .iter()
+        .map(|format| Ok(module.load_function(&format!("{name}_{}", format.label()))?))
+        .collect()
+}
+
 impl Gpu {
     pub fn new() -> Result<Self, CudaError> {
         libraries_present()?;
@@ -128,15 +141,16 @@ impl Gpu {
             rms_norm_to: module.load_function("rms_norm_to")?,
             matmul: module.load_function("matmul_bf16")?,
             rope: module.load_function("rope")?,
-            attention: module.load_function("attention")?,
+            attention: per_format(&module, "attention")?,
             silu_mul: module.load_function("silu_mul")?,
             add: module.load_function("add_in_place")?,
-            attention_partial: module.load_function("attention_partial")?,
+            attention_partial: per_format(&module, "attention_partial")?,
             attention_multi_partial: [
-                module.load_function("attention_multi_partial_8")?,
-                module.load_function("attention_multi_partial_16")?,
-                module.load_function("attention_multi_partial_32")?,
+                per_format(&module, "attention_multi_partial_8")?,
+                per_format(&module, "attention_multi_partial_16")?,
+                per_format(&module, "attention_multi_partial_32")?,
             ],
+            kv_store: per_format(&module, "kv_store")?,
             attention_merge: module.load_function("attention_merge")?,
             matmul_mma: module.load_function("matmul_bf16_mma")?,
             matmul_x2: module.load_function("matmul_bf16_x2")?,

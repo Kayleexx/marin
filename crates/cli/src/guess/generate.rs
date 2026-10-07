@@ -2,7 +2,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use model::{BackendChoice, QuantScheme};
+use model::{BackendChoice, Precision};
 use runtime::StopReason;
 
 use super::data::{FORMAT, PromptRun, Reply, Transcripts};
@@ -20,7 +20,7 @@ pub struct Options {
     pub max_tokens: usize,
     pub ctx: usize,
     pub out: PathBuf,
-    pub quant: Option<QuantScheme>,
+    pub precision: Precision,
 }
 
 pub(super) struct Prompt {
@@ -103,12 +103,13 @@ pub fn run(
         Some(options.ctx),
         options.ctx,
         backend,
-        options.quant,
+        options.precision,
         style,
         true,
     )?;
     let quantization = options
-        .quant
+        .precision
+        .weights
         .map_or_else(|| "none".to_string(), |q| q.label());
     let (model, backend_name) = (loaded.name.clone(), loaded.model.backend_name());
     let modes = modes(options.max_tokens);

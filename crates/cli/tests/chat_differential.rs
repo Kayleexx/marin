@@ -136,7 +136,7 @@ fn marin_matches_hugging_face_on_prompts_replies_stops_and_sampling_distribution
         Some(1024),
         1024,
         BackendChoice::Auto,
-        None,
+        model::Precision::default(),
         &Style::plain(),
         false,
     )

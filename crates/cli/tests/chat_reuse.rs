@@ -18,7 +18,7 @@ fn session(ctx: usize, temperature: f32, reuse: bool) -> Result<Session> {
         Some(ctx),
         ctx,
         BackendChoice::Cpu,
-        None,
+        model::Precision::default(),
         &Style::plain(),
         false,
     )?;

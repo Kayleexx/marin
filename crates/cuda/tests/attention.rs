@@ -6,7 +6,7 @@ mod common;
 
 use attention_reference::reference_attention;
 use common::{assert_close, gpu, values};
-use cuda::{CudaError, DeviceKv, Gpu};
+use cuda::{CudaError, DeviceKv, Gpu, KvFormat};
 
 #[test]
 fn attention_matches_a_reference_across_cache_chunks_and_context_lengths() {
@@ -36,7 +36,14 @@ fn attention_matches_a_reference_across_cache_chunks_and_context_lengths() {
         let vals = values(total * stride, 22);
         let q = values(tokens * heads * head_dim, 23);
 
-        let mut kv = DeviceKv::new(&gpu, 2, (heads, kv_heads, head_dim), total + 3).unwrap();
+        let mut kv = DeviceKv::new(
+            &gpu,
+            2,
+            (heads, kv_heads, head_dim),
+            total + 3,
+            KvFormat::F32,
+        )
+        .unwrap();
         if history > 0 {
             let k = gpu.upload(&keys[..history * stride]).unwrap();
             let v = gpu.upload(&vals[..history * stride]).unwrap();
@@ -72,7 +79,13 @@ fn few_token_case(
     let keys = values(total.saturating_mul(stride), 41);
     let vals = values(total.saturating_mul(stride), 42);
     let q = values(tokens.saturating_mul(heads).saturating_mul(head_dim), 43);
-    let mut kv = DeviceKv::new(gpu, 1, (heads, kv_heads, head_dim), total.saturating_add(7))?;
+    let mut kv = DeviceKv::new(
+        gpu,
+        1,
+        (heads, kv_heads, head_dim),
+        total.saturating_add(7),
+        KvFormat::F32,
+    )?;
     let split = history.saturating_mul(stride);
     if history > 0 {
         let k = gpu.upload(keys.get(..split).unwrap_or(&[]))?;
@@ -130,6 +143,7 @@ fn decode_case(
         1,
         (heads, kv_heads, head_dim),
         context.saturating_add(5),
+        KvFormat::F32,
     )?;
     let (old_keys, new_keys) = keys.split_at(split);
     let (old_vals, new_vals) = vals.split_at(split);
@@ -195,7 +209,7 @@ fn decode_attention_reuses_one_scratch_across_growing_contexts() {
     let stride = kv_heads * head_dim;
     let keys = values(steps * stride, 41);
     let vals = values(steps * stride, 42);
-    let mut kv = DeviceKv::new(&gpu, 1, (heads, kv_heads, head_dim), steps).unwrap();
+    let mut kv = DeviceKv::new(&gpu, 1, (heads, kv_heads, head_dim), steps, KvFormat::F32).unwrap();
     for step in 0..steps {
         let row = step * stride..(step + 1) * stride;
         kv.write(
@@ -226,7 +240,7 @@ fn decode_attention_gives_the_same_bits_every_time() {
 #[test]
 fn kv_cache_and_attention_reject_invalid_requests() {
     let Some(gpu) = gpu().unwrap() else { return };
-    let mut kv = DeviceKv::new(&gpu, 1, (4, 2, 16), 4).unwrap();
+    let mut kv = DeviceKv::new(&gpu, 1, (4, 2, 16), 4, KvFormat::F32).unwrap();
     let chunk = gpu.zeros(5 * 32).unwrap();
     assert!(kv.write(&gpu, 0, &chunk, &chunk).is_err(), "over capacity");
     let two = gpu.zeros(2 * 32).unwrap();

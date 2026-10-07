@@ -1,10 +1,10 @@
-use cudarc::driver::{CudaSlice, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaFunction, CudaSlice, LaunchConfig, PushKernelArg};
 
 use crate::ops::{expect_len, to_u32};
 use crate::pages::pages_for;
-use crate::{Buffer, CudaError, DeviceKv, Gpu};
+use crate::{Buffer, CudaError, DeviceKv, Gpu, KvFormat};
 
-const MAX_HEAD_DIM: usize = 256;
+pub(crate) const MAX_HEAD_DIM: usize = 256;
 const SPLIT_BLOCK: u32 = 128;
 /// Most query heads that may share one key/value head in the split decode kernel.
 const MAX_GROUP: usize = 8;
@@ -61,6 +61,22 @@ pub(crate) fn split_scratch(
     Ok((gpu.zeros(acc)?, gpu.zeros(ml)?))
 }
 
+/// Where a layer's keys and values are, for the kernels.
+struct KvView<'a> {
+    pages: &'a CudaSlice<u64>,
+    key_offset: u32,
+    row_bytes: u32,
+    format: usize,
+}
+
+fn kernel(set: &[CudaFunction], format: usize) -> Result<&CudaFunction, CudaError> {
+    set.get(format).ok_or(CudaError::Shape {
+        what: "kv format",
+        expected: KvFormat::ALL.len(),
+        actual: format,
+    })
+}
+
 impl Gpu {
     /// Causal grouped-query attention for the `tokens` new tokens at `start..`, reading
     /// cached keys and values of `layer` (which must already include these tokens).
@@ -107,6 +123,12 @@ impl Gpu {
             });
         };
         let key_offset = kv.key_offset(layer)?;
+        let view = KvView {
+            pages: &kv.page_ptrs,
+            key_offset,
+            row_bytes: to_u32(kv.row_bytes(), "kv row")?,
+            format: kv.format.index(),
+        };
         if tokens == 0 || visible == 0 {
             return Ok(());
         }
@@ -125,7 +147,7 @@ impl Gpu {
         {
             return self.attention_split(
                 q,
-                (&kv.page_ptrs, key_offset),
+                &view,
                 (&mut kv.partial_acc, &mut kv.partial_ml),
                 out,
                 (heads, kv_heads, head_dim),
@@ -139,7 +161,7 @@ impl Gpu {
         {
             return self.attention_multi(
                 q,
-                (&kv.page_ptrs, key_offset),
+                &view,
                 (&mut kv.partial_acc, &mut kv.partial_ml),
                 out,
                 (heads, kv_heads, head_dim),
@@ -167,8 +189,12 @@ impl Gpu {
             to_u32(head_dim, "head size")?,
             to_u32(start, "start position")?,
         );
-        self.launch(&self.kernels.attention, config, |a| {
-            a.arg(&q.data).arg(&kv.page_ptrs).arg(&key_offset);
+        let function = kernel(&self.kernels.attention, view.format)?;
+        self.launch(function, config, |a| {
+            a.arg(&q.data)
+                .arg(view.pages)
+                .arg(&view.key_offset)
+                .arg(&view.row_bytes);
             a.arg(&mut out.data);
             a.arg(&heads)
                 .arg(&kv_heads)
@@ -184,7 +210,7 @@ impl Gpu {
     fn attention_split(
         &self,
         q: &Buffer,
-        (pages, key_offset): (&CudaSlice<u64>, u32),
+        view: &KvView,
         (partial_acc, partial_ml): (&mut Buffer, &mut Buffer),
         out: &mut Buffer,
         (heads, kv_heads, head_dim): (usize, usize, usize),
@@ -226,8 +252,12 @@ impl Gpu {
             to_u32(chunk, "attention chunk")?,
             to_u32(splits, "attention splits")?,
         );
-        self.launch(&self.kernels.attention_partial, partial, |a| {
-            a.arg(&q.data).arg(pages).arg(&key_offset);
+        let function = kernel(&self.kernels.attention_partial, view.format)?;
+        self.launch(function, partial, |a| {
+            a.arg(&q.data)
+                .arg(view.pages)
+                .arg(&view.key_offset)
+                .arg(&view.row_bytes);
             a.arg(&mut partial_acc.data).arg(&mut partial_ml.data);
             a.arg(&heads_u).arg(&kv_heads_u).arg(&head_dim_u);
             a.arg(&visible_u).arg(&chunk_u).arg(&splits_u).arg(&scale);
@@ -252,7 +282,7 @@ impl Gpu {
     fn attention_multi(
         &self,
         q: &Buffer,
-        (pages, key_offset): (&CudaSlice<u64>, u32),
+        view: &KvView,
         (partial_acc, partial_ml): (&mut Buffer, &mut Buffer),
         out: &mut Buffer,
         (heads, kv_heads, head_dim): (usize, usize, usize),
@@ -307,7 +337,7 @@ impl Gpu {
             9..=16 => 1,
             _ => 2,
         };
-        let kernel =
+        let set =
             self.kernels
                 .attention_multi_partial
                 .get(variant)
@@ -316,8 +346,11 @@ impl Gpu {
                     max: MULTI_MAX_ROWS,
                     actual: rows,
                 })?;
-        self.launch(kernel, partial, |a| {
-            a.arg(&q.data).arg(pages).arg(&key_offset);
+        self.launch(kernel(set, view.format)?, partial, |a| {
+            a.arg(&q.data)
+                .arg(view.pages)
+                .arg(&view.key_offset)
+                .arg(&view.row_bytes);
             a.arg(&mut partial_acc.data).arg(&mut partial_ml.data);
             a.arg(&heads_u).arg(&kv_heads_u).arg(&head_dim_u);
             a.arg(&start_u).arg(&tokens_u).arg(&chunk_u).arg(&splits_u);

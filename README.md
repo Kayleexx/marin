@@ -5,7 +5,7 @@ Marin is a small language-model engine written from scratch in Rust, built to ru
 
 - **Models:** Qwen3 (1.7B is the reference), on the CPU or on an NVIDIA GPU with CUDA kernels written for this project.
 - **Checked against Hugging Face**, token for token.
-- **Faster where it matters:** tensor-core prefill, tuned attention, int8 / int4 weights, a chat cache that survives between turns, a KV cache that grows with the conversation, and opt-in guessing ahead.
+- **Faster where it matters:** tensor-core prefill, tuned attention, int8 / int4 weights, a chat cache that survives between turns, a KV cache that grows with the conversation (optionally stored in half the bytes), and opt-in guessing ahead.
 - **Measured:** every optimization has before/after numbers, and tools to repeat them, in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Quick start
@@ -73,6 +73,7 @@ The record is written only after a reply ends cleanly and is cleared on any erro
 - A short chat with `--ctx 8192` holds about 117 MB of KV instead of 1.88 GB.
 - `--ctx` is only the longest conversation allowed. Starting needs the model plus one slab; if the whole window would not fit the GPU, a note says so, and a conversation that fills the GPU stops with a clear out-of-memory error.
 - The cost is 0 to 4% in speed at long contexts, and memory is not given back to the GPU until the session ends.
+- `--kv-type f16` (marin-run) stores keys and values in half the bytes: twice the context fits, with no quality loss measured. f32 stays the default.
 
 Details in [BENCHMARKS.md](BENCHMARKS.md#11-paged-kv-cache-v4).
 
@@ -100,22 +101,6 @@ Qwen3-1.7B on a laptop GPU held to about 40 W (the power limit decides a lot, so
 
 Methods, tables and commands to repeat each number are in [BENCHMARKS.md](BENCHMARKS.md).
 
-## Status
-
-| Stage | State |
-|---|---|
-| Correct inference on CPU and GPU, checked against Hugging Face | done |
-| Measuring everything: speed, memory, power, per-stage time | done |
-| Faster execution: tensor-core prefill, tuned attention, fixed workspace | done |
-| int8 / int4 weights | done (int8 is the one to use) |
-| Paged KV cache that grows with the conversation | done |
-| Chat cache kept between turns | done |
-| Guessing ahead (speculative decoding) | done, opt-in |
-| KV cache in 16-bit or 8-bit numbers | next: measure memory, quality, speed and longest context |
-| Shared prefixes across chats, saved state across restarts | not started |
-| KV pages moved between GPU memory, RAM and disk | not started |
-| Several requests at once, with a scheduler | not started |
-
 ## Repository layout
 
 | Crate | What it does |
@@ -123,7 +108,7 @@ Methods, tables and commands to repeat each number are in [BENCHMARKS.md](BENCHM
 | `tensor` | math on f32 data: matmul, norms, rotary embeddings, quantization |
 | `loader` | reads the config, tokenizer and safetensors weights |
 | `model` | the Qwen3 network on CPU and GPU |
-| `cuda` | GPU kernels and the paged KV cache behind a safe API (the only crate allowed `unsafe`) |
+| `cuda` | GPU kernels and the paged KV cache behind a safe API |
 | `kv` | the CPU KV cache |
 | `sampler` | greedy, temperature, top-k, top-p |
 | `runtime` | the generate loop: prefill, decode, stop conditions, cache reuse, guessing ahead |
@@ -145,11 +130,3 @@ cargo check --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 ```
-
-Project rules (the workspace lints and CI enforce most of them):
-
-- Safe Rust only. `unsafe` lives in the `cuda` crate; every other crate has `#![forbid(unsafe_code)]`.
-- No `unwrap`, `expect`, `panic!`, or indexing and arithmetic that can panic in production code (workspace lints deny them). Errors carry context.
-- No lint suppressions: fix the cause.
-- Rust files stay under 425 lines.
-- An optimization needs a before/after measurement in [BENCHMARKS.md](BENCHMARKS.md), and correctness is checked before speed.

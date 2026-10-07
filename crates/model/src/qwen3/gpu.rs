@@ -1,4 +1,4 @@
-use cuda::{Buffer, DeviceKv, Gpu};
+use cuda::{Buffer, DeviceKv, Gpu, KvFormat};
 use loader::ModelDir;
 use metrics::{Stage, StageTimes};
 use runtime::{CausalLm, RollbackError, SequenceCache};
@@ -87,10 +87,19 @@ impl SequenceCache for GpuCache {
 
 /// GPU memory the cache needs before the first token for a window of `capacity` positions; the rest is allocated as the
 /// sequence grows.
-pub fn kv_startup_bytes(config: &Qwen3Config, capacity: usize) -> Option<u64> {
+pub fn kv_startup_bytes(config: &Qwen3Config, capacity: usize, format: KvFormat) -> Option<u64> {
     let dims = (config.heads, config.kv_heads, config.head_dim);
-    DeviceKv::startup_bytes(config.layers, dims, capacity)
+    DeviceKv::startup_bytes(config.layers, dims, capacity, format)
         .and_then(|bytes| u64::try_from(bytes).ok())
+}
+
+/// GPU memory the cache takes once a sequence fills the whole window of `capacity` positions.
+pub fn kv_window_bytes(config: &Qwen3Config, capacity: usize, format: KvFormat) -> Option<u64> {
+    let row = format.row_bytes(config.kv_heads, config.head_dim)?;
+    let bytes = row
+        .checked_mul(capacity)?
+        .checked_mul(config.layers.checked_mul(2)?)?;
+    u64::try_from(bytes).ok()
 }
 
 /// Most tokens `forward_rows` takes in one pass.
@@ -105,6 +114,7 @@ pub struct Qwen3Gpu {
     weights: Qwen3Weights<Weight, Buffer>,
     gpu: Gpu,
     quant: Option<QuantScheme>,
+    kv_format: KvFormat,
 }
 
 impl Qwen3Gpu {
@@ -123,7 +133,18 @@ impl Qwen3Gpu {
             weights,
             gpu,
             quant,
+            kv_format: KvFormat::default(),
         })
+    }
+
+    /// Caches made from now on store keys and values in `format`.
+    pub fn with_kv_format(mut self, format: KvFormat) -> Self {
+        self.kv_format = format;
+        self
+    }
+
+    pub fn kv_format(&self) -> KvFormat {
+        self.kv_format
     }
 
     pub fn quantization(&self) -> Option<QuantScheme> {
@@ -146,6 +167,7 @@ impl Qwen3Gpu {
                 cfg.layers,
                 (cfg.heads, cfg.kv_heads, cfg.head_dim),
                 capacity,
+                self.kv_format,
             )?,
             decode: Workspace::new(&self.gpu, cfg, 1, 1)?,
             verify: (0..MAX_ROWS).map(|_| None).collect(),

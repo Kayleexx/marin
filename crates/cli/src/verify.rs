@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use loader::Tokenizer;
-use model::{BackendChoice, Engine, EngineCache};
+use model::{BackendChoice, Engine, EngineCache, KvFormat, Precision};
 use runtime::CausalLm;
 use serde::Deserialize;
 
@@ -158,6 +158,7 @@ pub fn run(
     model_dir: &Path,
     reference_path: &Path,
     backend: BackendChoice,
+    kv: KvFormat,
     style: &Style,
 ) -> Result<(), CliError> {
     let reference = read_reference(reference_path)?;
@@ -177,7 +178,7 @@ pub fn run(
         Some(ctx),
         DEFAULT_CTX,
         backend,
-        None,
+        Precision { weights: None, kv },
         style,
         true,
     )?;

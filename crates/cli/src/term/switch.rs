@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use model::BackendChoice;
+use model::{BackendChoice, Precision};
 
 use super::app::{App, PanelCache, Parked};
 use super::raw::RawMode;
@@ -38,7 +38,7 @@ impl App {
             Some(parked.ctx),
             parked.ctx,
             backend,
-            None,
+            Precision::default(),
             &self.style,
             true,
         )?;

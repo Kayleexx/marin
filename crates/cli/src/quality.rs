@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use model::{BackendChoice, QuantScheme};
+use model::{BackendChoice, Precision};
 use runtime::CausalLm;
 
 use crate::CliError;
@@ -22,7 +22,7 @@ pub struct Options {
     pub tokens: usize,
     pub save: Option<PathBuf>,
     pub against: Option<PathBuf>,
-    pub quant: Option<QuantScheme>,
+    pub precision: Precision,
 }
 
 fn read_reference(path: &Path) -> Result<Scores, CliError> {
@@ -63,7 +63,7 @@ pub fn run(
         Some(options.tokens),
         options.tokens,
         backend,
-        options.quant,
+        options.precision,
         style,
         true,
     )?;
@@ -106,7 +106,8 @@ pub fn run(
         format: FORMAT,
         model: loaded.name.clone(),
         quantization: options
-            .quant
+            .precision
+            .weights
             .map_or_else(|| "none".to_string(), |q| q.label()),
         prompt_tokens: PROMPT_TOKENS,
         text_tokens: ids.len(),

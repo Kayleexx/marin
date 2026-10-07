@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use metrics::{Stage, StageTimes, TraceEntry};
-use model::{BackendChoice, Engine, EngineCache};
+use model::{BackendChoice, Engine, EngineCache, Precision};
 use runtime::SequenceCache;
 use serde::Serialize;
 
@@ -277,7 +277,15 @@ pub fn run(
         None => needed,
     };
     let json = options.json.as_deref().map(JsonOut::create).transpose()?;
-    let loaded = load(model_dir, Some(ctx), ctx, backend, None, style, true)?;
+    let loaded = load(
+        model_dir,
+        Some(ctx),
+        ctx,
+        backend,
+        Precision::default(),
+        style,
+        true,
+    )?;
     let engine = &loaded.model;
     let mut cache = engine.new_cache(ctx)?;
     let prompt = measure::prompt(&loaded.dir.tokenizer, options.prompt_tokens)?;

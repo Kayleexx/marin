@@ -2,10 +2,11 @@
 
 mod attention_reference;
 mod common;
+mod kv_round;
 mod mirror;
 
 use common::gpu;
-use cuda::{DeviceKv, PAGE_TOKENS, SLAB_PAGES, pages_for};
+use cuda::{DeviceKv, KvFormat, PAGE_TOKENS, SLAB_PAGES, pages_for};
 use mirror::{LAYERS, Mirror, Result, SMALL};
 
 #[test]
@@ -14,7 +15,7 @@ fn attention_reads_the_right_page_and_row_at_every_boundary() -> Result<()> {
     for total in [
         0, 1, 2, 31, 32, 33, 62, 63, 64, 65, 66, 126, 127, 128, 129, 130, 191, 192, 193, 320, 321,
     ] {
-        let mut mirror = Mirror::new(&gpu, SMALL, 400)?;
+        let mut mirror = Mirror::new(&gpu, SMALL, 400, KvFormat::F32)?;
         if total > 0 {
             mirror.append(&gpu, total)?;
         }
@@ -32,7 +33,7 @@ fn attention_reads_the_right_page_and_row_at_every_boundary() -> Result<()> {
 #[test]
 fn growing_one_token_at_a_time_crosses_pages_correctly() -> Result<()> {
     let Some(gpu) = gpu()? else { return Ok(()) };
-    let mut mirror = Mirror::new(&gpu, SMALL, 260)?;
+    let mut mirror = Mirror::new(&gpu, SMALL, 260, KvFormat::F32)?;
     for len in 1..=200 {
         mirror.append(&gpu, 1)?;
         assert_eq!(mirror.kv.pages_in_use(), pages_for(len));
@@ -48,7 +49,7 @@ fn growing_one_token_at_a_time_crosses_pages_correctly() -> Result<()> {
 fn a_realistic_head_layout_reads_pages_correctly() -> Result<()> {
     let Some(gpu) = gpu()? else { return Ok(()) };
     for total in [63, 64, 65, 129] {
-        let mut mirror = Mirror::new(&gpu, (16, 8, 128), 300)?;
+        let mut mirror = Mirror::new(&gpu, (16, 8, 128), 300, KvFormat::F32)?;
         mirror.append(&gpu, total)?;
         mirror.check_every_kernel(&gpu)?;
     }
@@ -58,7 +59,7 @@ fn a_realistic_head_layout_reads_pages_correctly() -> Result<()> {
 #[test]
 fn a_cleared_and_refilled_cache_reads_through_a_reversed_page_table() -> Result<()> {
     let Some(gpu) = gpu()? else { return Ok(()) };
-    let mut mirror = Mirror::new(&gpu, SMALL, 600)?;
+    let mut mirror = Mirror::new(&gpu, SMALL, 600, KvFormat::F32)?;
     let tokens = 5 * PAGE_TOKENS + 17;
     mirror.append(&gpu, tokens)?;
     assert_eq!(mirror.kv.page_ids(), [0, 1, 2, 3, 4, 5]);
@@ -82,7 +83,7 @@ fn a_cleared_and_refilled_cache_reads_through_a_reversed_page_table() -> Result<
 #[test]
 fn clear_gives_every_page_back_like_truncating_to_zero() -> Result<()> {
     let Some(gpu) = gpu()? else { return Ok(()) };
-    let mut mirror = Mirror::new(&gpu, SMALL, 300)?;
+    let mut mirror = Mirror::new(&gpu, SMALL, 300, KvFormat::F32)?;
     mirror.append(&gpu, 150)?;
     mirror.kv.clear();
     assert_eq!((mirror.kv.len(), mirror.kv.pages_in_use()), (0, 0));
@@ -98,7 +99,7 @@ fn clear_gives_every_page_back_like_truncating_to_zero() -> Result<()> {
 #[test]
 fn rolling_back_into_a_page_and_regrowing_mixes_the_page_order() -> Result<()> {
     let Some(gpu) = gpu()? else { return Ok(()) };
-    let mut mirror = Mirror::new(&gpu, SMALL, 600)?;
+    let mut mirror = Mirror::new(&gpu, SMALL, 600, KvFormat::F32)?;
     mirror.append(&gpu, 400)?;
     assert_eq!(mirror.kv.page_ids(), [0, 1, 2, 3, 4, 5, 6]);
     mirror.truncate(70)?;
@@ -113,7 +114,7 @@ fn rolling_back_into_a_page_and_regrowing_mixes_the_page_order() -> Result<()> {
 #[test]
 fn truncating_gives_pages_back_exactly_when_a_page_empties() -> Result<()> {
     let Some(gpu) = gpu()? else { return Ok(()) };
-    let mut mirror = Mirror::new(&gpu, SMALL, 300)?;
+    let mut mirror = Mirror::new(&gpu, SMALL, 300, KvFormat::F32)?;
     mirror.append(&gpu, 200)?;
     assert_eq!(mirror.kv.pages_in_use(), 4);
     for (len, pages) in [
@@ -143,7 +144,7 @@ fn truncating_gives_pages_back_exactly_when_a_page_empties() -> Result<()> {
 #[test]
 fn memory_follows_the_live_tokens_and_not_the_capacity() -> Result<()> {
     let Some(gpu) = gpu()? else { return Ok(()) };
-    let mut mirror = Mirror::new(&gpu, SMALL, 8192)?;
+    let mut mirror = Mirror::new(&gpu, SMALL, 8192, KvFormat::F32)?;
     assert_eq!((mirror.kv.pages_held(), mirror.kv.bytes_held()), (0, 0));
     let page = LAYERS * 2 * PAGE_TOKENS * 2 * 16 * 4;
     let slab = SLAB_PAGES * page;
@@ -173,7 +174,7 @@ fn memory_follows_the_live_tokens_and_not_the_capacity() -> Result<()> {
 #[test]
 fn repeated_appends_and_rollbacks_like_guessing_ahead_stay_exact() -> Result<()> {
     let Some(gpu) = gpu()? else { return Ok(()) };
-    let mut mirror = Mirror::new(&gpu, SMALL, 400)?;
+    let mut mirror = Mirror::new(&gpu, SMALL, 400, KvFormat::F32)?;
     mirror.append(&gpu, 50)?;
     let mut state = 0x2545_f491_4f6c_dd1d_u64;
     for step in 0..150_usize {
@@ -203,7 +204,7 @@ fn repeated_appends_and_rollbacks_like_guessing_ahead_stay_exact() -> Result<()>
 #[test]
 fn a_failed_write_keeps_no_pages_and_attention_refuses_pages_that_do_not_exist() -> Result<()> {
     let Some(gpu) = gpu()? else { return Ok(()) };
-    let mut kv = DeviceKv::new(&gpu, 1, SMALL, 100)?;
+    let mut kv = DeviceKv::new(&gpu, 1, SMALL, 100, KvFormat::F32)?;
     let too_many = gpu.zeros(101 * 32)?;
     assert!(kv.write(&gpu, 0, &too_many, &too_many).is_err());
     assert_eq!((kv.pages_in_use(), kv.pages_held()), (0, 0));
@@ -223,7 +224,7 @@ fn a_failed_write_keeps_no_pages_and_attention_refuses_pages_that_do_not_exist()
 #[test]
 fn a_capacity_that_is_not_a_page_multiple_fills_exactly() -> Result<()> {
     let Some(gpu) = gpu()? else { return Ok(()) };
-    let mut mirror = Mirror::new(&gpu, SMALL, 130)?;
+    let mut mirror = Mirror::new(&gpu, SMALL, 130, KvFormat::F32)?;
     mirror.append(&gpu, 129)?;
     mirror.check(&gpu, 1)?;
     mirror.append(&gpu, 1)?;
@@ -240,8 +241,8 @@ fn a_capacity_that_is_not_a_page_multiple_fills_exactly() -> Result<()> {
 #[test]
 fn two_sequences_do_not_see_each_others_pages() -> Result<()> {
     let Some(gpu) = gpu()? else { return Ok(()) };
-    let mut a = Mirror::new(&gpu, SMALL, 300)?;
-    let mut b = Mirror::new(&gpu, SMALL, 300)?;
+    let mut a = Mirror::new(&gpu, SMALL, 300, KvFormat::F32)?;
+    let mut b = Mirror::new(&gpu, SMALL, 300, KvFormat::F32)?;
     for round in 0..6_usize {
         a.append(&gpu, 37)?;
         b.append(&gpu, 45)?;

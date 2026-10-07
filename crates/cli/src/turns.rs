@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use chat::{DEFAULT_SYSTEM, Message, Role, render};
 use metrics::{Sampler as GpuSampler, spread};
-use model::{BackendChoice, Engine, EngineCache, QuantScheme};
+use model::{BackendChoice, Engine, EngineCache, Precision};
 use runtime::{GenerateParams, Kept, Outcome, Retained, Speculation, generate_reusing};
 
 use crate::CliError;
@@ -20,7 +20,7 @@ pub struct Options {
     pub energy: bool,
     pub speculate: bool,
     pub ask: String,
-    pub quant: Option<QuantScheme>,
+    pub precision: Precision,
 }
 
 struct Case {
@@ -256,7 +256,7 @@ pub fn run_turns(
         Some(options.ctx),
         options.ctx,
         backend,
-        options.quant,
+        options.precision,
         style,
         true,
     )?;

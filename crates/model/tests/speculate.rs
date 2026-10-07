@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 use loader::ModelDir;
-use model::{Backend, Engine, QuantBits, QuantScheme};
+use model::{Backend, Engine, KvFormat, QuantBits, QuantScheme};
 use runtime::{GenerateParams, SequenceCache, Speculation, generate};
 use sampler::{Sampler, SamplerConfig};
 
@@ -17,10 +17,10 @@ struct Fixture {
     dir: ModelDir,
 }
 
-fn fixture(backend: Backend, quant: Option<QuantScheme>) -> Result<Fixture> {
+fn fixture(backend: Backend, quant: Option<QuantScheme>, kv: KvFormat) -> Result<Fixture> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-chat");
     let dir = ModelDir::open(&path)?;
-    let engine = Engine::load(&dir, backend, quant, |_, _| {})?;
+    let engine = Engine::load(&dir, backend, quant, |_, _| {})?.with_kv_format(kv)?;
     Ok(Fixture { engine, dir })
 }
 
@@ -133,7 +133,7 @@ fn check(f: &Fixture) -> Result<(usize, usize)> {
 #[test]
 fn bf16_guessing_gives_plain_decodings_tokens() {
     let Some(backend) = gpu() else { return };
-    let f = fixture(backend, None).unwrap();
+    let f = fixture(backend, None, KvFormat::F32).unwrap();
     let (guessed, rejected) = check(&f).unwrap();
     assert!(
         guessed > 50 && rejected > 50,
@@ -148,7 +148,7 @@ fn int8_guessing_gives_plain_decodings_tokens() {
         bits: QuantBits::Int8,
         group: 32,
     };
-    let f = fixture(backend, Some(scheme)).unwrap();
+    let f = fixture(backend, Some(scheme), KvFormat::F32).unwrap();
     let (guessed, rejected) = check(&f).unwrap();
     assert!(
         guessed > 50 && rejected > 50,
@@ -158,7 +158,7 @@ fn int8_guessing_gives_plain_decodings_tokens() {
 
 #[test]
 fn the_cpu_decodes_plainly_when_asked_to_guess() {
-    let f = fixture(Backend::Cpu, None).unwrap();
+    let f = fixture(Backend::Cpu, None, KvFormat::F32).unwrap();
     let prompt = prompts(&f).unwrap().remove(0);
     let sampling = samplings()[0];
     let plain = reply(&f, &prompt, sampling, 30, None).unwrap();
@@ -175,4 +175,22 @@ fn the_cpu_decodes_plainly_when_asked_to_guess() {
     .unwrap();
     assert_eq!(asked.tokens, plain.tokens);
     assert_eq!((asked.guessed_passes, asked.used), (0, plain.used));
+}
+
+#[test]
+fn lower_precision_kv_guessing_gives_plain_decodings_tokens() {
+    let scheme = QuantScheme {
+        bits: QuantBits::Int8,
+        group: 32,
+    };
+    for kv in [KvFormat::F16] {
+        for quant in [None, Some(scheme)] {
+            let Some(backend) = gpu() else { return };
+            let (guessed, rejected) = check(&fixture(backend, quant, kv).unwrap()).unwrap();
+            assert!(
+                guessed > 50 && rejected > 50,
+                "{kv:?}: guessed {guessed} rejected {rejected}"
+            );
+        }
+    }
 }

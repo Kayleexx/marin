@@ -2,7 +2,8 @@ use std::error::Error;
 
 use crate::attention_reference::reference_attention;
 use crate::common::{assert_close, values};
-use cuda::{DeviceKv, Gpu};
+use crate::kv_round::round_trip;
+use cuda::{DeviceKv, Gpu, KvFormat};
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -18,15 +19,23 @@ pub struct Layer {
 pub struct Mirror {
     pub kv: DeviceKv,
     pub dims: (usize, usize, usize),
+    pub format: KvFormat,
     pub layers: Vec<Layer>,
     pub seed: u64,
 }
 
 impl Mirror {
-    pub fn new(gpu: &Gpu, dims: (usize, usize, usize), capacity: usize) -> Result<Self> {
+    /// `layers` holds what the cache should return, so the values after rounding to `format`.
+    pub fn new(
+        gpu: &Gpu,
+        dims: (usize, usize, usize),
+        capacity: usize,
+        format: KvFormat,
+    ) -> Result<Self> {
         Ok(Self {
-            kv: DeviceKv::new(gpu, LAYERS, dims, capacity)?,
+            kv: DeviceKv::new(gpu, LAYERS, dims, capacity, format)?,
             dims,
+            format,
             layers: vec![Layer::default(); LAYERS],
             seed: 1,
         })
@@ -56,8 +65,8 @@ impl Mirror {
         for (layer, (held, add)) in self.layers.iter_mut().zip(new).enumerate() {
             let (k, v) = (gpu.upload(&add.keys)?, gpu.upload(&add.vals)?);
             self.kv.write(gpu, layer, &k, &v)?;
-            held.keys.extend(add.keys);
-            held.vals.extend(add.vals);
+            held.keys.extend(round_trip(self.format, &add.keys));
+            held.vals.extend(round_trip(self.format, &add.vals));
         }
         self.kv.advance(tokens)?;
         Ok(())
@@ -91,8 +100,8 @@ impl Mirror {
                 tokens,
                 &mut out,
             )?;
-            let keys = [held.keys.as_slice(), &add.keys].concat();
-            let vals = [held.vals.as_slice(), &add.vals].concat();
+            let keys = [held.keys.as_slice(), &round_trip(self.format, &add.keys)].concat();
+            let vals = [held.vals.as_slice(), &round_trip(self.format, &add.vals)].concat();
             let expected =
                 reference_attention(&q, &keys, &vals, (heads, kv_heads, head_dim, len, tokens));
             assert_close(&gpu.download(&out)?, &expected, 1e-4);

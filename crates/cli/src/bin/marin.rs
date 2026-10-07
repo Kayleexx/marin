@@ -181,7 +181,7 @@ fn open(
         options.ctx,
         CHAT_CTX,
         backend,
-        None,
+        model::Precision::default(),
         &style,
         stderr_is_terminal(),
     )?;

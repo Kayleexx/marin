@@ -25,7 +25,7 @@ fn pages_are_counted_up_at_every_page_boundary() {
 
 #[test]
 fn the_page_size_matches_the_one_the_kernels_were_written_for() {
-    let kernels = include_str!("attention.cu");
+    let kernels = include_str!("kv_format.cu");
     assert!(kernels.contains("#define PAGE_SHIFT 6"));
     assert_eq!(PAGE_TOKENS, 1 << 6);
     assert!(kernels.contains(&format!("#define SLAB_PAGES {SLAB_PAGES}")));
@@ -211,7 +211,7 @@ fn startup_needs_one_slab_and_the_scratch_not_the_window() {
     let dims = (16, 8, 128);
     let slab = 28 * 2 * SLAB_PAGES * PAGE_TOKENS * 8 * 128 * 4;
     let window = 8192 * 28 * 2 * 8 * 128 * 4;
-    let startup = DeviceKv::startup_bytes(28, dims, 8192).unwrap();
+    let startup = DeviceKv::startup_bytes(28, dims, 8192, crate::KvFormat::F32).unwrap();
     assert!(
         startup > slab && startup < slab + 16 * 1024 * 1024,
         "{startup}"
@@ -221,8 +221,11 @@ fn startup_needs_one_slab_and_the_scratch_not_the_window() {
         "{startup} against a window of {window}"
     );
     assert!(
-        DeviceKv::startup_bytes(28, dims, 64).unwrap() > slab,
+        DeviceKv::startup_bytes(28, dims, 64, crate::KvFormat::F32).unwrap() > slab,
         "a short window still takes a whole slab"
     );
-    assert_eq!(DeviceKv::startup_bytes(usize::MAX, dims, 8192), None);
+    assert_eq!(
+        DeviceKv::startup_bytes(usize::MAX, dims, 8192, crate::KvFormat::F32),
+        None
+    );
 }

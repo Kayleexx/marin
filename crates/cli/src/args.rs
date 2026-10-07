@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use model::{DEFAULT_GROUP, QuantBits, QuantScheme};
+use model::{DEFAULT_GROUP, KvFormat, Precision, QuantBits, QuantScheme};
 
 use crate::CliError;
 use crate::trace::Pass;
@@ -291,6 +291,8 @@ pub enum Command {
         /// Where the math runs
         #[arg(long, value_enum, default_value_t = BackendArg::Auto)]
         backend: BackendArg,
+        #[command(flatten)]
+        kv: KvArgs,
     },
 }
 
@@ -317,18 +319,47 @@ pub struct QuantArgs {
     /// Weights that share one scale when quantizing, a multiple of 32: smaller is more accurate and takes more memory
     #[arg(long, default_value_t = DEFAULT_GROUP, requires = "quantize")]
     pub quant_group: usize,
+    #[command(flatten)]
+    pub kv: KvArgs,
+}
+
+#[derive(Args, Debug, Clone, Copy)]
+pub struct KvArgs {
+    /// How the GPU KV cache stores keys and values: f32, or f16 for half the memory (attention math stays f32)
+    #[arg(long, value_enum, default_value_t = KvTypeArg::F32)]
+    pub kv_type: KvTypeArg,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KvTypeArg {
+    F32,
+    F16,
 }
 
 impl QuantArgs {
-    pub fn scheme(&self) -> Result<Option<QuantScheme>, CliError> {
+    pub fn precision(&self) -> Result<Precision, CliError> {
         let bits = match self.quantize {
-            None => return Ok(None),
-            Some(QuantBitsArg::Int8) => QuantBits::Int8,
-            Some(QuantBitsArg::Int4) => QuantBits::Int4,
+            None => None,
+            Some(QuantBitsArg::Int8) => Some(QuantBits::Int8),
+            Some(QuantBitsArg::Int4) => Some(QuantBits::Int4),
         };
-        QuantScheme::new(bits, self.quant_group)
-            .map(Some)
-            .map_err(|e| CliError::BadOption(e.to_string()))
+        let weights = bits
+            .map(|bits| QuantScheme::new(bits, self.quant_group))
+            .transpose()
+            .map_err(|e| CliError::BadOption(e.to_string()))?;
+        Ok(Precision {
+            weights,
+            kv: self.kv.format(),
+        })
+    }
+}
+
+impl KvArgs {
+    pub fn format(&self) -> KvFormat {
+        match self.kv_type {
+            KvTypeArg::F32 => KvFormat::F32,
+            KvTypeArg::F16 => KvFormat::F16,
+        }
     }
 }
 

@@ -1,13 +1,16 @@
-use cudarc::driver::{CudaSlice, DevicePtr};
+use cudarc::driver::{CudaSlice, DevicePtr, LaunchConfig, PushKernelArg};
 
-use crate::attention::{scratch_lens, split_scratch};
+use crate::attention::{MAX_HEAD_DIM, scratch_lens, split_scratch};
+use crate::ops::to_u32;
 use crate::pages::{PAGE_TOKENS, PagePool, PageTable, SLAB_PAGES, pages_for};
-use crate::{Buffer, CudaError, Gpu};
+use crate::{Buffer, CudaError, Gpu, KvFormat};
 
 /// Pages of `PAGE_TOKENS` positions, allocated in slabs of `SLAB_PAGES` pages on first use. A slab is laid out
-/// `[layer][keys, values][page][row][kv_head][head_dim]`, so a layer's keys stay contiguous across the slab's pages.
+/// `[layer][keys, values][page][row]`, so a layer's keys stay contiguous across the slab's pages. A row is the
+/// `[kv_head][head_dim]` values of one position in the cache's `KvFormat`.
 pub struct DeviceKv {
-    slabs: Vec<Option<CudaSlice<f32>>>,
+    slabs: Vec<Option<CudaSlice<u8>>>,
+    pub(crate) format: KvFormat,
     pool: PagePool,
     table: PageTable,
     /// Only the first `table.len()` entries are valid.
@@ -37,17 +40,15 @@ impl DeviceKv {
         layers: usize,
         (heads, kv_heads, head_dim): (usize, usize, usize),
         capacity: usize,
+        format: KvFormat,
     ) -> Result<Self, CudaError> {
-        let overflow = CudaError::Overflow { what: "kv cache" };
-        kv_heads
-            .checked_mul(head_dim)
-            .and_then(|stride| stride.checked_mul(PAGE_TOKENS.checked_mul(SLAB_PAGES)?))
-            .and_then(|region| region.checked_mul(layers.checked_mul(2)?))
-            .ok_or(overflow)?;
+        slab_bytes(layers, (kv_heads, head_dim), format)
+            .ok_or(CudaError::Overflow { what: "kv cache" })?;
         let limit = pages_for(capacity);
         let (partial_acc, partial_ml) = split_scratch(gpu, (heads, kv_heads, head_dim), capacity)?;
         Ok(Self {
             slabs: Vec::new(),
+            format,
             pool: PagePool::new(limit),
             table: PageTable::default(),
             page_ptrs: gpu.stream.alloc_zeros::<u64>(limit.max(1))?,
@@ -66,17 +67,21 @@ impl DeviceKv {
         self.kv_heads.saturating_mul(self.head_dim)
     }
 
-    /// Floats of one layer's keys (or values) in a slab.
-    fn region_floats(&self) -> usize {
-        self.stride()
+    pub(crate) fn row_bytes(&self) -> usize {
+        self.format
+            .row_bytes(self.kv_heads, self.head_dim)
+            .unwrap_or(usize::MAX)
+    }
+
+    /// Bytes of one layer's keys (or values) in a slab.
+    fn region_bytes(&self) -> usize {
+        self.row_bytes()
             .saturating_mul(PAGE_TOKENS)
             .saturating_mul(SLAB_PAGES)
     }
 
-    fn slab_floats(&self) -> usize {
-        self.region_floats()
-            .saturating_mul(self.layers)
-            .saturating_mul(2)
+    pub fn format(&self) -> KvFormat {
+        self.format
     }
 
     pub fn len(&self) -> usize {
@@ -114,15 +119,16 @@ impl DeviceKv {
 
     /// Keys and values of every layer for one page.
     pub fn page_bytes(&self) -> usize {
-        self.stride()
+        self.row_bytes()
             .saturating_mul(PAGE_TOKENS)
             .saturating_mul(self.layers)
             .saturating_mul(2)
-            .saturating_mul(size_of::<f32>())
     }
 
     pub fn slab_bytes(&self) -> usize {
-        self.slab_floats().saturating_mul(size_of::<f32>())
+        self.region_bytes()
+            .saturating_mul(self.layers)
+            .saturating_mul(2)
     }
 
     /// GPU memory allocated for pages, a whole slab at a time. Excludes the split-attention scratch.
@@ -140,14 +146,9 @@ impl DeviceKv {
         layers: usize,
         (heads, kv_heads, head_dim): (usize, usize, usize),
         capacity: usize,
+        format: KvFormat,
     ) -> Option<usize> {
-        let slab = kv_heads
-            .checked_mul(head_dim)?
-            .checked_mul(PAGE_TOKENS)?
-            .checked_mul(SLAB_PAGES)?
-            .checked_mul(layers)?
-            .checked_mul(2)?
-            .checked_mul(size_of::<f32>())?;
+        let slab = slab_bytes(layers, (kv_heads, head_dim), format)?;
         let table = pages_for(capacity).max(1).checked_mul(size_of::<u64>())?;
         let (acc, ml) = scratch_lens((heads, kv_heads, head_dim), capacity)?;
         let scratch = acc.checked_add(ml)?.checked_mul(size_of::<f32>())?;
@@ -187,7 +188,7 @@ impl DeviceKv {
         if layer >= self.layers {
             return Err(shape("kv layer", self.layers, layer));
         }
-        let offset = self.region_floats().saturating_mul(2).saturating_mul(layer);
+        let offset = self.region_bytes().saturating_mul(2).saturating_mul(layer);
         u32::try_from(offset).map_err(|_| CudaError::Overflow {
             what: "kv layer offset",
         })
@@ -231,11 +232,8 @@ impl DeviceKv {
         if self.slabs.len() <= slab {
             self.slabs.resize_with(slab.saturating_add(1), || None);
         }
-        let floats = self.slab_floats();
-        let page_bytes = self
-            .stride()
-            .saturating_mul(PAGE_TOKENS)
-            .saturating_mul(size_of::<f32>());
+        let bytes = self.slab_bytes();
+        let page_bytes = self.row_bytes().saturating_mul(PAGE_TOKENS);
         let (held, positions) = (self.bytes_held(), self.len);
         let entry = self
             .slabs
@@ -245,10 +243,10 @@ impl DeviceKv {
             gpu.counters.allocation();
             let storage =
                 gpu.stream
-                    .alloc_zeros::<f32>(floats)
+                    .alloc_zeros::<u8>(bytes)
                     .map_err(|source| CudaError::KvMemory {
                         held,
-                        needed: floats.saturating_mul(size_of::<f32>()),
+                        needed: bytes,
                         positions,
                         source,
                     })?;
@@ -276,45 +274,61 @@ impl DeviceKv {
         if end_pos > self.capacity {
             return Err(shape("kv positions", self.capacity, end_pos));
         }
-        let region = self.region_floats();
-        let layer_at = self.key_offset(layer)? as usize;
-        self.reserve(gpu, end_pos)?;
-        let mut done = 0;
-        while done < tokens {
-            let position = self.len.saturating_add(done);
-            let (logical, row) = (position / PAGE_TOKENS, position % PAGE_TOKENS);
-            let run = PAGE_TOKENS
-                .saturating_sub(row)
-                .min(tokens.saturating_sub(done));
-            let id = *self.table.ids().get(logical).ok_or(shape(
-                "kv page",
-                self.table.len(),
-                logical,
-            ))?;
-            let (slab, slot) = (id / SLAB_PAGES, id % SLAB_PAGES);
-            let storage = self
-                .slabs
-                .get_mut(slab)
-                .and_then(Option::as_mut)
-                .ok_or(shape("kv slab", slab, slab))?;
-            let source =
-                done.saturating_mul(stride)..done.saturating_add(run).saturating_mul(stride);
-            let first = layer_at.saturating_add(
-                slot.saturating_mul(PAGE_TOKENS)
-                    .saturating_add(row)
-                    .saturating_mul(stride),
-            );
-            let last = first.saturating_add(run.saturating_mul(stride));
-            gpu.stream.memcpy_dtod(
-                &keys.data.slice(source.clone()),
-                &mut storage.slice_mut(first..last),
-            )?;
-            gpu.stream.memcpy_dtod(
-                &values.data.slice(source),
-                &mut storage.slice_mut(first.saturating_add(region)..last.saturating_add(region)),
-            )?;
-            done = done.saturating_add(run);
+        if self.head_dim > MAX_HEAD_DIM {
+            return Err(CudaError::Unsupported {
+                what: "head layout",
+                max: MAX_HEAD_DIM,
+                actual: self.head_dim,
+            });
         }
-        Ok(())
+        let key_offset = self.key_offset(layer)?;
+        self.reserve(gpu, end_pos)?;
+        if tokens == 0 {
+            return Ok(());
+        }
+        let function = gpu.kernels.kv_store.get(self.format.index()).ok_or(shape(
+            "kv format",
+            KvFormat::ALL.len(),
+            self.format.index(),
+        ))?;
+        let config = LaunchConfig {
+            grid_dim: (
+                to_u32(tokens, "kv tokens")?,
+                to_u32(self.kv_heads, "kv heads")?,
+                1,
+            ),
+            block_dim: (
+                to_u32(self.head_dim.next_multiple_of(32), "block size")?,
+                1,
+                1,
+            ),
+            shared_mem_bytes: to_u32(32_usize.saturating_mul(size_of::<f32>()), "shared memory")?,
+        };
+        let (row_bytes, start) = (
+            to_u32(self.row_bytes(), "kv row")?,
+            to_u32(self.len, "kv start")?,
+        );
+        let (kv_heads, head_dim) = (
+            to_u32(self.kv_heads, "kv heads")?,
+            to_u32(self.head_dim, "head size")?,
+        );
+        gpu.launch(function, config, |a| {
+            a.arg(&keys.data).arg(&values.data).arg(&self.page_ptrs);
+            a.arg(&key_offset).arg(&row_bytes).arg(&start);
+            a.arg(&kv_heads).arg(&head_dim);
+        })
     }
+}
+
+/// Bytes of a slab: every layer's keys and values for `SLAB_PAGES` pages.
+fn slab_bytes(
+    layers: usize,
+    (kv_heads, head_dim): (usize, usize),
+    format: KvFormat,
+) -> Option<usize> {
+    format
+        .row_bytes(kv_heads, head_dim)?
+        .checked_mul(PAGE_TOKENS)?
+        .checked_mul(SLAB_PAGES)?
+        .checked_mul(layers.checked_mul(2)?)
 }

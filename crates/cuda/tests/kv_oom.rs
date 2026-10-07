@@ -9,7 +9,7 @@ use std::error::Error;
 
 use attention_reference::reference_attention;
 use common::{assert_close, gpu, values};
-use cuda::{CudaError, DeviceKv, PAGE_TOKENS, SLAB_PAGES};
+use cuda::{CudaError, DeviceKv, KvFormat, PAGE_TOKENS, SLAB_PAGES};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -23,7 +23,13 @@ fn failing_to_allocate_the_next_slab_leaves_the_cache_valid() -> Result<()> {
     let info = gpu.info()?;
     let per_layer = 2 * SLAB_PAGES * PAGE_TOKENS * stride * size_of::<f32>();
     let layers = (info.total_bytes / 100 * 55).div_ceil(per_layer);
-    let mut kv = DeviceKv::new(&gpu, layers, DIMS, 4 * SLAB_PAGES * PAGE_TOKENS)?;
+    let mut kv = DeviceKv::new(
+        &gpu,
+        layers,
+        DIMS,
+        4 * SLAB_PAGES * PAGE_TOKENS,
+        KvFormat::F32,
+    )?;
     let slab = kv.slab_bytes();
     if info.free_bytes < slab + slab / 10 {
         eprintln!("skipping: the GPU has less than one slab ({slab} bytes) free");

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use loader::ModelDir;
-use model::{QuantScheme, Qwen3Config};
+use model::{Precision, Qwen3Config};
 
 use crate::CliError;
 use crate::load::model_name;
@@ -105,13 +105,13 @@ pub fn describe(
 pub fn run(
     path: &Path,
     ctx: Option<usize>,
-    quant: Option<QuantScheme>,
+    precision: Precision,
     style: &Style,
 ) -> Result<(), CliError> {
     let dir = ModelDir::open(path)?;
     let cfg = Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref())?;
     let ctx = resolve_ctx(&cfg, ctx, DEFAULT_CTX)?;
-    let fp = footprint(&dir, &cfg, ctx, quant)?;
+    let fp = footprint(&dir, &cfg, ctx, precision)?;
     let name = model_name(path);
     println!("{}", style.bold(&name));
     println!("  A decoder-only transformer: it reads tokens and predicts the next one.\n");
@@ -119,7 +119,7 @@ pub fn run(
         "{}\n",
         describe(&name, &cfg, dir.tokenizer.vocab_size(), ctx, &fp)
     );
-    if let Some(scheme) = quant {
+    if let Some(scheme) = precision.weights {
         println!(
             "  quantized     {}: the weights take {} in memory\n",
             scheme.label(),

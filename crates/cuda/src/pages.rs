@@ -1,9 +1,9 @@
 use thiserror::Error;
 
-/// Must equal `1 << PAGE_SHIFT` in `attention.cu`.
+/// Must equal `1 << PAGE_SHIFT` in `kv_format.cu`.
 pub const PAGE_TOKENS: usize = 64;
 
-/// Pages allocated together, so a layer's keys stay contiguous across them. Must equal `SLAB_PAGES` in `attention.cu`.
+/// Pages allocated together, so a layer's keys stay contiguous across them. Must equal `SLAB_PAGES` in `kv_format.cu`.
 pub const SLAB_PAGES: usize = 8;
 
 pub const fn pages_for(tokens: usize) -> usize {

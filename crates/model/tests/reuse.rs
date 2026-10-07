@@ -5,9 +5,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use loader::ModelDir;
-use model::{Backend, Engine, EngineCache, QuantBits, QuantScheme};
+use model::{Backend, Engine, EngineCache, KvFormat, QuantBits, QuantScheme};
 use runtime::{
-    GenerateParams, Kept, Retained, SequenceCache, Speculation, StopReason, generate,
+    CausalLm, GenerateParams, Kept, Retained, SequenceCache, Speculation, StopReason, generate,
     generate_reusing,
 };
 use sampler::{Sampler, SamplerConfig};
@@ -21,10 +21,10 @@ struct Fixture {
     dir: ModelDir,
 }
 
-fn fixture(backend: Backend, quant: Option<QuantScheme>) -> Result<Fixture> {
+fn fixture(backend: Backend, quant: Option<QuantScheme>, kv: KvFormat) -> Result<Fixture> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-chat");
     let dir = ModelDir::open(&path)?;
-    let engine = Engine::load(&dir, backend, quant, |_, _| {})?;
+    let engine = Engine::load(&dir, backend, quant, |_, _| {})?.with_kv_format(kv)?;
     Ok(Fixture { engine, dir })
 }
 
@@ -208,7 +208,7 @@ fn stopped(
     Ok(())
 }
 
-fn every_case(f: &Fixture) -> Result<()> {
+fn every_case(f: &Fixture, greedy_only: bool) -> Result<()> {
     let config = |temperature, top_k, top_p, seed| SamplerConfig {
         temperature,
         top_k,
@@ -226,11 +226,12 @@ fn every_case(f: &Fixture) -> Result<()> {
             max_draft: 7,
         }),
     ];
-    for sampling in [
+    let all = [
         config(0.0, 0, 1.0, 0),
         config(0.7, 20, 0.8, 5),
         config(1.2, 0, 1.0, 9),
-    ] {
+    ];
+    for sampling in all.into_iter().take(if greedy_only { 1 } else { 3 }) {
         for rule in rules {
             let label = format!("{sampling:?} {rule:?}");
             conversation(f, sampling, rule, &label)?;
@@ -244,7 +245,7 @@ fn every_case(f: &Fixture) -> Result<()> {
 #[test]
 fn bf16_turns_on_a_kept_cache_equal_fresh_reads() {
     let Some(backend) = gpu() else { return };
-    every_case(&fixture(backend, None).unwrap()).unwrap();
+    every_case(&fixture(backend, None, KvFormat::F32).unwrap(), false).unwrap();
 }
 
 #[test]
@@ -254,10 +255,62 @@ fn int8_turns_on_a_kept_cache_equal_fresh_reads() {
         bits: QuantBits::Int8,
         group: 32,
     };
-    every_case(&fixture(backend, Some(scheme)).unwrap()).unwrap();
+    every_case(
+        &fixture(backend, Some(scheme), KvFormat::F32).unwrap(),
+        false,
+    )
+    .unwrap();
 }
 
 #[test]
 fn cpu_turns_on_a_kept_cache_equal_fresh_reads() {
-    every_case(&fixture(Backend::Cpu, None).unwrap()).unwrap();
+    every_case(&fixture(Backend::Cpu, None, KvFormat::F32).unwrap(), false).unwrap();
+}
+
+/// Rounding a key or value to fewer bits turns the tiny differences between a prefill pass and a decode pass into
+/// occasional jumps of one rounding step, so a sampled reply can differ from a fresh read at the noise floor. Greedy
+/// replies must still match exactly, and the logits of a kept cache must stay within a few times the f32 noise.
+fn logits_stay_close(f: &Fixture, label: &str) -> Result<()> {
+    let ids = encode(
+        f,
+        "<|im_start|>user\nhello world, the cat sat on the mat. hello world, the cat sat and then a b a b a b a b",
+    )?;
+    let fresh = f.engine.forward(&ids, &mut f.engine.new_cache(CAPACITY)?)?;
+    for split in [1, 5, 17, ids.len().saturating_sub(1)] {
+        let mut cache = f.engine.new_cache(CAPACITY)?;
+        let (head, tail) = ids.split_at(split);
+        f.engine.forward(head, &mut cache)?;
+        let kept = f.engine.forward(tail, &mut cache)?;
+        let worst = fresh
+            .iter()
+            .zip(&kept)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            worst < 5e-3,
+            "{label} split {split}: largest logit change {worst}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn lower_precision_kv_turns_on_a_kept_cache_match_fresh_reads() {
+    let scheme = QuantScheme {
+        bits: QuantBits::Int8,
+        group: 32,
+    };
+    for kv in [KvFormat::F16] {
+        for quant in [None, Some(scheme)] {
+            let Some(backend) = gpu() else { return };
+            let f = fixture(backend, quant, kv).unwrap();
+            every_case(&f, true).unwrap();
+            logits_stay_close(&f, &format!("{kv:?} {}", quant.is_some())).unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_lower_precision_kv_cache_needs_the_gpu() {
+    assert!(fixture(Backend::Cpu, None, KvFormat::F16).is_err());
 }

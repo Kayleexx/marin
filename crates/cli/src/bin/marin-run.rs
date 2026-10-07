@@ -43,7 +43,9 @@ fn run(cli: Cli, style: &Style) -> Result<ExitCode, CliError> {
             model_dir,
             quant,
             ctx,
-        }) => inspect::run(&model_dir, ctx.ctx, quant.scheme()?, style).map(|()| ExitCode::SUCCESS),
+        }) => {
+            inspect::run(&model_dir, ctx.ctx, quant.precision()?, style).map(|()| ExitCode::SUCCESS)
+        }
         Some(Command::Bench {
             model_dir,
             backend,
@@ -80,7 +82,7 @@ fn run(cli: Cli, style: &Style) -> Result<ExitCode, CliError> {
                 },
                 token_pause_ms,
                 json,
-                quant: quant.scheme()?,
+                precision: quant.precision()?,
             },
             style,
             &interrupt()?,
@@ -128,7 +130,7 @@ fn run(cli: Cli, style: &Style) -> Result<ExitCode, CliError> {
                 tokens,
                 save,
                 against,
-                quant: quant.scheme()?,
+                precision: quant.precision()?,
             },
             style,
             &interrupt()?,
@@ -150,7 +152,7 @@ fn run(cli: Cli, style: &Style) -> Result<ExitCode, CliError> {
                 max_tokens,
                 ctx,
                 out: save,
-                quant: quant.scheme()?,
+                precision: quant.precision()?,
             },
             style,
             &interrupt()?,
@@ -194,7 +196,7 @@ fn run(cli: Cli, style: &Style) -> Result<ExitCode, CliError> {
                 reps,
                 save,
                 stages,
-                quant: quant.scheme()?,
+                precision: quant.precision()?,
             },
             style,
             &interrupt()?,
@@ -222,7 +224,7 @@ fn run(cli: Cli, style: &Style) -> Result<ExitCode, CliError> {
                 energy: !no_energy,
                 speculate,
                 ask,
-                quant: quant.scheme()?,
+                precision: quant.precision()?,
             },
             style,
             &interrupt()?,
@@ -252,7 +254,7 @@ fn run(cli: Cli, style: &Style) -> Result<ExitCode, CliError> {
                     sampling,
                     energy: !no_energy,
                     save,
-                    quant: quant.scheme()?,
+                    precision: quant.precision()?,
                 },
                 style,
                 &interrupt()?,
@@ -263,8 +265,15 @@ fn run(cli: Cli, style: &Style) -> Result<ExitCode, CliError> {
             model_dir,
             reference,
             backend,
-        }) => verify::run(&model_dir, &reference, backend_choice(backend), style)
-            .map(|()| ExitCode::SUCCESS),
+            kv,
+        }) => verify::run(
+            &model_dir,
+            &reference,
+            backend_choice(backend),
+            kv.format(),
+            style,
+        )
+        .map(|()| ExitCode::SUCCESS),
         None => run_model(cli.run, *style),
     }
 }
@@ -296,7 +305,7 @@ fn run_model(args: RunArgs, style: Style) -> Result<ExitCode, CliError> {
         args.ctx.ctx,
         DEFAULT_CTX,
         backend_choice(args.backend),
-        args.quant.scheme()?,
+        args.quant.precision()?,
         &style,
         chrome,
     )?;

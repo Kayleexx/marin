@@ -232,7 +232,7 @@ impl App {
             kv: KvStats {
                 used: s.kv_used,
                 capacity: s.ctx,
-                bytes: s.loaded.footprint.kv,
+                bytes: s.loaded.footprint.kv_window,
                 backend: s.loaded.model.backend_name(),
             },
             model: model

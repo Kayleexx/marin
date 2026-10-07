@@ -2,7 +2,7 @@ use std::fs;
 
 use kv::KvCache;
 use loader::ModelDir;
-use model::{QuantScheme, Qwen3Config};
+use model::{Precision, Qwen3Config};
 
 use crate::CliError;
 
@@ -14,6 +14,8 @@ pub struct Footprint {
     pub weights: u64,
     /// The whole `--ctx` window.
     pub kv: u64,
+    /// The whole window in the GPU cache's format.
+    pub kv_window: u64,
     /// What a GPU cache needs before its first token; the window beyond it is allocated as the conversation grows.
     pub kv_startup: u64,
     pub needed: u64,
@@ -45,7 +47,7 @@ pub fn footprint(
     dir: &ModelDir,
     cfg: &Qwen3Config,
     ctx: usize,
-    quant: Option<QuantScheme>,
+    precision: Precision,
 ) -> Result<Footprint, CliError> {
     if ctx > cfg.max_positions {
         return Err(CliError::ContextTooLarge {
@@ -56,11 +58,13 @@ pub fn footprint(
     let kv = KvCache::bytes_for(cfg.layers, cfg.kv_heads, cfg.head_dim, ctx)
         .and_then(|b| u64::try_from(b).ok())
         .ok_or_else(|| CliError::BadOption(format!("--ctx {ctx} is too large")))?;
-    let weights = model::weight_bytes(&dir.weights, cfg, quant)?;
-    let kv_startup = model::kv_startup_bytes(cfg, ctx).unwrap_or(kv);
+    let weights = model::weight_bytes(&dir.weights, cfg, precision.weights)?;
+    let kv_startup = model::kv_startup_bytes(cfg, ctx, precision.kv).unwrap_or(kv);
+    let kv_window = model::kv_window_bytes(cfg, ctx, precision.kv).unwrap_or(kv);
     Ok(Footprint {
         weights,
         kv,
+        kv_window,
         kv_startup,
         needed: weights.saturating_add(kv).saturating_add(SLACK_BYTES),
         available: available_bytes(),
@@ -90,12 +94,12 @@ mod tests {
         let dir = ModelDir::open(&path).unwrap();
         let cfg =
             Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref()).unwrap();
-        let long = footprint(&dir, &cfg, 1024, None).unwrap();
+        let long = footprint(&dir, &cfg, 1024, Precision::default()).unwrap();
         assert!(
             long.kv_startup < long.kv,
             "a long window is not reserved at the start"
         );
-        let short = footprint(&dir, &cfg, 64, None).unwrap();
+        let short = footprint(&dir, &cfg, 64, Precision::default()).unwrap();
         assert!(
             short.kv_startup > short.kv,
             "a window under a slab still takes the slab"

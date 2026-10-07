@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use metrics::Sampler as GpuSampler;
-use model::{BackendChoice, QuantScheme};
+use model::{BackendChoice, Precision};
 use runtime::{GenerateParams, Outcome, Speculation, generate};
 use sampler::{Sampler, SamplerConfig};
 
@@ -28,7 +28,7 @@ pub struct Options {
     pub sampling: Vec<String>,
     pub energy: bool,
     pub save: Option<PathBuf>,
-    pub quant: Option<QuantScheme>,
+    pub precision: Precision,
 }
 
 #[derive(Clone)]
@@ -100,12 +100,13 @@ pub fn run(
         Some(options.ctx),
         options.ctx,
         BackendChoice::Cuda,
-        options.quant,
+        options.precision,
         style,
         true,
     )?;
     let quantization = options
-        .quant
+        .precision
+        .weights
         .map_or_else(|| "none".to_string(), |q| q.label());
     let (model, backend_name) = (loaded.name.clone(), loaded.model.backend_name());
     let settings = Settings {

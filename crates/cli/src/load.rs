@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use loader::ModelDir;
-use model::{Backend, BackendChoice, Engine, QuantScheme, Qwen3Config};
+use model::{Backend, BackendChoice, Engine, KvFormat, Precision, Qwen3Config};
 
 use crate::CliError;
 use crate::memory::{Footprint, footprint, resolve_ctx};
@@ -37,25 +37,32 @@ pub fn load(
     ctx: Option<usize>,
     default_ctx: usize,
     backend: BackendChoice,
-    quant: Option<QuantScheme>,
+    precision: Precision,
     style: &Style,
     chrome: bool,
 ) -> Result<Loaded, CliError> {
-    if quant.is_some() && backend == BackendChoice::Cpu {
-        return Err(CliError::BadOption(
-            "--quantize needs the GPU, but --backend cpu was given".into(),
-        ));
+    if backend == BackendChoice::Cpu {
+        if precision.weights.is_some() {
+            return Err(CliError::BadOption(
+                "--quantize needs the GPU, but --backend cpu was given".into(),
+            ));
+        }
+        if precision.kv != KvFormat::default() {
+            return Err(CliError::BadOption(
+                "--kv-type needs the GPU, but --backend cpu was given".into(),
+            ));
+        }
     }
     let dir = ModelDir::open(path)?;
     let config = Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref())?;
     let ctx = resolve_ctx(&config, ctx, default_ctx)?;
-    let footprint = footprint(&dir, &config, ctx, quant)?;
+    let footprint = footprint(&dir, &config, ctx, precision)?;
     let selected = Backend::select(
         backend,
         footprint.weights.saturating_add(footprint.kv_startup),
         footprint
             .weights
-            .saturating_add(footprint.kv.max(footprint.kv_startup)),
+            .saturating_add(footprint.kv_window.max(footprint.kv_startup)),
     )?;
     if matches!(selected.backend, Backend::Cpu) {
         footprint.ensure_fits()?;
@@ -78,9 +85,10 @@ pub fn load(
         Backend::Cpu => None,
     };
     let mut progress = Progress::new(*style, chrome);
-    let model = Engine::load(&dir, selected.backend, quant, |done, total| {
+    let model = Engine::load(&dir, selected.backend, precision.weights, |done, total| {
         progress.update(done, total)
-    })?;
+    })?
+    .with_kv_format(precision.kv)?;
     progress.finish();
     Ok(Loaded {
         name: model_name(path),

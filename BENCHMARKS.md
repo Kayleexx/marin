@@ -46,6 +46,7 @@ How runs are compared:
 | 9 | Prefill attention | fix the load pattern | 2048-token TTFT -35%, a real 3.6k prompt -40% |
 | 10 | Kept cache between chat turns | read only what is new in each turn | first token after 2.3k / 4.1k tokens of history 21x / 35x sooner (bf16), 23x / 37x (int8) |
 | 11 | Paged KV cache | allocate KV as the sequence grows, not for the whole `--ctx` | `--ctx 8192`, 64-token chat: 117 MB of KV instead of 1.88 GB, GPU peak -1.8 GB; speed within 0 to 4% |
+| 12 | f16 KV cache (option) | store keys and values in half the bytes | KV memory halved, 32k context fits (f32: 15.9k), decode at 4k +6.5%, first token after 4k 19.5% sooner, no measured quality loss; bf16 and q8 dropped |
 
 Rows 7 and 9 did not simply get faster. The cause is the power cap, explained next.
 
@@ -115,7 +116,7 @@ Decode weight stages already sit near the memory limit (MLP 295 GB/s, LM head 35
 | 2048 | 33.4 -> 41.4 tok/s (+24.2%) | 16.47 -> 9.54 ms |
 | 4096 | 23.1 -> 34.2 tok/s (+48.2%) | 30.64 -> 14.14 ms |
 
-Weight stages do not change with context, so all the slowdown is attention. At 4096 tokens the cache is 0.94 GB (about 3 ms at 300 GB/s), so attention was still about 4x above that (see section 8). A 16-bit KV cache was tried and rejected: it fails `verify` at the existing tolerances (largest logit difference 2.8e-3 against 5e-4 allowed), and the tolerances were not loosened.
+Weight stages do not change with context, so all the slowdown is attention. At 4096 tokens the cache is 0.94 GB (about 3 ms at 300 GB/s), so attention was still about 4x above that (see section 8). A 16-bit KV cache fails `verify` at the existing tolerances (largest logit difference 2.8e-3 against 5e-4 allowed) and the tolerances were not loosened; it is judged by separate quality gates in section 12.
 
 ### 2. Prefill matrix multiply on tensor cores
 
@@ -522,9 +523,99 @@ Tested with a slab larger than half the GPU, so the first fits and a second neve
 
 While the model writes, it keeps a notebook of everything it has read. Before, Marin bought a notebook big enough for the longest conversation you allow before the first word (1.88 GB at `--ctx 8192`, even for "hello"). Now the notebook is cut into sheets of 64 words, kept in binders of 8 sheets, and a new binder is only taken out when the conversation needs one. Each conversation keeps an index card ("words 0 to 63 are on sheet 17, words 64 to 127 on sheet 3"), and attention reads the sheets through it. Taking words back (a rejected guess, or a changed message) hands whole sheets back to be used next. A short chat in a big window now holds one binder, 117 MB, instead of 1.88 GB; the price is 0 to 4% in speed at long contexts, and sheets are not given back to the GPU while the session lives. Keeping the notebook between turns (section 10) and paging the notebook are different things: one saves reading, the other saves space.
 
+### 12. KV cache precision (optional f16)
+
+**Question.** Is it worth storing keys and values in fewer bits than f32 (224 KiB per token for Qwen3-1.7B)? Formats tried: bf16, f16, q8 (one signed byte per value plus one f32 scale per token and kv head). Attention math stays f32 and paging is unchanged.
+
+**Pass/fail rules, fixed before any code was written.** Compared with f32 KV and the same weights, using `marin-run quality` on 4096 tokens of two texts (Vim release notes, this repository's Rust code), with bf16 and int8 weights:
+
+| Gate | Passes if |
+|---|---|
+| Loss | at most +0.30% on both texts (int8 weights cost +0.03% and +0.11%) |
+| Agreement | same first choice at 97.5% or more of positions on both texts |
+| Real replies | 8 fixed prompts, greedy, 100 tokens: at least 6 identical to f32's, none broken |
+| Memory | at most 55% of f32 bytes per token |
+| Speed | decode at 2k and 4k at most 3% slower, first token after 4k at most 5% slower (interleaved runs, non-overlapping ranges count) |
+| Correctness | paging, reuse, guessing and weight-format tests pass; kernels match an f64 reference computed from the stored values |
+
+A format that fails a quality gate is dropped. If two pass, only the better one is kept. A format becomes the default only if it also beats f32 at 4096 tokens on decode and loses at most 0.15% loss and 1 point of agreement.
+
+**Outcome.** f16 is kept as an option (`marin-run ... --kv-type f16`). bf16 and q8 were removed from the code. f32 stays the default and the reference.
+
+Measured on Qwen3-1.7B-Base, 40 W cap. Speed is the median of four interleaved rounds (old f32 build, new f32, bf16, f16, q8, then reversed, twice), 128 tokens decoded.
+
+**Memory**
+
+| | bytes per token | KV held, 64-token chat | KV held, 4096 positions |
+|---|---|---|---|
+| f32 | 229,376 | 117 MB | 1,057 MB |
+| bf16, f16 | 114,688 (50%) | 59 MB | 528 MB |
+| q8 | 59,136 (26%) | 30 MB | 272 MB |
+
+**Quality against f32 KV** (same first choice / loss change; Vim | code)
+
+| | bf16 weights | int8 weights | Result |
+|---|---|---|---|
+| bf16 KV | 99.6% / -0.01% \| 99.8% / 0.00% | 99.9% / -0.02% \| 99.9% / +0.01% | pass |
+| f16 KV | 99.9% / 0.00% \| 99.9% / 0.00% | 100% / 0.00% \| 100% / 0.00% | pass |
+| q8 KV | 95.5% / +0.88% \| 97.5% / +0.56% | not run | fail |
+
+Real replies identical to f32's for 100 tokens: f16 8 of 8, bf16 6 of 8, q8 1 of 8. Two of the prompts were 2,000-token documents.
+
+**Speed** (decode tokens per second; first token in ms after a prompt of 127 / 2047 / 4095 tokens)
+
+| | decode 128 | decode 2k | decode 4k | first token 128 | first token 2k | first token 4k |
+|---|---|---|---|---|---|---|
+| old f32 (before this change) | 51.2 | 44.5 | 35.9 | 109 | 2633 | 8659 |
+| f32 | 51.3 | 44.4 | 35.5 | 108 | 2648 | 8519 |
+| bf16 | 51.6 | 44.8 | 38.0 | 111 | 2296 | 6796 |
+| f16 | 51.4 | 44.3 | 37.8 | 110 | 2316 | 6856 |
+| q8 | 51.7 | 45.3 | 37.8 | 112 | 2485 | 7416 |
+
+Energy per token, prompt included: f32 0.75 / 1.66 / 3.69 J, f16 0.75 / 1.57 / 3.15 J at 128 / 2k / 4k.
+
+- **f16 against f32:** decode at 4k is 6.5% faster (ranges do not overlap), unchanged at 128 and 2k. First token is 13% sooner at 2k and 19.5% sooner at 4k. Prefill attention at 4k drops from 6169 to 4933 ms in the profile. The likely reason is half the bytes read; these runs do not prove it.
+- **Old against new f32:** equal within noise, except decode at 4k, 1.1% slower (inside the 3% gate, cause not investigated).
+- **bf16 against f16:** same memory and speed within noise, f16 has better quality, so bf16 was deleted.
+- **Dequantization cost** could not be separated from the saving. The per-token attention figures in `--profile` disagreed with whole-decode speed, so whole decode is the measure used.
+
+**Longest context** (8 GB GPU with a browser open, `--ctx 32768`, 32,000-token prompt; the model's maximum is 32,768)
+
+| | result |
+|---|---|
+| f32 | out of memory after 3.64 GB of KV, at 15,872 positions |
+| f16 | whole prompt read and first token produced, 3.70 GB of KV, GPU peak 8.01 GB |
+
+At least twice the context fits; f16 reached the model's limit, so the real gain is larger than the test could show.
+
+**Strict `verify`.** f32 still passes (largest logit difference 1.7e-5 to 2.7e-5, tolerance unchanged). f16 fails it, reproducing the earlier attempt: 2.83e-3 against 5e-4 allowed. That is the expected size of f16 rounding of keys and values, not a bug. `verify` stays strict for f32; f16 is judged by the gates above.
+
+**Correctness of f16.** Tests check the stored values bit for bit against a host rounding model, attention against the f64 reference at every page boundary and after rollbacks, saturation (values beyond 65,504 are stored as 65,504, not infinity), guessing ahead (exactly plain decoding's tokens, bf16 and int8 weights) and kept chat turns (greedy replies identical, logits within 5e-3). Sampled replies on a kept cache are not required to match a fresh read: rounding turns tiny differences between a prefill and a decode pass into occasional one-step jumps, and one temperature-1.2 test on the tiny model did diverge. Five deliberate breaks of the kernels were each caught.
+
+**Why q8 failed.** The keys, not the values. With q8 rounding faked on top of f32 storage (Vim text, bf16 weights):
+
+| Quantized | Loss change | Same first choice |
+|---|---|---|
+| keys only | +1.10% | 95.5% |
+| values only | -0.01% | 99.8% |
+| both | +0.88% | 95.5% |
+| both, one scale per 32 values | +0.20% | 97.4% |
+
+"Both" equals real q8, so the fake is faithful. Values alone cost nothing measurable. A scale per 32 values cut the loss 4.4 times but missed the agreement gate by 0.1 point, and q8 was not tuned further. These runs do not show why keys are more sensitive, because the spread of key and value numbers was not measured. Q4 was not tried.
+
+**Verdict.**
+
+| Format | Status |
+|---|---|
+| f32 | default; the reference |
+| f16 | optional: half the memory, twice the context, same or better speed, no measured quality loss |
+| bf16, q8 | removed |
+
+f16 meets the written default criteria but stays optional until it is checked at contexts beyond 4096 tokens and on a second model, and until `marin` (the chat program) takes the flag.
+
 ## Tried and not adopted
 
-- **16-bit KV cache:** fails `verify` at the existing tolerances (section 1).
+- **bf16 and q8 KV cache:** bf16 had no advantage over f16; q8 failed the quality gates (section 12). f16 fails strict `verify` by design and is judged by the section 12 gates instead.
 - **CUDA graphs:** +1.2% in a prototype, needs invasive state changes (section 3).
 - **More kernel fusion:** a few tenths of a percent each.
 - **4-bit output head:** hurts quality badly, so the head stays int8.
@@ -558,6 +649,10 @@ marin-run turns MODEL --speculate --ask "Repeat your last answer exactly, word f
 marin-run bench MODEL --backend cuda --prompt-tokens 63 --tokens 2 --runs 1 --warmup 0 --ctx 8192
 # plain vs guessing on real replies (PROMPT_FOLDER holds one folder per scenario, one text file per prompt)
 marin-run spec-bench MODEL --sampling chat --max-tokens 120 --prompts PROMPT_FOLDER --rounds 1
+# KV cache format: quality against f32 KV, then the same command with --kv-type f16 and --against
+marin-run quality MODEL --text TEXT_FILE --tokens 4096 --kv-type f32 --save f32.json
+marin-run quality MODEL --text TEXT_FILE --tokens 4096 --kv-type f16 --against f32.json
+
 # accuracy of quantized weights
 marin-run quality MODEL --quantize int8 --text TEXT_FILE
 # output against Hugging Face

@@ -1,4 +1,4 @@
-use cuda::{CudaError, Gpu, GpuInfo, Traffic};
+use cuda::{CudaError, Gpu, GpuInfo, KvFormat, Traffic};
 use kv::KvCache;
 use loader::ModelDir;
 use metrics::{Probe, StageTimes};
@@ -118,6 +118,25 @@ impl Engine {
             Backend::Cpu => Self::Cpu(Box::new(Qwen3::load(dir, progress)?)),
             Backend::Cuda(gpu) => Self::Cuda(Box::new(Qwen3Gpu::load(dir, *gpu, quant, progress)?)),
         })
+    }
+
+    /// Stores the KV cache of caches made from now on in `format`. Only the GPU cache has more than one.
+    pub fn with_kv_format(self, format: KvFormat) -> Result<Self, ModelError> {
+        match self {
+            Self::Cuda(m) => Ok(Self::Cuda(Box::new(m.with_kv_format(format)))),
+            Self::Cpu(_) if format == KvFormat::default() => Ok(self),
+            Self::Cpu(_) => Err(ModelError::Unsupported(format!(
+                "a {} KV cache needs the GPU backend",
+                format.label()
+            ))),
+        }
+    }
+
+    pub fn kv_format(&self) -> KvFormat {
+        match self {
+            Self::Cpu(_) => KvFormat::default(),
+            Self::Cuda(m) => m.kv_format(),
+        }
     }
 
     /// The scheme the layer projections were quantized with; `None` for bf16 weights.
