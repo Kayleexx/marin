@@ -100,6 +100,22 @@ Qwen3-1.7B on a laptop GPU held to about 40 W (the power limit decides a lot, so
 
 Methods, tables and commands to repeat each number are in [BENCHMARKS.md](BENCHMARKS.md).
 
+## Status
+
+| Stage | State |
+|---|---|
+| Correct inference on CPU and GPU, checked against Hugging Face | done |
+| Measuring everything: speed, memory, power, per-stage time | done |
+| Faster execution: tensor-core prefill, tuned attention, fixed workspace | done |
+| int8 / int4 weights | done (int8 is the one to use) |
+| Paged KV cache that grows with the conversation | done |
+| Chat cache kept between turns | done |
+| Guessing ahead (speculative decoding) | done, opt-in |
+| KV cache in 16-bit or 8-bit numbers | next: measure memory, quality, speed and longest context |
+| Shared prefixes across chats, saved state across restarts | not started |
+| KV pages moved between GPU memory, RAM and disk | not started |
+| Several requests at once, with a scheduler | not started |
+
 ## Repository layout
 
 | Crate | What it does |
