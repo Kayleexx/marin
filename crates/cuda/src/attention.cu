@@ -1,10 +1,22 @@
 // Attention kernels: the decode kernel for one token, the few-token kernel for checking guesses, and the merge.
 // Helpers (`block_max`, `INF_F`) come from kernels.cu, which is compiled first.
 
+// `pages[position >> PAGE_SHIFT]` is the address of the page holding `position` inside its slab of SLAB_PAGES pages.
+// A layer's keys start `key_offset` floats on from it and its values SLAB_PAGES * PAGE_TOKENS * kv_stride floats after
+// them. PAGE_TOKENS and SLAB_PAGES must match pages.rs.
+#define PAGE_SHIFT 6
+#define PAGE_TOKENS (1u << PAGE_SHIFT)
+#define SLAB_PAGES 8
+__device__ __forceinline__ const float* kv_row(const unsigned long long* pages, size_t offset, unsigned int position,
+                                               unsigned int kv_stride) {
+    return reinterpret_cast<const float*>(pages[position >> PAGE_SHIFT]) + offset +
+           (size_t)(position & (PAGE_TOKENS - 1u)) * kv_stride;
+}
+
 // Causal grouped-query attention with an online softmax. One block per (token, head);
 // blockDim.x must be >= head_dim and a multiple of 32. Shared memory: head_dim + blockDim.x + 32 floats.
-extern "C" __global__ void attention(const float* q, const float* keys, const float* values, float* out,
-                                     unsigned int heads, unsigned int kv_heads, unsigned int head_dim,
+extern "C" __global__ void attention(const float* q, const unsigned long long* pages, unsigned int key_offset,
+                                     float* out, unsigned int heads, unsigned int kv_heads, unsigned int head_dim,
                                      unsigned int start, float scale) {
     extern __shared__ float shared[];
     float* q_s = shared;
@@ -14,6 +26,7 @@ extern "C" __global__ void attention(const float* q, const float* keys, const fl
     unsigned int token = blockIdx.x / heads, head = blockIdx.x % heads;
     unsigned int kv_head = head / (heads / kv_heads);
     unsigned int kv_stride = kv_heads * head_dim;
+    const size_t value_offset = (size_t)key_offset + (size_t)SLAB_PAGES * PAGE_TOKENS * kv_stride;
     unsigned int visible = start + token + 1;
     unsigned int tid = threadIdx.x;
 
@@ -28,7 +41,7 @@ extern "C" __global__ void attention(const float* q, const float* keys, const fl
         unsigned int p = base + tid;
         float s = -INF_F;
         if (p < visible) {
-            const float* k = keys + (size_t)p * kv_stride + (size_t)kv_head * head_dim;
+            const float* k = kv_row(pages, key_offset, p, kv_stride) + (size_t)kv_head * head_dim;
             float dot = 0.0f;
             if (vector) {
                 for (unsigned int d = 0; d < head_dim; d += 4) {
@@ -56,27 +69,33 @@ extern "C" __global__ void attention(const float* q, const float* keys, const fl
         __syncthreads();
         const size_t column = (size_t)kv_head * head_dim + tid;
         unsigned int j = 0;
-        // Four value rows are loaded before they are used; the sums still add the rows in order.
-        for (; j + 4 <= count; j += 4) {
-            const float w0 = scores[j], w1 = scores[j + 1], w2 = scores[j + 2], w3 = scores[j + 3];
-            running_sum += w0;
-            running_sum += w1;
-            running_sum += w2;
-            running_sum += w3;
-            if (tid < head_dim) {
-                const size_t row = (size_t)(base + j) * kv_stride + column;
-                const float v0 = values[row], v1 = values[row + kv_stride];
-                const float v2 = values[row + 2 * (size_t)kv_stride], v3 = values[row + 3 * (size_t)kv_stride];
-                acc += w0 * v0;
-                acc += w1 * v1;
-                acc += w2 * v2;
-                acc += w3 * v3;
+        // One page lookup per page of rows. Four value rows are loaded before they are used; the sums still add the
+        // rows in order.
+        while (j < count) {
+            const unsigned int first = j;
+            const unsigned int end = min(count, j + PAGE_TOKENS - ((base + j) & (PAGE_TOKENS - 1u)));
+            const float* rows = tid < head_dim ? kv_row(pages, value_offset, base + j, kv_stride) + column : nullptr;
+            for (; j + 4 <= end; j += 4) {
+                const float w0 = scores[j], w1 = scores[j + 1], w2 = scores[j + 2], w3 = scores[j + 3];
+                running_sum += w0;
+                running_sum += w1;
+                running_sum += w2;
+                running_sum += w3;
+                if (tid < head_dim) {
+                    const float* r = rows + (size_t)(j - first) * kv_stride;
+                    const float v0 = r[0], v1 = r[kv_stride];
+                    const float v2 = r[2 * (size_t)kv_stride], v3 = r[3 * (size_t)kv_stride];
+                    acc += w0 * v0;
+                    acc += w1 * v1;
+                    acc += w2 * v2;
+                    acc += w3 * v3;
+                }
             }
-        }
-        for (; j < count; ++j) {
-            const float weight = scores[j];
-            running_sum += weight;
-            if (tid < head_dim) acc += weight * values[(size_t)(base + j) * kv_stride + column];
+            for (; j < end; ++j) {
+                const float weight = scores[j];
+                running_sum += weight;
+                if (tid < head_dim) acc += weight * rows[(size_t)(j - first) * kv_stride];
+            }
         }
         running_max = new_max;
         __syncthreads();
@@ -93,7 +112,7 @@ extern "C" __global__ void attention(const float* q, const float* keys, const fl
 #define MAX_GROUP 8
 #define HEAD_STEPS 8
 #define SCORE_BATCH 4
-extern "C" __global__ void attention_partial(const float* q, const float* keys, const float* values,
+extern "C" __global__ void attention_partial(const float* q, const unsigned long long* pages, unsigned int key_offset,
                                              float* partial_acc, float* partial_ml, unsigned int heads,
                                              unsigned int kv_heads, unsigned int head_dim, unsigned int visible,
                                              unsigned int chunk, unsigned int splits, float scale) {
@@ -106,6 +125,7 @@ extern "C" __global__ void attention_partial(const float* q, const float* keys, 
     const unsigned int first = split * chunk;
     const unsigned int count = min(chunk, visible - first);
     const unsigned int kv_stride = kv_heads * head_dim;
+    const size_t value_offset = (size_t)key_offset + (size_t)SLAB_PAGES * PAGE_TOKENS * kv_stride;
     const float* q_head = q + (size_t)kv_head * group * head_dim;
 
     for (unsigned int i = tid; i < group * head_dim; i += blockDim.x) q_s[i] = q_head[i];
@@ -119,7 +139,8 @@ extern "C" __global__ void attention_partial(const float* q, const float* keys, 
 #pragma unroll
         for (int p = 0; p < SCORE_BATCH; ++p) {
             const unsigned int pos = base + p * warps;
-            const float* k = keys + (size_t)(first + pos) * kv_stride + (size_t)kv_head * head_dim;
+            const float* k = pos < count ? kv_row(pages, key_offset, first + pos, kv_stride) + (size_t)kv_head * head_dim
+                                         : nullptr;
 #pragma unroll
             for (int j = 0; j < HEAD_STEPS; ++j) {
                 const unsigned int d = lane + 32 * j;
@@ -186,9 +207,11 @@ extern "C" __global__ void attention_partial(const float* q, const float* keys, 
         for (int g = 0; g < MAX_GROUP; ++g) acc[g] = 0.0f;
         unsigned int i = 0;
         for (; i + 4 <= count; i += 4) {
-            const size_t row = (size_t)(first + i) * kv_stride + (size_t)kv_head * head_dim + d;
-            const float v0 = values[row], v1 = values[row + kv_stride];
-            const float v2 = values[row + 2 * (size_t)kv_stride], v3 = values[row + 3 * (size_t)kv_stride];
+            const size_t column = (size_t)kv_head * head_dim + d;
+            const float v0 = kv_row(pages, value_offset, first + i, kv_stride)[column];
+            const float v1 = kv_row(pages, value_offset, first + i + 1, kv_stride)[column];
+            const float v2 = kv_row(pages, value_offset, first + i + 2, kv_stride)[column];
+            const float v3 = kv_row(pages, value_offset, first + i + 3, kv_stride)[column];
 #pragma unroll
             for (int g = 0; g < MAX_GROUP; ++g)
                 if (g < group) {
@@ -199,7 +222,7 @@ extern "C" __global__ void attention_partial(const float* q, const float* keys, 
                 }
         }
         for (; i < count; ++i) {
-            const float v = values[(size_t)(first + i) * kv_stride + (size_t)kv_head * head_dim + d];
+            const float v = kv_row(pages, value_offset, first + i, kv_stride)[(size_t)kv_head * head_dim + d];
 #pragma unroll
             for (int g = 0; g < MAX_GROUP; ++g)
                 if (g < group) acc[g] += weights[g * chunk + i] * v;
@@ -218,8 +241,8 @@ extern "C" __global__ void attention_partial(const float* q, const float* keys, 
 // Shared memory: rows * (head_dim + chunk) floats, rows = tokens * group <= MAX_ROWS.
 // The kernel is built for row capacities of 8, 16 and 32 so a pass of few rows does not pay for the loops of many.
 template <int MAX_ROWS>
-__device__ void attention_multi_body(const float* q, const float* keys, const float* values, float* partial_acc,
-                                     float* partial_ml, unsigned int heads, unsigned int kv_heads,
+__device__ void attention_multi_body(const float* q, const unsigned long long* pages, unsigned int key_offset,
+                                     float* partial_acc, float* partial_ml, unsigned int heads, unsigned int kv_heads,
                                      unsigned int head_dim, unsigned int start, unsigned int tokens,
                                      unsigned int chunk, unsigned int splits, float scale) {
     extern __shared__ float shared[];
@@ -232,6 +255,7 @@ __device__ void attention_multi_body(const float* q, const float* keys, const fl
     const unsigned int first = split * chunk;
     const unsigned int count = min(chunk, start + tokens - first);
     const unsigned int kv_stride = kv_heads * head_dim;
+    const size_t value_offset = (size_t)key_offset + (size_t)SLAB_PAGES * PAGE_TOKENS * kv_stride;
 
     for (unsigned int i = tid; i < rows * head_dim; i += blockDim.x) {
         const unsigned int r = i / head_dim, d = i % head_dim;
@@ -242,7 +266,7 @@ __device__ void attention_multi_body(const float* q, const float* keys, const fl
 
     // Scores: one warp per position, lanes stride across the head so the row is read coalesced and used for every row.
     for (unsigned int i = warp; i < count; i += warps) {
-        const float* k = keys + (size_t)(first + i) * kv_stride + (size_t)kv_head * head_dim;
+        const float* k = kv_row(pages, key_offset, first + i, kv_stride) + (size_t)kv_head * head_dim;
         float dots[MAX_ROWS];
 #pragma unroll
         for (int r = 0; r < MAX_ROWS; ++r) dots[r] = 0.0f;
@@ -295,7 +319,7 @@ __device__ void attention_multi_body(const float* q, const float* keys, const fl
         for (int r = 0; r < MAX_ROWS; ++r) acc[r] = 0.0f;
 #pragma unroll 4
         for (unsigned int i = 0; i < count; ++i) {
-            const float v = values[(size_t)(first + i) * kv_stride + (size_t)kv_head * head_dim + d];
+            const float v = kv_row(pages, value_offset, first + i, kv_stride)[(size_t)kv_head * head_dim + d];
 #pragma unroll
             for (int r = 0; r < MAX_ROWS; ++r)
                 if (r < rows) acc[r] += weights[r * chunk + i] * v;
@@ -311,10 +335,11 @@ __device__ void attention_multi_body(const float* q, const float* keys, const fl
 }
 
 #define MULTI_ARGS                                                                                                    \
-    const float *q, const float *keys, const float *values, float *partial_acc, float *partial_ml,                    \
-        unsigned int heads, unsigned int kv_heads, unsigned int head_dim, unsigned int start, unsigned int tokens,    \
-        unsigned int chunk, unsigned int splits, float scale
-#define MULTI_CALL q, keys, values, partial_acc, partial_ml, heads, kv_heads, head_dim, start, tokens, chunk, splits, scale
+    const float *q, const unsigned long long *pages, unsigned int key_offset, float *partial_acc,                     \
+        float *partial_ml, unsigned int heads, unsigned int kv_heads, unsigned int head_dim, unsigned int start,      \
+        unsigned int tokens, unsigned int chunk, unsigned int splits, float scale
+#define MULTI_CALL \
+    q, pages, key_offset, partial_acc, partial_ml, heads, kv_heads, head_dim, start, tokens, chunk, splits, scale
 extern "C" __global__ void attention_multi_partial_8(MULTI_ARGS) { attention_multi_body<8>(MULTI_CALL); }
 extern "C" __global__ void attention_multi_partial_16(MULTI_ARGS) { attention_multi_body<16>(MULTI_CALL); }
 extern "C" __global__ void attention_multi_partial_32(MULTI_ARGS) { attention_multi_body<32>(MULTI_CALL); }

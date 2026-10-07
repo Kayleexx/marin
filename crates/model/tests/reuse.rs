@@ -1,7 +1,4 @@
-//! Keeping the cache between turns on the real engine must give the tokens a fresh read of the same prompt gives:
-//! bf16 and int8 weights on the GPU, greedy and sampled, with and without guessing ahead, across a stop token, a
-//! cancelled reply and an edited history. A kept position was computed in a pass of another length than a fresh read
-//! uses, so this is where a rounding difference would flip a token.
+//! A kept position was computed in a pass of another length than a fresh read uses, so rounding could flip a token.
 
 use std::error::Error;
 use std::path::Path;
@@ -134,7 +131,6 @@ fn start(f: &Fixture) -> Result<Vec<u32>> {
     )
 }
 
-/// Turns that each carry the last prompt and reply, then an edit in the middle of the history.
 fn conversation(
     f: &Fixture,
     sampling: SamplerConfig,

@@ -16,6 +16,15 @@ pub enum CudaError {
         expected: usize,
         actual: usize,
     },
+    #[error(
+        "the GPU could not allocate {needed} more bytes for the KV cache, which holds {held} bytes for {positions} positions: {source}"
+    )]
+    KvMemory {
+        held: usize,
+        needed: usize,
+        positions: usize,
+        source: DriverError,
+    },
     #[error("{what}: size arithmetic overflowed")]
     Overflow { what: &'static str },
     #[error("the {what} probe computed a wrong result, so its timing cannot be trusted")]

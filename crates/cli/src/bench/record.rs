@@ -120,6 +120,9 @@ pub struct Load {
     pub seconds: f64,
     pub weights_bytes: u64,
     pub kv_reserved_bytes: u64,
+    /// KV pages and bytes the GPU actually held after the runs; `None` on the CPU.
+    pub kv_held_pages: Option<u64>,
+    pub kv_held_bytes: Option<u64>,
     pub rss_growth_bytes: Option<u64>,
     /// Bytes fetched from storage during the load; files already in the page cache count as 0.
     pub disk_read_bytes: Option<u64>,

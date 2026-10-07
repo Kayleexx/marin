@@ -7,12 +7,10 @@ use tensor::QuantScheme;
 
 use super::Observer;
 use super::config::Qwen3Config;
+use super::fit::{GPU_SLACK_BYTES, GpuFit, gpu_fit};
 use super::gpu::{GpuCache, Qwen3Gpu};
 use super::model::Qwen3;
 use crate::ModelError;
-
-/// Memory the GPU needs beyond weights and the KV cache: activations and kernel code.
-const GPU_SLACK_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendChoice {
@@ -34,33 +32,49 @@ pub enum Backend {
 }
 
 impl Backend {
-    /// `gpu_bytes_needed` is the VRAM a GPU run would use for this model and context.
-    pub fn select(choice: BackendChoice, gpu_bytes_needed: u64) -> Result<Selected, ModelError> {
-        let gpu_needed = gpu_bytes_needed.saturating_add(GPU_SLACK_BYTES);
-        let try_gpu = || -> Result<Gpu, ModelError> {
+    /// `startup_bytes` is the VRAM the model and the first slab of the cache need to start, `window_bytes` what the
+    /// model and the whole `--ctx` window would take. Only the first has to fit; when the second does not, the GPU
+    /// is still used and the note says a conversation that fills the window can run out of memory.
+    pub fn select(
+        choice: BackendChoice,
+        startup_bytes: u64,
+        window_bytes: u64,
+    ) -> Result<Selected, ModelError> {
+        let try_gpu = || -> Result<(Gpu, Option<String>), ModelError> {
             let gpu = Gpu::new()?;
             let free = u64::try_from(gpu.info()?.free_bytes).unwrap_or(u64::MAX);
-            if free < gpu_needed {
-                return Err(ModelError::GpuMemory {
-                    needed: gpu_needed,
+            match gpu_fit(free, startup_bytes, window_bytes) {
+                GpuFit::No => Err(ModelError::GpuMemory {
+                    needed: startup_bytes.saturating_add(GPU_SLACK_BYTES),
                     free,
-                });
+                }),
+                GpuFit::Startup => Ok((
+                    gpu,
+                    Some(format!(
+                        "the GPU has {} MB free but the whole --ctx window needs about {} MB: a conversation that fills it will stop with an out-of-memory error",
+                        free / 1_000_000,
+                        window_bytes.saturating_add(GPU_SLACK_BYTES) / 1_000_000
+                    )),
+                )),
+                GpuFit::Window => Ok((gpu, None)),
             }
-            Ok(gpu)
         };
         match choice {
             BackendChoice::Cpu => Ok(Selected {
                 backend: Backend::Cpu,
                 note: None,
             }),
-            BackendChoice::Cuda => Ok(Selected {
-                backend: Backend::Cuda(Box::new(try_gpu()?)),
-                note: None,
-            }),
-            BackendChoice::Auto => Ok(match try_gpu() {
-                Ok(gpu) => Selected {
+            BackendChoice::Cuda => {
+                let (gpu, note) = try_gpu()?;
+                Ok(Selected {
                     backend: Backend::Cuda(Box::new(gpu)),
-                    note: None,
+                    note,
+                })
+            }
+            BackendChoice::Auto => Ok(match try_gpu() {
+                Ok((gpu, note)) => Selected {
+                    backend: Backend::Cuda(Box::new(gpu)),
+                    note,
                 },
                 Err(ModelError::Cuda(CudaError::Unavailable(why))) => Selected {
                     backend: Backend::Cpu,
@@ -201,6 +215,16 @@ impl Engine {
 
 fn wrong_backend() -> ModelError {
     ModelError::InvalidConfig("cache belongs to the other backend".into())
+}
+
+impl EngineCache {
+    /// Pages and bytes of KV memory held; `None` on the CPU, which reserves the whole window up front.
+    pub fn kv_held(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::Cpu(_) => None,
+            Self::Cuda(c) => Some(c.kv_held()),
+        }
+    }
 }
 
 impl SequenceCache for EngineCache {

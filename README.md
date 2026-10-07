@@ -5,7 +5,7 @@ Marin is a small language-model engine written from scratch in Rust, built to ru
 
 - **Models:** Qwen3 (1.7B is the reference), on the CPU or on an NVIDIA GPU with CUDA kernels written for this project.
 - **Checked against Hugging Face**, token for token.
-- **Faster where it matters:** tensor-core prefill, tuned attention, int8 / int4 weights, a chat cache that survives between turns, and opt-in guessing ahead.
+- **Faster where it matters:** tensor-core prefill, tuned attention, int8 / int4 weights, a chat cache that survives between turns, a KV cache that grows with the conversation, and opt-in guessing ahead.
 - **Measured:** every optimization has before/after numbers, and tools to repeat them, in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Quick start
@@ -67,6 +67,15 @@ edited : A B C X Y           -> keep 3, read X Y
 
 The record is written only after a reply ends cleanly and is cleared on any error, so a half-written cache is never trusted. After 4,000 tokens of history the first token arrives in about 0.25 s instead of 9 s, with identical replies. Details in [BENCHMARKS.md](BENCHMARKS.md#10-keeping-the-cache-between-chat-turns).
 
+### The KV cache grows with the conversation (GPU)
+
+- The cache is kept in pages of 64 positions (14 MiB for Qwen3-1.7B), allocated eight at a time as the conversation needs them, not reserved for the whole `--ctx` window up front.
+- A short chat with `--ctx 8192` holds about 117 MB of KV instead of 1.88 GB.
+- `--ctx` is only the longest conversation allowed. Starting needs the model plus one slab; if the whole window would not fit the GPU, a note says so, and a conversation that fills the GPU stops with a clear out-of-memory error.
+- The cost is 0 to 4% in speed at long contexts, and memory is not given back to the GPU until the session ends.
+
+Details in [BENCHMARKS.md](BENCHMARKS.md#11-paged-kv-cache-v4).
+
 ### Guessing ahead (opt-in, GPU only)
 
 When a reply repeats text it was just shown, Marin can guess the next few tokens by copying, then check them all in one pass. Wrong guesses are rolled back, so the output is exactly what normal decoding gives. It guesses only after the last 8 tokens match earlier text, and at most 7 at a time.
@@ -87,6 +96,7 @@ Qwen3-1.7B on a laptop GPU held to about 40 W (the power limit decides a lot, so
 | 3,500-token prompt, first token | about 7 s, 40% sooner after the prefill attention work |
 | 4,000-token conversation, decode | 13 to 17% faster after the decode attention work |
 | Chat turn after 4.1k tokens of history | first token 35x (bf16) / 37x (int8) sooner with the kept cache |
+| Short chat, `--ctx 8192` | 117 MB of KV instead of 1.88 GB, GPU peak 1.8 GB lower; 0 to 4% slower at 2 to 4k tokens |
 
 Methods, tables and commands to repeat each number are in [BENCHMARKS.md](BENCHMARKS.md).
 
@@ -97,7 +107,7 @@ Methods, tables and commands to repeat each number are in [BENCHMARKS.md](BENCHM
 | `tensor` | math on f32 data: matmul, norms, rotary embeddings, quantization |
 | `loader` | reads the config, tokenizer and safetensors weights |
 | `model` | the Qwen3 network on CPU and GPU |
-| `cuda` | GPU kernels behind a safe API (the only crate allowed `unsafe`) |
+| `cuda` | GPU kernels and the paged KV cache behind a safe API (the only crate allowed `unsafe`) |
 | `kv` | the CPU KV cache |
 | `sampler` | greedy, temperature, top-k, top-p |
 | `runtime` | the generate loop: prefill, decode, stop conditions, cache reuse, guessing ahead |

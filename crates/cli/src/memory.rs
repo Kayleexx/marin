@@ -12,7 +12,10 @@ const SLACK_BYTES: u64 = 256 * 1024 * 1024;
 #[derive(Debug, Clone, Copy)]
 pub struct Footprint {
     pub weights: u64,
+    /// The whole `--ctx` window.
     pub kv: u64,
+    /// What a GPU cache needs before its first token; the window beyond it is allocated as the conversation grows.
+    pub kv_startup: u64,
     pub needed: u64,
     pub available: Option<u64>,
 }
@@ -54,9 +57,11 @@ pub fn footprint(
         .and_then(|b| u64::try_from(b).ok())
         .ok_or_else(|| CliError::BadOption(format!("--ctx {ctx} is too large")))?;
     let weights = model::weight_bytes(&dir.weights, cfg, quant)?;
+    let kv_startup = model::kv_startup_bytes(cfg, ctx).unwrap_or(kv);
     Ok(Footprint {
         weights,
         kv,
+        kv_startup,
         needed: weights.saturating_add(kv).saturating_add(SLACK_BYTES),
         available: available_bytes(),
     })
@@ -71,5 +76,29 @@ impl Footprint {
             }),
             _ => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_gpu_needs_a_slab_to_start_not_the_whole_window() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-chat");
+        let dir = ModelDir::open(&path).unwrap();
+        let cfg =
+            Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref()).unwrap();
+        let long = footprint(&dir, &cfg, 1024, None).unwrap();
+        assert!(
+            long.kv_startup < long.kv,
+            "a long window is not reserved at the start"
+        );
+        let short = footprint(&dir, &cfg, 64, None).unwrap();
+        assert!(
+            short.kv_startup > short.kv,
+            "a window under a slab still takes the slab"
+        );
     }
 }

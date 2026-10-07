@@ -1,8 +1,3 @@
-//! Keeping the cache between runs must give exactly what reading the whole prompt from scratch gives, and the record
-//! of what the cache holds must always be the truth. The model here stores each token id as its key and predicts from
-//! every earlier position it reads back, so a kept position that does not match the prompt, or a stale one left
-//! behind, changes the tokens.
-
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -21,14 +16,14 @@ struct Failure;
 
 #[derive(Default)]
 struct WholeHistory {
-    /// Tokens fed over the model's life.
     fed: Cell<usize>,
-    /// Fail the pass with this number (counting from 1), after committing its tokens, like a long prompt whose last
-    /// piece fails after the earlier pieces were written.
+    /// Fails this pass (counting from 1) after committing its tokens.
     fail_on: Option<usize>,
     passes: Cell<usize>,
-    /// Break the contract: read the tokens without committing them to the cache.
+    /// Reads tokens without committing them.
     skip_commit: bool,
+    /// Fails every pass that checks guessed tokens, before it touches the cache.
+    fail_rows: bool,
 }
 
 impl WholeHistory {
@@ -75,6 +70,9 @@ impl CausalLm for WholeHistory {
     }
 
     fn forward_rows(&self, tokens: &[u32], kv: &mut KvCache) -> Result<Vec<f32>, Failure> {
+        if self.fail_rows {
+            return Err(Failure);
+        }
         self.feed(tokens, kv)
     }
 }
@@ -101,7 +99,6 @@ fn sampler(temperature: f32) -> Sampler {
     .unwrap()
 }
 
-/// The ids the cache really holds.
 fn held(kv: &KvCache) -> Vec<u32> {
     kv.read(0, kv.len())
         .unwrap()
@@ -116,7 +113,6 @@ struct Turn {
     tokens: Vec<u32>,
 }
 
-/// One reply on a long-lived cache, cancelled after `cancel_after` tokens when given.
 fn turn(
     model: &WholeHistory,
     kv: &mut KvCache,
@@ -148,7 +144,6 @@ fn turn(
     Ok(Turn { outcome, tokens })
 }
 
-/// The same reply read from scratch on a new cache.
 fn fresh(prompt: &[u32], params: &GenerateParams, capacity: usize) -> Vec<u32> {
     let mut kv = KvCache::new(1, 1, 1, capacity).unwrap();
     let mut tokens = Vec::new();
@@ -170,8 +165,6 @@ fn cache(capacity: usize) -> (WholeHistory, KvCache, Retained) {
     (WholeHistory::default(), kv, Retained::default())
 }
 
-/// A chat-like run: each prompt is the last prompt, the reply and a new message, and every reply must equal a
-/// fresh one while only the new part is read.
 #[test]
 fn a_growing_conversation_reads_only_what_is_new_and_answers_as_a_fresh_run_would() {
     for guess in [false, true] {
@@ -189,7 +182,6 @@ fn a_growing_conversation_reads_only_what_is_new_and_answers_as_a_fresh_run_woul
                 let decoded = reply.tokens.len() - 1;
                 assert_eq!(model.fed.get() - fed_before, prompt.len() - kept + decoded);
             }
-            // The cache holds the prompt and every reply token but the last, which was never fed.
             let mut expected = prompt.clone();
             expected.extend(&reply.tokens[..reply.tokens.len() - 1]);
             assert_eq!(retained.tokens(), expected);
@@ -206,7 +198,6 @@ fn a_prompt_that_differs_keeps_only_the_shared_start() {
         let p = params(8, &[], guess);
         let first = [1, 2, 3, 4, 5, 6, 1, 2];
         turn(&model, &mut kv, &mut retained, &first, &p, None).unwrap();
-        // (prompt, positions that may be kept)
         let cases: [(&[u32], usize); 5] = [
             (&[1, 2, 3, 0, 0, 4], 3),          // diverges in the middle
             (&[6, 2, 3, 4], 0),                // diverges at the first token
@@ -215,7 +206,6 @@ fn a_prompt_that_differs_keeps_only_the_shared_start() {
             (&[1, 2, 3, 4, 5, 6, 1, 2, 2], 8), // a little longer
         ];
         for (prompt, keep) in cases {
-            // Restart from the first prompt each time, so `keep` is measured against it.
             turn(&model, &mut kv, &mut retained, &first, &p, None).unwrap();
             let reply = turn(&model, &mut kv, &mut retained, prompt, &p, None).unwrap();
             assert_eq!(reply.outcome.reused, keep, "{prompt:?}");
@@ -266,7 +256,6 @@ fn a_failed_reply_leaves_nothing_trusted() {
     let p = params(6, &[], false);
     let prompt = [1, 2, 3, 4];
     turn(&model, &mut kv, &mut retained, &prompt, &p, None).unwrap();
-    // The next prompt pass commits its tokens and then fails.
     model.fail_on = Some(model.passes.get() + 1);
     let longer = [1, 2, 3, 4, 0, 5, 5];
     let failed = turn(&model, &mut kv, &mut retained, &longer, &p, None);
@@ -300,14 +289,12 @@ fn the_context_limit_holds_for_kept_and_new_positions_alike() {
     let full = turn(&model, &mut kv, &mut retained, &first, &p, None).unwrap();
     assert_eq!(full.outcome.stop, StopReason::ContextFull);
     assert_eq!(retained.len(), capacity);
-    // A prompt that fills the window exactly, built on the cache.
     let mut exact = first.to_vec();
     exact.extend(&full.tokens);
     exact.truncate(capacity);
     let reply = turn(&model, &mut kv, &mut retained, &exact, &p, None).unwrap();
     assert_eq!(reply.outcome.reused, capacity - 1);
     assert_eq!(reply.tokens, fresh(&exact, &p, capacity));
-    // Too long: refused before anything changes, so the record still stands.
     let before = retained.clone();
     let mut over = exact.clone();
     over.push(1);
@@ -384,4 +371,33 @@ fn a_model_that_does_not_commit_what_it_reads_leaves_nothing_trusted() {
     )
     .unwrap();
     assert!(retained.is_empty());
+}
+
+#[test]
+fn a_failure_in_the_middle_of_a_guessing_run_leaves_nothing_trusted() {
+    let (mut model, mut kv, mut retained) = cache(200);
+    let p = params(40, &[], true);
+    let prompt = [1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2];
+    let first = turn(&model, &mut kv, &mut retained, &prompt, &p, None).unwrap();
+    assert!(
+        first.outcome.speculation.guessed_passes > 0,
+        "the run guesses"
+    );
+    assert!(!retained.is_empty());
+
+    let mut next = prompt.to_vec();
+    next.extend(&first.tokens);
+    next.extend([3, 3]);
+    model.fail_rows = true;
+    let failed = turn(&model, &mut kv, &mut retained, &next, &p, None);
+    assert!(matches!(failed, Err(GenerateError::Model(Failure))));
+    assert!(
+        retained.is_empty(),
+        "no record of a cache a failed pass touched"
+    );
+
+    model.fail_rows = false;
+    let again = turn(&model, &mut kv, &mut retained, &next, &p, None).unwrap();
+    assert_eq!(again.outcome.reused, 0, "read from scratch");
+    assert_eq!(again.tokens, fresh(&next, &p, 200));
 }

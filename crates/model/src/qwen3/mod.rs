@@ -1,6 +1,7 @@
 mod attention;
 mod config;
 mod engine;
+mod fit;
 mod gpu;
 mod gpu_probe;
 mod layer;
@@ -16,7 +17,7 @@ pub use config::Qwen3Config;
 pub type Observer<'a> = Option<&'a mut dyn FnMut(usize, &[f32])>;
 
 pub use engine::{Backend, BackendChoice, Engine, EngineCache, Selected};
-pub use gpu::{GpuCache, Qwen3Gpu};
+pub use gpu::{GpuCache, Qwen3Gpu, kv_startup_bytes};
 pub use model::Qwen3;
 
 /// Checks the weights against the config and returns how many bytes they take in memory once loaded, quantized

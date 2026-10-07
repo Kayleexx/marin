@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn tiny_model_matches_the_huggingface_reference_on_the_gpu() {
-        let selected = match Backend::select(BackendChoice::Cuda, 0) {
+        let selected = match Backend::select(BackendChoice::Cuda, 0, 0) {
             Ok(selected) => selected,
             Err(e) if std::env::var_os("MARIN_REQUIRE_CUDA").is_none() => {
                 eprintln!("skipping GPU test: {e}");

@@ -230,6 +230,12 @@ pub fn run(
             seconds: loaded.took.as_secs_f64(),
             weights_bytes: loaded.footprint.weights,
             kv_reserved_bytes: loaded.footprint.kv,
+            kv_held_pages: cache
+                .kv_held()
+                .and_then(|(pages, _)| u64::try_from(pages).ok()),
+            kv_held_bytes: cache
+                .kv_held()
+                .and_then(|(_, bytes)| u64::try_from(bytes).ok()),
             rss_growth_bytes: rss_growth,
             disk_read_bytes: disk_read,
             gpu_upload,

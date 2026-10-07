@@ -155,6 +155,8 @@ fn sample_record() -> Record {
             seconds: 0.1,
             weights_bytes: 1000,
             kv_reserved_bytes: 1000,
+            kv_held_pages: None,
+            kv_held_bytes: None,
             rss_growth_bytes: None,
             disk_read_bytes: None,
             gpu_upload: None,

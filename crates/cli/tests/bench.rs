@@ -230,6 +230,8 @@ fn format_2_has_exactly_these_fields() -> Result<(), Box<dyn std::error::Error>>
             "disk_read_bytes",
             "gpu_device_growth_bytes",
             "gpu_upload",
+            "kv_held_bytes",
+            "kv_held_pages",
             "kv_reserved_bytes",
             "rss_growth_bytes",
             "seconds",

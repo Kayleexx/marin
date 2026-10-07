@@ -202,11 +202,21 @@ pub fn text(r: &Record) -> String {
     out.push_str(&power_line(r));
     out.push('\n');
     let _ = writeln!(out, "load: {:.2} s", r.load.seconds);
+    let kv = match (r.load.kv_held_pages, r.load.kv_held_bytes) {
+        (Some(pages), Some(bytes)) => format!(
+            "kv cache {} held for {pages} pages, up to {}",
+            units::bytes(bytes),
+            units::bytes(r.load.kv_reserved_bytes)
+        ),
+        _ => format!(
+            "kv cache reserved {}",
+            units::bytes(r.load.kv_reserved_bytes)
+        ),
+    };
     let _ = writeln!(
         out,
-        "  weights {} · kv cache reserved {}",
-        units::bytes(r.load.weights_bytes),
-        units::bytes(r.load.kv_reserved_bytes)
+        "  weights {} · {kv}",
+        units::bytes(r.load.weights_bytes)
     );
     if let Some(rss) = r.load.rss_growth_bytes {
         let _ = writeln!(out, "  process memory grew by {}", units::bytes(rss));

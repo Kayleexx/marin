@@ -57,6 +57,13 @@ pub struct GpuCache {
     verify: Vec<Option<Workspace>>,
 }
 
+impl GpuCache {
+    /// GPU pages the sequence has needed so far, and the memory they take.
+    pub fn kv_held(&self) -> (usize, usize) {
+        (self.kv.pages_held(), self.kv.bytes_held())
+    }
+}
+
 impl SequenceCache for GpuCache {
     fn used(&self) -> usize {
         self.kv.len()
@@ -76,6 +83,14 @@ impl SequenceCache for GpuCache {
             held: self.kv.len(),
         })
     }
+}
+
+/// GPU memory the cache needs before the first token for a window of `capacity` positions; the rest is allocated as the
+/// sequence grows.
+pub fn kv_startup_bytes(config: &Qwen3Config, capacity: usize) -> Option<u64> {
+    let dims = (config.heads, config.kv_heads, config.head_dim);
+    DeviceKv::startup_bytes(config.layers, dims, capacity)
+        .and_then(|bytes| u64::try_from(bytes).ok())
 }
 
 /// Most tokens `forward_rows` takes in one pass.

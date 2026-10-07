@@ -46,7 +46,7 @@ pub enum StopReason {
 #[derive(Debug, Clone)]
 pub struct Outcome {
     pub prompt_tokens: usize,
-    /// Leading prompt tokens whose keys and values were kept from the run before instead of being read again.
+    /// Leading prompt tokens kept from the previous run.
     pub reused: usize,
     pub generated: usize,
     pub stop: StopReason,
@@ -98,10 +98,8 @@ pub fn generate<M: CausalLm>(
     generate_reusing(model, kept, sampler, prompt, params, cancel, on_token)
 }
 
-/// `generate` that keeps the cached positions whose ids, recorded in `kept.retained`, exactly match the start of
-/// `prompt` and reads only the rest. Afterwards the record holds the ids the cache holds: the prompt and the generated
-/// tokens already fed back (every one but a final token that was sampled and not fed, and never the stop token). An
-/// error leaves it empty. The tokens are the ones a fresh run gives, up to the rounding of passes of different lengths.
+/// Keeps the cached positions whose ids in `kept.retained` match the start of `prompt` and reads only the rest.
+/// Afterwards the record holds what the cache holds; an error leaves it empty.
 pub fn generate_reusing<M: CausalLm>(
     model: &M,
     kept: Kept<'_, M::Cache>,
@@ -131,7 +129,7 @@ pub fn generate_reusing<M: CausalLm>(
         return Err(GenerateError::BadSpeculation);
     }
     let keep = retained.reusable(prompt, kv.used());
-    // Taken now, so an early return leaves the record empty and the cache untrusted.
+    // Taken first: any error return leaves the record empty.
     let mut ids = retained.take();
     if keep == 0 {
         kv.clear();

@@ -1,6 +1,3 @@
-//! `marin-run turns`: the time to the first token of a chat turn that builds on a cached conversation, against the
-//! same turn read from scratch, for conversations of several lengths and for a history edited near its start.
-
 use std::time::{Duration, Instant};
 
 use chat::{DEFAULT_SYSTEM, Message, Role, render};
@@ -15,19 +12,17 @@ use crate::signal::Interrupt;
 use crate::style::Style;
 
 pub struct Options {
-    /// Conversation lengths in tokens before the new message; 0 is one short exchange.
+    /// Conversation lengths in tokens before the new message.
     pub history: Vec<usize>,
     pub reply_tokens: usize,
     pub rounds: usize,
     pub ctx: usize,
     pub energy: bool,
     pub speculate: bool,
-    /// The message of the timed turn.
     pub ask: String,
     pub quant: Option<QuantScheme>,
 }
 
-/// The turn before (whose reply fills the cache) and the turn timed.
 struct Case {
     label: String,
     before: Vec<u32>,
@@ -54,7 +49,6 @@ fn encode(loaded: &Loaded, messages: &[Message]) -> Result<Vec<u32>, CliError> {
     Ok(loaded.dir.tokenizer.encode(&text)?)
 }
 
-/// A system message and story exchanges until the conversation holds about `tokens` tokens.
 fn history(loaded: &Loaded, tokens: usize) -> Result<Vec<Message>, CliError> {
     let mut messages = vec![Message::new(Role::System, DEFAULT_SYSTEM)];
     if tokens == 0 {
@@ -105,7 +99,7 @@ fn cases(
     messages.push(Message::new(Role::Assistant, text));
     messages.push(Message::new(Role::User, ask));
     let timed = encode(loaded, &messages)?;
-    // An edit near the start of the conversation: only the system message is still shared.
+    // Editing the first message leaves only the system message shared.
     if let Some(first) = messages.get_mut(1) {
         first.content.insert_str(0, "(edited) ");
     }
@@ -173,7 +167,6 @@ fn run(
     })
 }
 
-/// Fills the cache with the turn before, then times the turn that follows it.
 fn timed_turn(
     loaded: &Loaded,
     cache: &mut EngineCache,
@@ -288,7 +281,7 @@ pub fn run_turns(
             continue;
         }
         let mut samples: [Vec<Sample>; 2] = [Vec::new(), Vec::new()];
-        // One warmup round, then old/new alternating so drift hits both modes alike.
+        // One warmup round, then alternating order so drift hits both modes alike.
         for round in 0..=options.rounds {
             let order = if round % 2 == 0 {
                 [Mode::Keep, Mode::Replay]

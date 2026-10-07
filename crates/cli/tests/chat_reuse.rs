@@ -1,6 +1,3 @@
-//! Keeping the cache between chat turns: every reply must be exactly the reply a full replay of the conversation
-//! gives, while only the part of the prompt after the longest exactly shared start is read again.
-
 use std::io::{self, Write};
 
 use cli::chat::Chat;
@@ -37,7 +34,6 @@ fn session(ctx: usize, temperature: f32, reuse: bool) -> Result<Session> {
     Ok(session)
 }
 
-/// One side of the comparison: a session and its conversation.
 struct Side {
     session: Session,
     chat: Chat,
@@ -63,7 +59,6 @@ impl Side {
     }
 }
 
-/// Asks both sides the same thing; the replies must be identical, and the reusing side must read less.
 fn same_reply(
     keep: &mut Side,
     replay: &mut Side,
@@ -107,15 +102,13 @@ fn a_conversation_reuses_its_history_and_answers_exactly_as_a_replay(
             "ok",
         ] {
             let reused = same_reply(&mut keep, &mut replay, text, interrupt)?;
-            // Everything up to the last answer is kept; the template drops that answer's empty reasoning block,
-            // so the answer itself is read again.
+            // The template drops the last answer's empty reasoning block, so that answer is read again.
             assert!(
                 reused.saturating_add(8) >= previous_prompt,
                 "{text:?}: kept {reused} of the {previous_prompt}-token previous prompt"
             );
             previous_prompt = keep.session.last_prompt.len();
         }
-        // A new conversation still shares the system message.
         keep.chat.clear();
         replay.chat.clear();
         let reused = same_reply(&mut keep, &mut replay, "something new", interrupt)?;
@@ -160,7 +153,6 @@ fn forgetting_old_turns_to_fit_the_window_stays_exact(interrupt: &Interrupt) -> 
     Ok(())
 }
 
-/// Accepts `room` bytes, then fails, which stops the reply mid-way.
 struct Breaks {
     room: usize,
 }

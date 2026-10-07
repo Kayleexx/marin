@@ -50,7 +50,13 @@ pub fn load(
     let config = Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref())?;
     let ctx = resolve_ctx(&config, ctx, default_ctx)?;
     let footprint = footprint(&dir, &config, ctx, quant)?;
-    let selected = Backend::select(backend, footprint.weights.saturating_add(footprint.kv))?;
+    let selected = Backend::select(
+        backend,
+        footprint.weights.saturating_add(footprint.kv_startup),
+        footprint
+            .weights
+            .saturating_add(footprint.kv.max(footprint.kv_startup)),
+    )?;
     if matches!(selected.backend, Backend::Cpu) {
         footprint.ensure_fits()?;
     }

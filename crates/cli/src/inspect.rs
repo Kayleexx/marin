@@ -81,8 +81,9 @@ pub fn describe(
         (
             "kv cache",
             format!(
-                "{} for this context   (remembers earlier tokens so they are not recomputed)",
-                units::bytes(fp.kv)
+                "up to {} for this context, {} before the first token on the GPU   (remembers earlier tokens so they are not recomputed)",
+                units::bytes(fp.kv),
+                units::bytes(fp.kv_startup)
             ),
         ),
         (

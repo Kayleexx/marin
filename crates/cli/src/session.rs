@@ -37,12 +37,11 @@ impl Settings {
 
 pub struct Session {
     pub loaded: Loaded,
-    /// Private, so every change to it outside a reply goes through `engine_and_kv`, which forgets `retained`.
+    /// Private so every outside change goes through `engine_and_kv`, which forgets `retained`.
     kv: EngineCache,
-    /// The token ids `kv` holds after the last reply. Lives and dies with `loaded`: a new model, tokenizer or context
-    /// size means a new `Session`.
+    /// Dies with `loaded`: a new model, tokenizer or context size makes a new `Session`.
     retained: Retained,
-    /// Keep the cached positions that the next prompt starts with exactly (on unless a tool needs full replays).
+    /// Off when a tool needs full replays.
     pub reuse: bool,
     pub settings: Settings,
     pub ctx: usize,
@@ -99,13 +98,12 @@ impl Session {
         &self.kv
     }
 
-    /// The model and its cache, for a caller that changes the cache; the next reply then reads its whole prompt again.
+    /// Clears the record: the next reply reads its whole prompt.
     pub fn engine_and_kv(&mut self) -> (&Engine, &mut EngineCache) {
         self.retained.forget();
         (&self.loaded.model, &mut self.kv)
     }
 
-    /// The token ids whose keys and values the cache holds for the next reply to build on.
     pub fn retained(&self) -> &Retained {
         &self.retained
     }

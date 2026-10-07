@@ -295,9 +295,11 @@ impl Gpu {
         self.counters.launch();
         let mut args = self.stream.launch_builder(function);
         push_args(&mut args);
-        // SAFETY: only the wrappers in `ops` and `probe` call this. Each one verifies that every buffer
+        // SAFETY: only the wrappers in `ops`, `attention` and `probe` call this. Each one verifies that every buffer
         // holds at least the number of elements its kernel indexes for the given sizes, that
-        // scalar arguments fit in u32, and that the kernel's argument list matches `push_args`.
+        // scalar arguments fit in u32, and that the kernel's argument list matches `push_args`. The attention
+        // kernels also follow `DeviceKv::page_ptrs`: their wrappers verify that every page the kernel can reach
+        // is mapped, and `DeviceKv` keeps each mapped page allocated for as long as its address is in the table.
         unsafe { args.launch(config) }?;
         Ok(())
     }

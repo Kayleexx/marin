@@ -1,6 +1,7 @@
 use cudarc::driver::{CudaSlice, LaunchConfig, PushKernelArg};
 
 use crate::ops::{expect_len, to_u32};
+use crate::pages::pages_for;
 use crate::{Buffer, CudaError, DeviceKv, Gpu};
 
 const MAX_HEAD_DIM: usize = 256;
@@ -28,13 +29,12 @@ fn split_plan(visible: usize, kv_heads: usize, sm_count: usize) -> (usize, usize
     (chunk, visible.div_ceil(chunk))
 }
 
-/// The two scratch buffers the split decode kernels need for any context up to `capacity`; empty when the head layout
-/// takes the general kernel instead.
-pub(crate) fn split_scratch(
-    gpu: &Gpu,
+/// Floats in the two scratch buffers the split decode kernels need for any context up to `capacity`; zero when the
+/// head layout takes the general kernel instead.
+pub(crate) fn scratch_lens(
     (heads, kv_heads, head_dim): (usize, usize, usize),
     capacity: usize,
-) -> Result<(Buffer, Buffer), CudaError> {
+) -> Option<(usize, usize)> {
     let uses_split = heads
         .checked_div(kv_heads)
         .is_some_and(|group| group <= MAX_GROUP);
@@ -46,15 +46,19 @@ pub(crate) fn split_scratch(
     } else {
         0
     };
-    let len = |per_head: usize| {
-        heads
-            .checked_mul(splits)
-            .and_then(|n| n.checked_mul(per_head))
-            .ok_or(CudaError::Overflow {
-                what: "attention scratch",
-            })
-    };
-    Ok((gpu.zeros(len(head_dim)?)?, gpu.zeros(len(2)?)?))
+    let len = |per_head: usize| heads.checked_mul(splits)?.checked_mul(per_head);
+    Some((len(head_dim)?, len(2)?))
+}
+
+pub(crate) fn split_scratch(
+    gpu: &Gpu,
+    dims: (usize, usize, usize),
+    capacity: usize,
+) -> Result<(Buffer, Buffer), CudaError> {
+    let (acc, ml) = scratch_lens(dims, capacity).ok_or(CudaError::Overflow {
+        what: "attention scratch",
+    })?;
+    Ok((gpu.zeros(acc)?, gpu.zeros(ml)?))
 }
 
 impl Gpu {
@@ -102,16 +106,17 @@ impl Gpu {
                 actual: start.saturating_add(tokens),
             });
         };
-        let layers = kv.keys.len();
-        let (Some(keys), Some(values)) = (kv.keys.get(layer), kv.values.get(layer)) else {
-            return Err(CudaError::Shape {
-                what: "attention layer",
-                expected: layers,
-                actual: layer,
-            });
-        };
+        let key_offset = kv.key_offset(layer)?;
         if tokens == 0 || visible == 0 {
             return Ok(());
+        }
+        // The kernels follow the page table to every position below `visible`.
+        if pages_for(visible) > kv.mapped_pages() {
+            return Err(CudaError::Shape {
+                what: "attention pages",
+                expected: pages_for(visible),
+                actual: kv.mapped_pages(),
+            });
         }
         if tokens == 1
             && heads
@@ -120,7 +125,7 @@ impl Gpu {
         {
             return self.attention_split(
                 q,
-                (keys, values),
+                (&kv.page_ptrs, key_offset),
                 (&mut kv.partial_acc, &mut kv.partial_ml),
                 out,
                 (heads, kv_heads, head_dim),
@@ -134,7 +139,7 @@ impl Gpu {
         {
             return self.attention_multi(
                 q,
-                (keys, values),
+                (&kv.page_ptrs, key_offset),
                 (&mut kv.partial_acc, &mut kv.partial_ml),
                 out,
                 (heads, kv_heads, head_dim),
@@ -163,7 +168,8 @@ impl Gpu {
             to_u32(start, "start position")?,
         );
         self.launch(&self.kernels.attention, config, |a| {
-            a.arg(&q.data).arg(keys).arg(values).arg(&mut out.data);
+            a.arg(&q.data).arg(&kv.page_ptrs).arg(&key_offset);
+            a.arg(&mut out.data);
             a.arg(&heads)
                 .arg(&kv_heads)
                 .arg(&head_dim)
@@ -173,11 +179,12 @@ impl Gpu {
     }
 
     /// Attention for the one newest token, with the context split across blocks and merged afterwards. The caller
-    /// has checked the buffers against `visible` positions, the head layout and `heads / kv_heads <= MAX_GROUP`.
+    /// has checked the buffers against `visible` positions, that the page table maps every page below `visible`, the
+    /// head layout and `heads / kv_heads <= MAX_GROUP`.
     fn attention_split(
         &self,
         q: &Buffer,
-        (keys, values): (&CudaSlice<f32>, &CudaSlice<f32>),
+        (pages, key_offset): (&CudaSlice<u64>, u32),
         (partial_acc, partial_ml): (&mut Buffer, &mut Buffer),
         out: &mut Buffer,
         (heads, kv_heads, head_dim): (usize, usize, usize),
@@ -220,7 +227,7 @@ impl Gpu {
             to_u32(splits, "attention splits")?,
         );
         self.launch(&self.kernels.attention_partial, partial, |a| {
-            a.arg(&q.data).arg(keys).arg(values);
+            a.arg(&q.data).arg(pages).arg(&key_offset);
             a.arg(&mut partial_acc.data).arg(&mut partial_ml.data);
             a.arg(&heads_u).arg(&kv_heads_u).arg(&head_dim_u);
             a.arg(&visible_u).arg(&chunk_u).arg(&splits_u).arg(&scale);
@@ -240,11 +247,12 @@ impl Gpu {
 
     /// Attention for `tokens` (2 to `MULTI_MAX_TOKENS`) new tokens after `start` cached positions, with the context
     /// split across blocks and every key and value row read once for all of them, then merged. The caller has checked
-    /// the buffers, the head layout and the number of rows.
+    /// the buffers, that the page table maps every page below `start + tokens`, the head layout and the number of
+    /// rows.
     fn attention_multi(
         &self,
         q: &Buffer,
-        (keys, values): (&CudaSlice<f32>, &CudaSlice<f32>),
+        (pages, key_offset): (&CudaSlice<u64>, u32),
         (partial_acc, partial_ml): (&mut Buffer, &mut Buffer),
         out: &mut Buffer,
         (heads, kv_heads, head_dim): (usize, usize, usize),
@@ -309,7 +317,7 @@ impl Gpu {
                     actual: rows,
                 })?;
         self.launch(kernel, partial, |a| {
-            a.arg(&q.data).arg(keys).arg(values);
+            a.arg(&q.data).arg(pages).arg(&key_offset);
             a.arg(&mut partial_acc.data).arg(&mut partial_ml.data);
             a.arg(&heads_u).arg(&kv_heads_u).arg(&head_dim_u);
             a.arg(&start_u).arg(&tokens_u).arg(&chunk_u).arg(&splits_u);

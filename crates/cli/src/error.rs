@@ -1,5 +1,5 @@
 use loader::LoaderError;
-use model::ModelError;
+use model::{CudaError, ModelError};
 use runtime::GenerateError;
 use sampler::SamplerError;
 use thiserror::Error;
@@ -98,6 +98,11 @@ impl CliError {
             Self::Model(ModelError::GpuMemory { .. }) => {
                 Some("try a smaller --ctx, or run with --backend cpu")
             }
+            Self::Generate(GenerateError::Model(ModelError::Cuda(CudaError::KvMemory {
+                ..
+            }))) => Some(
+                "the GPU has no room for more of this conversation: close other programs, start a new chat, or run with --backend cpu",
+            ),
             Self::NoChatModel { .. } => Some(
                 "install one: huggingface-cli download Qwen/Qwen3-1.7B --local-dir ~/models/Qwen3-1.7B (or use marin-run for base models)",
             ),

@@ -93,11 +93,18 @@ pub fn resource_lines(s: &Session) -> Vec<String> {
     )
     .and_then(|b| u64::try_from(b).ok())
     .unwrap_or(0);
+    let held = match s.kv().kv_held() {
+        Some((pages, bytes)) => format!(
+            "{} held for {pages} pages, up to {}",
+            units::bytes(u64::try_from(bytes).unwrap_or(0)),
+            units::bytes(fp.kv)
+        ),
+        None => format!("{} reserved", units::bytes(fp.kv)),
+    };
     let mut lines = vec![
         format!("weights         {}", units::bytes(fp.weights)),
         format!(
-            "kv cache        {} reserved · {} in use ({} of {} positions)",
-            units::bytes(fp.kv),
+            "kv cache        {held} · {} in use ({} of {} positions)",
             units::bytes(used),
             units::count(s.kv().used() as u64),
             units::count(SequenceCache::capacity(s.kv()) as u64)
