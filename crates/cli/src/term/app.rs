@@ -125,6 +125,9 @@ impl App {
                 _ => Flow::Continue,
             };
             if let Flow::Quit(code) = flow {
+                if let Some(session) = self.session.as_mut() {
+                    let _ = session.save_snapshot();
+                }
                 self.screen.print(&[])?;
                 return Ok(code);
             }

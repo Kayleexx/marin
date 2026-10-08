@@ -58,6 +58,14 @@ pub struct GpuCache {
 }
 
 impl GpuCache {
+    pub(super) fn kv(&self) -> &DeviceKv {
+        &self.kv
+    }
+
+    pub(super) fn kv_mut(&mut self) -> &mut DeviceKv {
+        &mut self.kv
+    }
+
     /// GPU pages the sequence has needed so far, and the memory they take.
     pub fn kv_held(&self) -> (usize, usize) {
         (self.kv.pages_held(), self.kv.bytes_held())

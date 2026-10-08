@@ -60,6 +60,14 @@ impl ModelDir {
     }
 }
 
+impl ModelDir {
+    /// Hash of the files that decide what a cached key or value means besides the weights: the model configuration
+    /// and the tokenizer.
+    pub fn config_hash(&self) -> Result<u64, LoaderError> {
+        crate::content_hash::hash_files(&[self.path.join(CONFIG), self.path.join(TOKENIZER)])
+    }
+}
+
 fn read_text(path: &Path) -> Result<String, LoaderError> {
     fs::read_to_string(path).map_err(|source| LoaderError::Io {
         path: path.to_path_buf(),

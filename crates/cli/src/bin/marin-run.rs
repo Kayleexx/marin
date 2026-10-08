@@ -230,6 +230,36 @@ fn run(cli: Cli, style: &Style) -> Result<ExitCode, CliError> {
             &interrupt()?,
         )
         .map(|()| ExitCode::SUCCESS),
+        Some(Command::Restart {
+            model_dir,
+            mode,
+            tokens,
+            extra,
+            reply_tokens,
+            file,
+            no_energy,
+            quant,
+        }) => cli::restart::run(
+            &model_dir,
+            BackendChoice::Cuda,
+            &cli::restart::Options {
+                mode: match mode {
+                    args::RestartModeArg::Save => cli::restart::Mode::Save,
+                    args::RestartModeArg::Restore => cli::restart::Mode::Restore,
+                    args::RestartModeArg::Cold => cli::restart::Mode::Cold,
+                },
+                tokens,
+                extra,
+                reply_tokens,
+                file,
+                ctx: tokens.saturating_add(extra).saturating_add(64),
+                energy: !no_energy,
+                precision: quant.precision()?,
+            },
+            style,
+            &interrupt()?,
+        )
+        .map(|()| ExitCode::SUCCESS),
         Some(Command::SpecBench {
             model_dir,
             prompts,

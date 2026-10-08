@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod content_hash;
 mod error;
 mod model_dir;
 mod safetensors;

@@ -1,10 +1,8 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 
-use model::{DEFAULT_GROUP, KvFormat, Precision, QuantBits, QuantScheme};
-
-use crate::CliError;
+pub use crate::arg_types::*;
 use crate::trace::Pass;
 
 const EXAMPLES: &str = "\
@@ -253,6 +251,32 @@ pub enum Command {
         #[command(flatten)]
         quant: QuantArgs,
     },
+    /// Time the first token of a prompt after a restart: restore a saved start from disk, or read it all (GPU only)
+    Restart {
+        /// Folder with config.json, tokenizer.json and model.safetensors
+        model_dir: PathBuf,
+        /// save: read the prompt and write the snapshot; restore: read the same start plus a few tokens using it; cold: the
+        /// same prompt with no snapshot
+        #[arg(long, value_enum)]
+        mode: RestartModeArg,
+        /// Tokens of the saved start
+        #[arg(long, default_value_t = 2048)]
+        tokens: usize,
+        /// Tokens added after the saved start when restoring or reading cold
+        #[arg(long, default_value_t = 16)]
+        extra: usize,
+        /// Tokens generated after the prompt, to compare restored output with the live cache's
+        #[arg(long, default_value_t = 1)]
+        reply_tokens: usize,
+        /// The snapshot file
+        #[arg(long)]
+        file: PathBuf,
+        /// Do not read the GPU's power
+        #[arg(long)]
+        no_energy: bool,
+        #[command(flatten)]
+        quant: QuantArgs,
+    },
     /// Experiment: decode real replies with and without guessing tokens ahead, interleaved, and compare (GPU only)
     SpecBench {
         /// Chat model folder, such as Qwen3-1.7B
@@ -294,73 +318,6 @@ pub enum Command {
         #[command(flatten)]
         kv: KvArgs,
     },
-}
-
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BackendArg {
-    /// Use the GPU when CUDA works and the model fits, otherwise the CPU
-    Auto,
-    Cpu,
-    Cuda,
-}
-
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QuantBitsArg {
-    Int8,
-    Int4,
-}
-
-#[derive(Args, Debug, Clone, Copy)]
-pub struct QuantArgs {
-    /// Keep the layer weights as 8-bit (int8) or 4-bit (int4) numbers on the GPU: less memory to read per token, a
-    /// little accuracy lost (the embedding and output head stay bf16)
-    #[arg(long, value_enum)]
-    pub quantize: Option<QuantBitsArg>,
-    /// Weights that share one scale when quantizing, a multiple of 32: smaller is more accurate and takes more memory
-    #[arg(long, default_value_t = DEFAULT_GROUP, requires = "quantize")]
-    pub quant_group: usize,
-    #[command(flatten)]
-    pub kv: KvArgs,
-}
-
-#[derive(Args, Debug, Clone, Copy)]
-pub struct KvArgs {
-    /// How the GPU KV cache stores keys and values: f32, or f16 for half the memory (attention math stays f32)
-    #[arg(long, value_enum, default_value_t = KvTypeArg::F32)]
-    pub kv_type: KvTypeArg,
-}
-
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KvTypeArg {
-    F32,
-    F16,
-}
-
-impl QuantArgs {
-    pub fn precision(&self) -> Result<Precision, CliError> {
-        let bits = match self.quantize {
-            None => None,
-            Some(QuantBitsArg::Int8) => Some(QuantBits::Int8),
-            Some(QuantBitsArg::Int4) => Some(QuantBits::Int4),
-        };
-        let weights = bits
-            .map(|bits| QuantScheme::new(bits, self.quant_group))
-            .transpose()
-            .map_err(|e| CliError::BadOption(e.to_string()))?;
-        Ok(Precision {
-            weights,
-            kv: self.kv.format(),
-        })
-    }
-}
-
-impl KvArgs {
-    pub fn format(&self) -> KvFormat {
-        match self.kv_type {
-            KvTypeArg::F32 => KvFormat::F32,
-            KvTypeArg::F16 => KvFormat::F16,
-        }
-    }
 }
 
 #[derive(Args, Debug)]

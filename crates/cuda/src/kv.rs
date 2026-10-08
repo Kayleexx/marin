@@ -26,6 +26,9 @@ pub struct DeviceKv {
     pub(crate) len: usize,
 }
 
+#[path = "kv_transfer.rs"]
+mod transfer;
+
 fn shape(what: &'static str, expected: usize, actual: usize) -> CudaError {
     CudaError::Shape {
         what,

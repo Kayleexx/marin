@@ -176,7 +176,12 @@ fn open(
     let settings = settings(options)?;
     let path = absolute(&choose_model(options, home, interactive, style)?);
     let backend = backend_choice(options.backend);
-    let loaded = load::load(
+    let open = if options.snapshot.is_some() {
+        load::load_for_snapshot
+    } else {
+        load::load
+    };
+    let loaded = open(
         &path,
         options.ctx,
         CHAT_CTX,
@@ -186,7 +191,20 @@ fn open(
         stderr_is_terminal(),
     )?;
     remember(home, &path);
-    Session::new(loaded, settings, style)
+    let mut session = Session::new(loaded, settings, style)?;
+    if let Some(file) = &options.snapshot {
+        session.use_snapshot(file.clone());
+    }
+    Ok(session)
+}
+
+fn keep_snapshot(session: &mut Session, style: &Style) {
+    if let Err(reason) = session.save_snapshot() {
+        eprintln!(
+            "{} could not save the snapshot: {reason}",
+            style.yellow("note:")
+        );
+    }
 }
 
 fn one_shot(
@@ -222,6 +240,7 @@ fn one_shot(
             &mut io::stdout().lock(),
         )?
     };
+    keep_snapshot(&mut session, &style);
     Ok(if reply.outcome.stop == StopReason::Cancelled {
         ExitCode::from(u8::try_from(INTERRUPTED_EXIT_CODE).unwrap_or(130))
     } else {
@@ -263,5 +282,6 @@ fn session(options: &Options, home: Option<Home>, style: Style) -> Result<ExitCo
             report(&e, &style);
         }
     }
+    keep_snapshot(&mut session, &style);
     Ok(ExitCode::SUCCESS)
 }

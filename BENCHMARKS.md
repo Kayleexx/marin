@@ -47,6 +47,7 @@ How runs are compared:
 | 10 | Kept cache between chat turns | read only what is new in each turn | first token after 2.3k / 4.1k tokens of history 21x / 35x sooner (bf16), 23x / 37x (int8) |
 | 11 | Paged KV cache | allocate KV as the sequence grows, not for the whole `--ctx` | `--ctx 8192`, 64-token chat: 117 MB of KV instead of 1.88 GB, GPU peak -1.8 GB; speed within 0 to 4% |
 | 12 | f16 KV cache (option) | store keys and values in half the bytes | KV memory halved, 32k context fits (f32: 15.9k), decode at 4k +6.5%, first token after 4k 19.5% sooner, no measured quality loss; bf16 and q8 dropped |
+| 13 | Prefix snapshot (`--snapshot FILE`) | save the finished conversation's KV to disk, restore the shared start after a restart | restart to first token 3.4x sooner at 4k (f16), 12x at 8k (f32); output identical to the live cache |
 
 Rows 7 and 9 did not simply get faster. The cause is the power cap, explained next.
 
@@ -428,7 +429,7 @@ The three attention kernels (prefill, one-token decode, few-token) only change h
 - Replies are byte-identical to the contiguous build: 20 of 20 (greedy and sampled, bf16 and int8, five prompts from a few tokens to about 4,000). `verify` shows the same logit differences as before (1.72e-5, 2.67e-5, 1.91e-5 against 5e-4 allowed).
 - Kept cache against full replay on the paged cache: 24 of 24 rows identical, and with guessing ahead 24 of 24 again (accepted of drafted per reply: bf16 12/21, 24/42, 18/28; int8 28/42, 20/42, 8/14), so rollbacks across page boundaries ran.
 - 17 deliberate breaks, each caught by a failing test: wrong page, row or slot; values read from or written over the keys (in each kernel and the host write); kernel and host disagreeing on page or slab size; the layer offset; truncate keeping or freeing the wrong pages; page counts at multiples of 64; the mapped-pages safety check removed.
-- 498 tests passed at the end of V4 and 512 after the V4.1 pass below, with no GPU skips; clippy with `-D warnings`, the line-limit and the unsafe checks are clean, with no lint suppressions anywhere in the code.
+- 498 tests passed at the end of V4 and 512 after the V4.1 pass below, with no GPU skips.
 
 **What the lookup cost, and the two designs that failed first**
 
@@ -613,6 +614,77 @@ At least twice the context fits; f16 reached the model's limit, so the real gain
 
 f16 meets the written default criteria but stays optional until it is checked at contexts beyond 4096 tokens and on a second model, and until `marin` (the chat program) takes the flag.
 
+### 13. Prefix snapshot (V6 phase 1)
+
+**What was built.** One snapshot file holds the KV cache of the last finished reply and the token ids it stands for. `marin --snapshot FILE` saves it when the session ends and, on the first prompt of the next session, loads the part of it that the prompt shares; only the rest is read. GPU only, f32 and f16 KV, any weights. Nothing else in V6 was built: no shared pages, no prefix index, no eviction, no compression, no background saving. The attention kernels did not change.
+
+**Design.**
+- **Cache side:** `DeviceKv` can copy one page out to host memory and copy one in (`export_page`, `import_page`), and map the pages for an empty cache first (`reserve_empty`). The cache's length only advances after the last page is in, so a failed restore leaves a cache that reads as empty.
+- **File** (`marin-run restart` and the chat use the same code): header (80 bytes: magic, version, KV type, layers, kv heads, head size, page size, positions, weight bits and group, weights hash, config hash, token-id hash, hash of the header), the token ids, one block per 64-position page (`[layer][keys, values][row]`, then a hash of page number and bytes), and an end mark with the total length. A page cut short at the end of the snapshot holds only its real rows.
+- **Fingerprint:** 64-bit hashes of all weight files (contents and sizes), of `config.json` plus `tokenizer.json`, the weight quantization scheme, the KV type and the head layout. The hash catches changed or damaged files, not forgery; it is the standard library's, so another Rust release makes old snapshots look foreign, which only costs a re-read.
+- **The weight-hash cost:** hashing 3.44 GB takes 0.8 s, so it runs on its own thread while the weights load (about 2.1 s) and is waited for only when a snapshot is first used. The wait measured 2.0 to 2.2 ms. The price is about 0.1 s more model load (2.12 to 2.23 s) while both read the file.
+- **Restore rule:** the longest start of the file that the prompt shares; if that is shorter than the whole snapshot it is rounded down to whole pages (the rest is recomputed, at most 63 tokens), so a page is never copied in part. The record of token ids (`Retained`) is set only after the whole copy succeeded.
+- **Save rule:** after a reply that ended normally (a cancelled reply counts; an error does not), write a temporary file next to the target, fsync, rename over the target, fsync the folder. The cache must hold exactly the named tokens.
+- **Opt in:** nothing is written unless `--snapshot` is given, because the file contains the conversation.
+
+**End-to-end result.** Separate processes on Qwen3-1.7B-Base, 40 W cap, median of 3 (3 more with the file dropped from the page cache). "First token" is from the prompt call to the first token: saved start plus 16 new tokens, including the weight-hash wait, file read, checksums, page mapping and copy to the GPU. "Process" is the whole run from start, model load included (about 2.1 s). Energy is the GPU's mean power times that window.
+
+| saved start | KV | file | re-read: first token / process / GPU energy | restore (file cached): first token / process / energy | restore (file cold): first token | save |
+|---|---|---|---|---|---|---|
+| 512 | f32 | 117 MB | 325 ms / 2.64 s / 3.8 J | 84 ms / 2.51 s / 0.9 J | 103 ms | 104 ms |
+| 512 | f16 | 59 MB | 316 ms / 2.62 s / 3.5 J | 65 ms / 2.48 s / 0.7 J | 76 ms | 40 ms |
+| 2048 | f32 | 470 MB | 2306 ms / 4.66 s / 66.6 J | 212 ms / 2.68 s / 2.5 J | 262 ms | 294 ms |
+| 2048 | f16 | 235 MB | 2149 ms / 4.42 s / 60.2 J | 130 ms / 2.54 s / 1.3 J | 157 ms | 138 ms |
+| 4096 | f32 | 940 MB | 7177 ms / 9.49 s / 257.8 J | 430 ms / 2.85 s / 4.9 J | 490 ms | 870 ms |
+| 4096 | f16 | 470 MB | 6517 ms / 8.82 s / 230.5 J | 224 ms / 2.62 s / 2.4 J | 277 ms | 285 ms |
+| 8192 | f32 | 1.88 GB | 39355 ms / 41.67 s / 1538 J | 974 ms / 3.41 s / 11.7 J | 940 ms | 929 ms |
+| 8192 | f16 | 940 MB | 22258 ms / 24.53 s / 861 J | 402 ms / 2.82 s / 4.8 J | 498 ms | 556 ms |
+
+Where a restore spends its time (4096 f16, file cached): read 41 ms, checksums 61 ms, copy to the GPU 43 ms, header 0; the rest of the 224 ms is reading the 16 new tokens. At 8192 f32: read 430, checksums 247, copy 163 ms.
+
+- **Restart to first token:** 3.4x faster at 4096 f16 (2.62 against 8.82 s), 12x at 8192 f32 (3.41 against 41.67 s). The restore itself (read, checksums, copy) is 15 to 50 times shorter than reading the text.
+- **At 512 tokens it barely pays:** the first token is 4 to 5 times sooner, but the process takes 2.5 s either way because loading the model dominates, and the hash thread costs about 0.1 s of that. 512 is below where a snapshot is worth having.
+- **Checksums cost about a third of a restore** (about 7 GB/s). They stay: they are what makes a damaged file safe. A faster hash would cut the restore by a quarter at most.
+- **Energy:** a restore used 1 to 2% of the GPU energy of reading the text again at 2k and above (4096 f32 4.9 against 258 J). Disk and CPU energy were not measured.
+- **Save** is 0.3 to 0.9 s at 4k to 8k and is done once, when the session ends, not after each reply.
+- The file-cached and cold-file columns differ by 20 to 100 ms (none at 8192 f32). Both use the NVMe disk of this machine.
+
+**Same output as the live cache.** On the real model, a greedy reply of 24 tokens after restoring was identical to the reply the saving process produced when it continued with the same prompt on its live cache, and identical to a cold read, in all 16 combinations of saved start (512, 2000, 2048, 4096 tokens), KV type (f32, f16) and weights (bf16, int8). The 2000-token case restores 1984 positions (31 whole pages) and reads the other 16. Tiny-model tests add sampled replies at temperature 1.2: a restored cache continues token for token like the live one.
+
+**Tests** (`crates/cli/tests/snapshot*.rs`, `crates/cuda/tests/kv_transfer.rs`, and format tests): restored against live replies for f32 and f16, bf16 and int8 weights, greedy and sampled; the page rule at 14 snapshot lengths from 30 to 700 positions around every 64 and 512 boundary, each with 9 different prompt cut points; truncation at 14 points and a flipped bit at 15 places (header, ids, pages, hashes, end mark), an extra byte, a missing file; snapshots refused for another KV type, weight quantization, changed `config.json`, changed `tokenizer.json`, changed weights (while an identical copy in another folder is accepted); a bad last page leaves the cache empty and the reply correct; saving never leaves a temporary file or touches the old snapshot when it fails, a stale temporary file is ignored, an untrusted cache is not saved; guessing ahead with rejected drafts (the test builds a prompt that makes guessing start at once) before the save changes nothing; the CPU never saves or restores; page export/import at slab boundaries, reversed page tables and bad requests.
+
+**Failures found while building it.**
+1. Restoring only the first pages of a longer snapshot read the end mark from the wrong place and refused every such file. The page-boundary test found it; the end mark is now read from its known position.
+2. A new test of mine took the weight-hash handle that the session had already used, so it failed on its own and made every deliberate break look caught. Found by comparing results with an unbroken run; fixed and rerun.
+3. Deliberate breaks (12 effective, run against the final code): accepting a bad page hash, ignoring the file length, the end mark, the token-id hash, the KV type, the weights hash, the configuration hash, the weight quantization, restoring a partial page, a record longer than the cache, saving a cache that disagrees with the record, and a wrong page number in the saved hash are each caught by at least one test. Two weaknesses came out of the first rounds: clearing the cache after a failed restore was redundant, since the length only advances at the end, so that code was removed; and the "record agrees with the cache" check could not be reached through the public interface, so it moved into `save`, where it is tested.
+
+**Limits.** GPU only (the CPU cache is not saved). One snapshot file; a new save replaces it. The file is restored on the first prompt of a session only, and only for the model it was started with (switching model in the chat starts without a snapshot). The hash is not cryptographic. Page-granular copies are used, not one large copy; a bulk copy would save a few percent. Only one machine and one disk were measured.
+
+**Did it earn its complexity?** Yes, from 2k tokens up: 2 to 40 seconds of waiting become 0.2 to 1 s, for about 1,000 lines of code (file format 244, restore 175, save 99, page copy 110, engine calls 90, the `restart` benchmark command 130, session hook and weight hash about 120) with no change to the kernels. Below about 1k tokens it saves nothing a user would notice.
+
+#### Why this design: what was measured first
+
+Before building, the pieces of a restore were timed alone (no model loaded; NVMe disk; GPU copies in milliseconds, median of 3).
+
+| tokens | KV | size | re-read | copy back from RAM | read cold from disk + copy | copy out + write + fsync |
+|---|---|---|---|---|---|---|
+| 512 | f32 | 117 MB | 323 | 8 | 39 | 137 |
+| 2048 | f32 | 470 MB | 2266 | 33 | 159 | 216 |
+| 2048 | f16 | 235 MB | 2132 | 16 | 84 | 84 |
+| 4096 | f32 | 940 MB | 7235 | 65 | 383 | 959 |
+| 4096 | f16 | 470 MB | 6689 | 32 | 153 | 159 |
+| 8192 | f32 | 1879 MB | 39718 | 130 | 666 | 737 |
+| 8192 | f16 | 940 MB | 22469 | 66 | 333 | 344 |
+
+- Re-reading grows faster than linearly (attention); restoring is linear in bytes, so it wins by 8x at 512 tokens and by 15 to 65x from 2k up.
+- Disk read about 3.5 to 4 GB/s; GPU copies 14 GB/s from page-locked memory and 2.6 to 5 GB/s from ordinary memory. The built version uses ordinary memory and is still fast enough.
+- Page-sized copies (128 KB) cost 37 ms against 32 ms for one piece of 470 MB.
+- Saving f32 at 4096 tokens takes about 1 s, so saving happens when the session ends, not after each reply.
+
+**Why a snapshot file and not shared pages.** Marin runs one chat at a time, so there is no second live sequence to share pages with. "New chat, same system prompt or repository context" is served just as well by restoring a saved copy. Shared pages with reference counts would only save memory when several sequences run together (V7). If they are built, no copy-on-write kernel is needed: share only whole 64-token pages, recompute the partial page at the end of the shared part (at most 63 tokens), and treat any write or rollback into a shared page as "drop the reference and take a fresh page".
+
+**Not built:** shared pages and reference counts, a prefix index, eviction, a size budget for many snapshots, compression, memory-mapped restore, background saving, cross-machine transfer. Each needs more than one snapshot or more than one live sequence to pay off.
+
 ## Tried and not adopted
 
 - **bf16 and q8 KV cache:** bf16 had no advantage over f16; q8 failed the quality gates (section 12). f16 fails strict `verify` by design and is judged by the section 12 gates instead.
@@ -652,6 +724,11 @@ marin-run spec-bench MODEL --sampling chat --max-tokens 120 --prompts PROMPT_FOL
 # KV cache format: quality against f32 KV, then the same command with --kv-type f16 and --against
 marin-run quality MODEL --text TEXT_FILE --tokens 4096 --kv-type f32 --save f32.json
 marin-run quality MODEL --text TEXT_FILE --tokens 4096 --kv-type f16 --against f32.json
+
+# restart: save a prefix, then restore it and read the cold baseline in separate processes
+marin-run restart MODEL --mode save --tokens 4096 --file snap.bin --kv-type f16
+marin-run restart MODEL --mode restore --tokens 4096 --file snap.bin --kv-type f16
+marin-run restart MODEL --mode cold --tokens 4096 --file snap.bin --kv-type f16
 
 # accuracy of quantized weights
 marin-run quality MODEL --quantize int8 --text TEXT_FILE

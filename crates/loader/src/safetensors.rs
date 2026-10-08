@@ -50,6 +50,10 @@ struct RawTensor {
 }
 
 impl SafetensorsFile {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn open(path: &Path) -> Result<Self, LoaderError> {
         let bad = |reason: String| LoaderError::Safetensors {
             path: path.to_path_buf(),

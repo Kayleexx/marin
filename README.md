@@ -43,6 +43,7 @@ Marin uses the GPU when CUDA works and the model fits, and the CPU otherwise. `-
 | `probe` | What can this GPU do on its own (memory and math speed)? |
 | `quality MODEL --text FILE` | How much accuracy does quantization cost? |
 | `turns MODEL` | How much sooner is the first token of a chat turn when the cache is kept? |
+| `restart MODEL --mode save\|restore\|cold` | How much sooner is the first token after a restart when a saved snapshot is restored? |
 | `spec-bench`, `guess`, `guess-report`, `pass-cost` | Guessing-ahead experiments |
 
 ## How it works
@@ -75,7 +76,11 @@ The record is written only after a reply ends cleanly and is cleared on any erro
 - The cost is 0 to 4% in speed at long contexts, and memory is not given back to the GPU until the session ends.
 - `--kv-type f16` (marin-run) stores keys and values in half the bytes: twice the context fits, with no quality loss measured. f32 stays the default.
 
-Details in [BENCHMARKS.md](BENCHMARKS.md#11-paged-kv-cache-v4).
+Details in [BENCHMARKS.md](BENCHMARKS.md#11-paged-kv-cache-v4) and [section 12](BENCHMARKS.md#12-kv-cache-precision-optional-f16).
+
+### Snapshot between runs (GPU, opt-in)
+
+`marin --snapshot FILE` saves the conversation's cache when the session ends and, next time, reuses the part of it that the new conversation shares, so a long start is not read again. After 4,000 tokens the first token arrives in about 0.2 to 0.4 s instead of 6.5 to 7 s. The file is checked against the exact model, tokenizer, KV type and weight format, and anything wrong with it means the prompt is simply read in full. It contains your conversation, so nothing is saved unless you ask. Details in [BENCHMARKS.md](BENCHMARKS.md#13-prefix-snapshot-v6-phase-1).
 
 ### Guessing ahead (opt-in, GPU only)
 
@@ -98,6 +103,8 @@ Qwen3-1.7B on a laptop GPU held to about 40 W (the power limit decides a lot, so
 | 4,000-token conversation, decode | 13 to 17% faster after the decode attention work |
 | Chat turn after 4.1k tokens of history | first token 35x (bf16) / 37x (int8) sooner with the kept cache |
 | Short chat, `--ctx 8192` | 117 MB of KV instead of 1.88 GB, GPU peak 1.8 GB lower; 0 to 4% slower at 2 to 4k tokens |
+| 4,000-token conversation, `--kv-type f16` | KV memory halved; 32k context fits (f32: 16k); decode 6.5% and first token 19.5% faster |
+| Restart after 4,000 tokens, `--snapshot` | first token 0.2 to 0.4 s instead of 6.5 to 7 s |
 
 Methods, tables and commands to repeat each number are in [BENCHMARKS.md](BENCHMARKS.md).
 

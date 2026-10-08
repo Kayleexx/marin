@@ -19,6 +19,8 @@ pub struct Loaded {
     pub took: Duration,
     /// Free GPU memory right before the weights were uploaded, when running on the GPU.
     pub gpu_free_before: Option<u64>,
+    /// Running while the weights load, when a snapshot was asked for.
+    pub weights_hash: Option<std::thread::JoinHandle<Result<u64, loader::LoaderError>>>,
 }
 
 pub fn model_name(path: &Path) -> String {
@@ -28,6 +30,17 @@ pub fn model_name(path: &Path) -> String {
         .and_then(Path::file_name)
         .or_else(|| path.file_name())
         .map_or_else(|| "model".to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+struct Request<'a> {
+    path: &'a Path,
+    ctx: Option<usize>,
+    default_ctx: usize,
+    backend: BackendChoice,
+    precision: Precision,
+    style: &'a Style,
+    chrome: bool,
+    hash_weights: bool,
 }
 
 /// Opens the folder, checks the memory it needs, then reads the weights.
@@ -41,6 +54,52 @@ pub fn load(
     style: &Style,
     chrome: bool,
 ) -> Result<Loaded, CliError> {
+    open(Request {
+        path,
+        ctx,
+        default_ctx,
+        backend,
+        precision,
+        style,
+        chrome,
+        hash_weights: false,
+    })
+}
+
+/// Like `load`, and also hashes the weight files on another thread while they load, which a snapshot needs to prove it
+/// belongs to these weights.
+pub fn load_for_snapshot(
+    path: &Path,
+    ctx: Option<usize>,
+    default_ctx: usize,
+    backend: BackendChoice,
+    precision: Precision,
+    style: &Style,
+    chrome: bool,
+) -> Result<Loaded, CliError> {
+    open(Request {
+        path,
+        ctx,
+        default_ctx,
+        backend,
+        precision,
+        style,
+        chrome,
+        hash_weights: true,
+    })
+}
+
+fn open(request: Request<'_>) -> Result<Loaded, CliError> {
+    let Request {
+        path,
+        ctx,
+        default_ctx,
+        backend,
+        precision,
+        style,
+        chrome,
+        hash_weights,
+    } = request;
     if backend == BackendChoice::Cpu {
         if precision.weights.is_some() {
             return Err(CliError::BadOption(
@@ -84,6 +143,7 @@ pub fn load(
             .and_then(|info| u64::try_from(info.free_bytes).ok()),
         Backend::Cpu => None,
     };
+    let weights_hash = hash_weights.then(|| dir.weights.spawn_content_hash());
     let mut progress = Progress::new(*style, chrome);
     let model = Engine::load(&dir, selected.backend, precision.weights, |done, total| {
         progress.update(done, total)
@@ -98,5 +158,6 @@ pub fn load(
         footprint,
         ctx,
         gpu_free_before,
+        weights_hash,
     })
 }

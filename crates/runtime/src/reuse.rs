@@ -23,6 +23,11 @@ impl Retained {
         self.ids.is_empty()
     }
 
+    /// A record for a cache that was filled from outside a run. The caller guarantees the cache holds exactly `ids`.
+    pub fn restored(ids: Vec<u32>) -> Self {
+        Self { ids }
+    }
+
     pub fn forget(&mut self) {
         self.ids.clear();
     }

@@ -10,12 +10,14 @@ pub const PRECISION: &str = "bf16 weights, f32 math";
 /// Sequences the generate loop runs at once.
 pub const BATCH_SIZE: usize = 1;
 
-pub use cuda::{CopyTimes, CudaError, Gpu, GpuInfo, KvFormat, Traffic, Window};
+pub use cuda::{
+    CopyTimes, CudaError, Gpu, GpuInfo, KvFormat, PAGE_TOKENS, Traffic, Window, pages_for,
+};
 pub use error::ModelError;
 pub use metrics::{Probe, Stage, StageTimes, TraceEntry};
 pub use precision::Precision;
 pub use qwen3::{
-    Backend, BackendChoice, Engine, EngineCache, GpuCache, Observer, Qwen3, Qwen3Config, Qwen3Gpu,
-    Selected, kv_startup_bytes, kv_window_bytes, weight_bytes,
+    Backend, BackendChoice, Engine, EngineCache, GpuCache, KvLayout, Observer, Qwen3, Qwen3Config,
+    Qwen3Gpu, Selected, kv_startup_bytes, kv_window_bytes, weight_bytes,
 };
 pub use tensor::{DEFAULT_GROUP, QuantBits, QuantScheme};

@@ -70,6 +70,10 @@ pub struct Options {
     /// Random seed; the same seed repeats the same text
     #[arg(long, global = true)]
     pub seed: Option<u64>,
+    /// Keep the start of the conversation in this file when the session ends, and use it next time if the new
+    /// conversation starts the same way: the shared start is not read again. Only the GPU can do this
+    #[arg(long, global = true, value_name = "FILE")]
+    pub snapshot: Option<PathBuf>,
     /// Never use colors (also honors NO_COLOR)
     #[arg(long, global = true)]
     pub no_color: bool,

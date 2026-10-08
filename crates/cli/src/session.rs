@@ -1,4 +1,5 @@
 use std::io::{IsTerminal, Write};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use model::{Engine, EngineCache};
@@ -11,6 +12,7 @@ use sampler::{Sampler, SamplerConfig};
 use crate::CliError;
 use crate::load::Loaded;
 use crate::signal::Interrupt;
+use crate::snapshot::{self, Identity, Reject, Restored, Saved};
 use crate::style::Style;
 use crate::units;
 
@@ -35,6 +37,14 @@ impl Settings {
     }
 }
 
+/// A snapshot file this session may restore from on its first prompt and save to when asked.
+struct SnapshotState {
+    path: PathBuf,
+    weights_hash: Option<std::thread::JoinHandle<Result<u64, loader::LoaderError>>>,
+    identity: Option<Identity>,
+    tried: bool,
+}
+
 pub struct Session {
     pub loaded: Loaded,
     /// Private so every outside change goes through `engine_and_kv`, which forgets `retained`.
@@ -56,6 +66,9 @@ pub struct Session {
     pub speculate: bool,
     /// Replace control characters in replies, so model output cannot drive the terminal.
     sanitize: bool,
+    snapshot: Option<SnapshotState>,
+    /// What happened when the first prompt tried the snapshot; `None` before that or without a snapshot.
+    pub restored: Option<Result<Restored, Reject>>,
 }
 
 pub struct Reply {
@@ -91,7 +104,69 @@ impl Session {
             style,
             speculate: false,
             sanitize: std::io::stdout().is_terminal(),
+            snapshot: None,
+            restored: None,
         })
+    }
+
+    /// Makes `path` the snapshot: restored from on the first prompt if it starts the same way, saved to by
+    /// `save_snapshot`. The model must have been opened with `load_for_snapshot`.
+    pub fn use_snapshot(&mut self, path: PathBuf) {
+        self.snapshot = Some(SnapshotState {
+            path,
+            weights_hash: self.loaded.weights_hash.take(),
+            identity: None,
+            tried: false,
+        });
+    }
+
+    /// Joins the weight hash the first time it is needed.
+    fn snapshot_identity(&mut self) -> Option<(PathBuf, Identity)> {
+        let state = self.snapshot.as_mut()?;
+        if state.identity.is_none() {
+            let hash = state.weights_hash.take()?.join().ok()?.ok()?;
+            state.identity = snapshot::identity(&self.loaded.model, &self.loaded.dir, hash);
+        }
+        Some((state.path.clone(), state.identity?))
+    }
+
+    /// Waits for the weight hash, normally long finished by the time a prompt arrives. Returns how long that took.
+    pub fn prepare_snapshot(&mut self) -> std::time::Duration {
+        let started = std::time::Instant::now();
+        let _ = self.snapshot_identity();
+        started.elapsed()
+    }
+
+    fn restore_snapshot(&mut self, prompt: &[u32]) {
+        let Some(state) = self.snapshot.as_mut() else {
+            return;
+        };
+        if std::mem::replace(&mut state.tried, true) || !self.reuse {
+            return;
+        }
+        if self.kv.used() != 0 || !self.retained.is_empty() {
+            return;
+        }
+        let Some((path, identity)) = self.snapshot_identity() else {
+            return;
+        };
+        let result = snapshot::restore(&path, &self.loaded.model, &mut self.kv, prompt, &identity);
+        if let Ok(restored) = &result {
+            self.retained = Retained::restored(restored.ids.clone());
+        }
+        self.restored = Some(result);
+    }
+
+    /// Saves what the cache holds if it is exactly what the last reply left, otherwise saves nothing.
+    pub fn save_snapshot(&mut self) -> Result<Option<Saved>, String> {
+        let Some((path, identity)) = self.snapshot_identity() else {
+            return Ok(None);
+        };
+        if self.retained.is_empty() {
+            return Ok(None);
+        }
+        let ids = self.retained.tokens();
+        snapshot::save(&path, &self.loaded.model, &self.kv, ids, identity).map(Some)
     }
 
     pub fn kv(&self) -> &EngineCache {
@@ -141,6 +216,7 @@ impl Session {
         out: &mut impl Write,
     ) -> Result<Reply, CliError> {
         self.last_prompt.clone_from(&prompt);
+        self.restore_snapshot(&prompt);
         let seed = self.settings.seed.unwrap_or_else(time_seed);
         let mut sampler = Sampler::new(self.settings.sampler_config(seed))?;
         let tokenizer = &self.loaded.dir.tokenizer;

@@ -48,6 +48,13 @@ impl Weights {
         Ok(Self { files, owner })
     }
 
+    /// Hashes every weight file on another thread, so it can overlap loading the weights. Join it before trusting
+    /// anything that was computed with these weights.
+    pub fn spawn_content_hash(&self) -> std::thread::JoinHandle<Result<u64, LoaderError>> {
+        let paths: Vec<_> = self.files.iter().map(|f| f.path().to_path_buf()).collect();
+        std::thread::spawn(move || crate::content_hash::hash_files(&paths))
+    }
+
     pub fn info(&self, name: &str) -> Option<&TensorInfo> {
         let file = self.files.get(*self.owner.get(name)?)?;
         file.tensors().get(name)

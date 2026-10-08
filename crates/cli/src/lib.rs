@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod arg_types;
 pub mod args;
 pub mod bench;
 pub mod chat;
@@ -18,9 +19,11 @@ pub mod quality;
 pub mod quality_stats;
 pub mod render;
 pub mod repl;
+pub mod restart;
 pub mod session;
 pub mod show;
 pub mod signal;
+pub mod snapshot;
 pub mod style;
 pub mod telemetry;
 pub mod term;
