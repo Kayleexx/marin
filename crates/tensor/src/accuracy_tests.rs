@@ -1,10 +1,6 @@
 //! Every kernel result against an f64 reference, over shapes with row, column, token and k-block remainders.
 
-use pulp::{Scalar, Simd};
-
 use super::*;
-use crate::gemm::Gemm;
-use crate::gemv::Gemv;
 
 struct Lcg(u64);
 
@@ -46,23 +42,6 @@ fn worst_error(matrix: &Matrix, bits: &[u16], x: &[f32], out: &[f32]) -> f64 {
     worst
 }
 
-fn scalar(matrix: &Matrix, x: &[f32], out: &mut [f32], tokens: usize) {
-    let (even, odd) = split_pairs(x, matrix.cols);
-    let operands = Operands {
-        weights: &matrix.data,
-        even: &even,
-        odd: &odd,
-        out,
-        rows: matrix.rows,
-        pairs: matrix.pairs(),
-    };
-    if tokens == 1 {
-        Scalar::new().vectorize(Gemv(operands));
-    } else {
-        Scalar::new().vectorize(Gemm(operands));
-    }
-}
-
 #[test]
 fn matmul_matches_an_f64_reference_on_every_path() {
     let mut rng = Lcg(7);
@@ -75,7 +54,7 @@ fn matmul_matches_an_f64_reference_on_every_path() {
                 let mut dispatched = vec![f32::NAN; tokens * rows];
                 matrix.matmul(&x, &mut dispatched).unwrap();
                 let mut fallback = vec![f32::NAN; tokens * rows];
-                scalar(&matrix, &x, &mut fallback, tokens);
+                matrix.matmul_scalar(&x, &mut fallback).unwrap();
                 for (name, out) in [("dispatch", &dispatched), ("scalar", &fallback)] {
                     let error = worst_error(&matrix, &bits, &x, out);
                     assert!(
@@ -125,4 +104,12 @@ fn packing_in_several_blocks_keeps_every_row_in_place() {
             .collect();
         assert_eq!(row, expected, "row {r}");
     }
+}
+
+#[test]
+fn even_rows_keep_the_loaders_buffer_and_odd_rows_are_repacked() {
+    let even = Matrix::new(2, 4, vec![0; 8]).unwrap();
+    assert!(matches!(even.data, Storage::Bits(_)));
+    let odd = Matrix::new(2, 3, vec![0; 6]).unwrap();
+    assert!(matches!(odd.data, Storage::Pairs(_)));
 }

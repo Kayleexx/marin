@@ -1,6 +1,6 @@
 use pulp::{Simd, WithSimd};
 
-use crate::kernel::{Operands, halves};
+use crate::kernel::{Operands, halves, split_pairs};
 
 /// One token against every weight row, one row at a time with a low-half and a high-half accumulator. Reading
 /// several rows at once was slower: with 1024 columns the rows sit 2 KiB apart and the streams interfere
@@ -14,14 +14,16 @@ impl WithSimd for Gemv<'_> {
     fn with_simd<S: Simd>(self, simd: S) {
         let Operands {
             weights,
-            even,
-            odd,
+            x,
             out,
+            cols,
             pairs,
             ..
         } = self.0;
-        let (even_head, even_tail) = S::as_simd_f32s(even);
-        let (odd_head, odd_tail) = S::as_simd_f32s(odd);
+        let (mut even, mut odd) = (Vec::new(), Vec::new());
+        split_pairs(x, cols, &mut even, &mut odd);
+        let (even_head, even_tail) = S::as_simd_f32s(&even);
+        let (odd_head, odd_tail) = S::as_simd_f32s(&odd);
         let tail_x = (
             simd.partial_load_f32s(even_tail),
             simd.partial_load_f32s(odd_tail),

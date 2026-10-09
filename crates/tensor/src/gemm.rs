@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use pulp::{Simd, WithSimd};
 
-use crate::kernel::{Operands, halves, step};
+use crate::kernel::{Operands, halves, split_pairs, step};
 
 /// Weight rows and tokens in one register tile: 8 accumulators plus the 4 weight rows and 2 activation pairs
 /// stay in the 16 vector registers (4x3 and 6x2 spill and run at half the speed).
@@ -25,12 +25,11 @@ impl WithSimd for Gemm<'_> {
     fn with_simd<S: Simd>(self, simd: S) {
         let Operands {
             weights,
-            even,
-            odd,
+            x,
             out,
             rows,
+            cols,
             pairs,
-            ..
         } = self.0;
         let lanes = size_of::<S::f32s>()
             .checked_div(size_of::<f32>())
@@ -40,19 +39,17 @@ impl WithSimd for Gemm<'_> {
         let mut weight_panel = vec![simd.splat_u32s(0); kvecs.saturating_mul(MR)];
         let panel_len = kvecs.saturating_mul(2 * NR);
         let mut token_panels = vec![simd.splat_f32s(0.0); panel_len.saturating_mul(TB / NR)];
-        for k0 in (0..pairs).step_by(KC) {
-            let k = k0..pairs.min(k0.saturating_add(KC));
-            let vecs = k.len().div_ceil(lanes);
-            let block_stride = TB.saturating_mul(pairs);
-            let blocks = even
-                .chunks(block_stride)
-                .zip(odd.chunks(block_stride))
-                .zip(out.chunks_mut(TB.saturating_mul(rows)));
-            for ((block_even, block_odd), block_out) in blocks {
+        let (mut even, mut odd) = (Vec::new(), Vec::new());
+        let blocks = x
+            .chunks(TB.saturating_mul(cols))
+            .zip(out.chunks_mut(TB.saturating_mul(rows)));
+        for (block_x, block_out) in blocks {
+            split_pairs(block_x, cols, &mut even, &mut odd);
+            for k0 in (0..pairs).step_by(KC) {
+                let k = k0..pairs.min(k0.saturating_add(KC));
+                let vecs = k.len().div_ceil(lanes);
                 let group_stride = NR.saturating_mul(pairs);
-                let groups = block_even
-                    .chunks(group_stride)
-                    .zip(block_odd.chunks(group_stride));
+                let groups = even.chunks(group_stride).zip(odd.chunks(group_stride));
                 for (group, panel) in groups.zip(token_panels.chunks_exact_mut(panel_len)) {
                     pack_tokens(simd, panel, group, pairs, &k);
                 }

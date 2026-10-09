@@ -83,7 +83,7 @@ Reading the prompt is **prefill** (big passes, limited by arithmetic and, for lo
   marin-run MODEL --speculate -p "..."
   ```
 
-- **CPU kernels.** On the CPU, weights are packed as bf16 pairs and multiplied with run-time-dispatched SIMD (AVX2 + FMA when present): a register-blocked GEMM for prompts and a streaming GEMV for decode. On one thread this is 3.6–4.3x faster at prefill and 1.6–1.7x at decode than the earlier loop, and decode reaches the memory ceiling. Threads and CPU quantization are not built yet. [Details](BENCHMARKS.md#22-cpu-matmul-kernels-stage-1-one-thread)
+- **CPU kernels.** On the CPU, weights are packed as bf16 pairs and multiplied with run-time-dispatched SIMD (AVX2 + FMA when present): a register-blocked GEMM for prompts and a streaming GEMV for decode. On one thread this is 2.7–4.4x faster at prefill and 1.5–1.8x at decode than the earlier loop, and decode reaches the memory ceiling. CPUs without AVX2 keep the earlier loop. Threads and CPU quantization are not built yet. [Details](BENCHMARKS.md#22-cpu-matmul-kernels-stage-1-one-thread)
 
 ## Speed
 
@@ -99,7 +99,7 @@ Qwen3-1.7B on a laptop GPU held to about 40 W (the power limit decides a lot, so
 | f16 KV cache | KV memory halved; 32k context fits (f32: 16k); first token about half at 8k–16k |
 | Restart after 4,000 tokens, `--snapshot` | first token 0.2–0.4 s instead of 6.5–7 s |
 
-On the CPU (Ryzen 7 260, **one thread**, Qwen3-0.6B at a 127-token prompt): prefill 26 → 95 tok/s and decode 11 → 17 tok/s; Qwen3-1.7B: prefill 7.7 → 33 and decode 3.6 → 6.1. llama.cpp on the same machine and thread count reaches 210 / 18.8 (0.6B, AVX-512) and 102 / 19.4 (AVX2-only build).
+On the CPU (Ryzen 7 260, **one thread**, Qwen3-0.6B at a 127-token prompt): prefill 26 → 95 tok/s and decode 11 → 17 tok/s; Qwen3-1.7B: prefill 7.7 → 33 and decode 3.6 → 6.6. llama.cpp on the same machine and thread count reaches 210 / 18.8 (0.6B, AVX-512) and 102 / 19.4 (AVX2-only build).
 
 Methods, tables and commands to repeat each number are in [BENCHMARKS.md](BENCHMARKS.md).
 

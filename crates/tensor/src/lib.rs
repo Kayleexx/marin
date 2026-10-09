@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod dispatch;
 mod error;
 mod gemm;
 mod gemv;

@@ -1,17 +1,25 @@
-use pulp::Arch;
+use pulp::bytemuck;
 
 use crate::TensorError;
+use crate::dispatch::accelerated;
 use crate::gemm::Gemm;
 use crate::gemv::Gemv;
 use crate::kernel::Operands;
 
-/// Row-major weight matrix of bf16 values, `rows` outputs by `cols` inputs. Each row holds `cols.div_ceil(2)`
-/// pairs of bf16 packed in a `u32` (see `kernel`); an odd row ends with a zero.
+/// Row-major weight matrix of bf16 values, `rows` outputs by `cols` inputs. The kernels read two bf16 as one `u32`
+/// (see `kernel`), so a row is `cols.div_ceil(2)` such pairs. The loader's `Vec<u16>` is viewed that way in place
+/// when it can be (even `cols`, little-endian, 4-byte aligned); otherwise it is repacked, an odd row ending in a zero.
 #[derive(Debug)]
 pub struct Matrix {
     rows: usize,
     cols: usize,
-    data: Vec<u32>,
+    data: Storage,
+}
+
+#[derive(Debug)]
+enum Storage {
+    Bits(Vec<u16>),
+    Pairs(Vec<u32>),
 }
 
 const PACK_BLOCK_BYTES: usize = 8 << 20;
@@ -32,12 +40,15 @@ impl Matrix {
                 actual: data.len(),
             });
         }
-        let packed = pack(rows, cols, data)?;
-        Ok(Self {
-            rows,
-            cols,
-            data: packed,
-        })
+        let viewable = cfg!(target_endian = "little")
+            && cols.is_multiple_of(2)
+            && bytemuck::try_cast_slice::<u16, u32>(&data).is_ok();
+        let data = if viewable {
+            Storage::Bits(data)
+        } else {
+            Storage::Pairs(pack(rows, cols, data)?)
+        };
+        Ok(Self { rows, cols, data })
     }
 
     pub fn rows(&self) -> usize {
@@ -52,6 +63,17 @@ impl Matrix {
         self.cols.div_ceil(2)
     }
 
+    fn words(&self) -> Result<&[u32], TensorError> {
+        match &self.data {
+            Storage::Pairs(words) => Ok(words),
+            Storage::Bits(bits) => bytemuck::try_cast_slice(bits).map_err(|_| TensorError::Shape {
+                what: "matrix alignment",
+                expected: size_of::<u32>(),
+                actual: size_of::<u16>(),
+            }),
+        }
+    }
+
     pub fn row_f32(&self, row: usize, out: &mut [f32]) -> Result<(), TensorError> {
         if out.len() != self.cols {
             return Err(TensorError::Shape {
@@ -60,26 +82,21 @@ impl Matrix {
                 actual: out.len(),
             });
         }
-        let source =
-            self.data
-                .chunks_exact(self.pairs().max(1))
-                .nth(row)
-                .ok_or(TensorError::Shape {
-                    what: "row index",
-                    expected: self.rows,
-                    actual: row,
-                })?;
-        let halves = source
-            .iter()
-            .flat_map(|pair| [bf16_to_f32(*pair as u16), bf16_to_f32((*pair >> 16) as u16)]);
-        for (dst, value) in out.iter_mut().zip(halves) {
-            *dst = value;
-        }
+        let source = self
+            .words()?
+            .chunks_exact(self.pairs().max(1))
+            .nth(row)
+            .ok_or(TensorError::Shape {
+                what: "row index",
+                expected: self.rows,
+                actual: row,
+            })?;
+        convert_row(source, out);
         Ok(())
     }
 
-    /// `out[t][r] = dot(self[r], x[t])` for every token row `t` of `x`: a GEMV for one token, a register-blocked
-    /// GEMM for more.
+    /// `out[t][r] = dot(self[r], x[t])` for every token row `t` of `x`: a GEMV for one token and a
+    /// register-blocked GEMM for more on AVX2 with FMA, the plain row-by-row loop elsewhere.
     pub fn matmul(&self, x: &[f32], out: &mut [f32]) -> Result<(), TensorError> {
         let tokens = x.len().checked_div(self.cols).unwrap_or(0);
         check_len("matmul input", tokens.checked_mul(self.cols), x.len())?;
@@ -88,26 +105,60 @@ impl Matrix {
             out.fill(0.0);
             return Ok(());
         }
-        let (even, odd) = split_pairs(x, self.cols);
         let operands = Operands {
-            weights: &self.data,
-            even: &even,
-            odd: &odd,
+            weights: self.words()?,
+            x,
             out,
             rows: self.rows,
+            cols: self.cols,
             pairs: self.pairs(),
         };
-        if tokens == 1 {
-            Arch::new().dispatch(Gemv(operands));
+        let unused = if tokens == 1 {
+            accelerated(Gemv(operands)).map_err(|op| op.0)
         } else {
-            Arch::new().dispatch(Gemm(operands));
+            accelerated(Gemm(operands)).map_err(|op| op.0)
+        };
+        match unused {
+            Ok(()) => Ok(()),
+            Err(operands) => self.matmul_scalar(operands.x, operands.out),
+        }
+    }
+
+    /// Each weight row is converted to f32 once and reused across all tokens.
+    fn matmul_scalar(&self, x: &[f32], out: &mut [f32]) -> Result<(), TensorError> {
+        let mut scratch = vec![0.0_f32; self.cols];
+        for (r, weights) in self.words()?.chunks_exact(self.pairs().max(1)).enumerate() {
+            convert_row(weights, &mut scratch);
+            let inputs = x.chunks_exact(self.cols);
+            let outputs = out.chunks_exact_mut(self.rows);
+            for (input, output) in inputs.zip(outputs) {
+                if let Some(slot) = output.get_mut(r) {
+                    *slot = crate::dot(&scratch, input);
+                }
+            }
         }
         Ok(())
     }
 }
 
-/// Packs from the last rows to the first and gives the consumed source back as it goes, so a large tensor is
-/// never held twice (the embedding alone is 300 to 600 MB).
+/// Unpacks bf16 pairs into `out`, which may be one short for an odd row.
+fn convert_row(pairs: &[u32], out: &mut [f32]) {
+    let last = out.len() / 2;
+    let mut chunks = out.chunks_exact_mut(2);
+    for (dst, pair) in chunks.by_ref().zip(pairs) {
+        if let [low, high] = dst {
+            *low = bf16_to_f32(*pair as u16);
+            *high = bf16_to_f32((*pair >> 16) as u16);
+        }
+    }
+    let rest = chunks.into_remainder();
+    if let (Some(slot), Some(pair)) = (rest.first_mut(), pairs.get(last)) {
+        *slot = bf16_to_f32(*pair as u16);
+    }
+}
+
+/// Repacks from the last rows to the first and gives the consumed source back as it goes, so a large tensor is
+/// not held twice.
 fn pack(rows: usize, cols: usize, mut data: Vec<u16>) -> Result<Vec<u32>, TensorError> {
     let pairs = cols.div_ceil(2);
     let len = rows
@@ -135,19 +186,6 @@ fn pack(rows: usize, cols: usize, mut data: Vec<u16>) -> Result<Vec<u32>, Tensor
         data.shrink_to_fit();
     }
     Ok(packed)
-}
-
-/// The even and odd elements of every `cols`-long token row; an odd row gets a zero for its missing last odd.
-fn split_pairs(x: &[f32], cols: usize) -> (Vec<f32>, Vec<f32>) {
-    let mut even = Vec::with_capacity(x.len().div_ceil(2));
-    let mut odd = Vec::with_capacity(x.len().div_ceil(2));
-    for token in x.chunks_exact(cols) {
-        for pair in token.chunks(2) {
-            even.push(pair.first().copied().unwrap_or(0.0));
-            odd.push(pair.get(1).copied().unwrap_or(0.0));
-        }
-    }
-    (even, odd)
 }
 
 fn check_len(

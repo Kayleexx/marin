@@ -57,7 +57,7 @@ What Marin measures on a laptop, what each optimization changed, and how to repe
 | 19 | Prefill matmul rewrite (reverted) | −12% first token, below the 15% gate |
 | 20 | Decode attention with 16-byte loads | decode +13 / +34 / +65 / +95% (bf16) at 2k / 4k / 8k / 16k tokens |
 | 21 | CPU inference (investigation) | Marin CPU: 1 core, prefill 26 and decode 11 tok/s vs llama.cpp 1,061 and 19.8 (8 threads) |
-| 22 | CPU matmul kernels, stage 1 (one thread) | prefill 3.6x, decode 1.6x on the 0.6B; 1.7B prefill 4.3x, decode 1.7x; `verify` unchanged |
+| 22 | CPU matmul kernels, stage 1 (one thread) | prefill 3.5x at 127 tokens (0.6B), 4.4x / 3.9x (1.7B at 127 / 511), 2.8x / 2.7x at 511 / 1,023 tokens (0.6B; scalar attention is now half the pass); decode 1.5–1.8x at the memory ceiling; `verify` unchanged; peak RAM unchanged; scalar fallback at parity |
 
 Rows 7 and 9 did not simply get faster; the cause is the power cap, explained next.
 
@@ -420,47 +420,62 @@ Findings: one thread of llama.cpp prefills 8–10x faster than Marin (4x with on
 
 ### 22. CPU matmul kernels, stage 1 (one thread)
 
-*Scope.* Only `tensor::Matrix::matmul`, on one thread. No threads, no quantization, no change to attention or the elementwise ops. Gates were written before the code.
+*Scope.* Only `tensor::Matrix::matmul`, on one thread: no threads, no quantization, no change to attention or the elementwise ops. Gates were written before the code. The first version missed three (scalar fallback, peak RAM, long-prompt prefill); a second pass closed two and explained the third.
 
-**SIMD strategy (investigated first).** `std::simd` is nightly-only; plain loops compiled for the baseline get SSE2 only. Candidates on crates.io: `pulp` 0.22.3 (the dispatch layer under `faer` and `gemm`, about 13 small dependencies, run-time detection), `gemm` (finished GEMM, but no bf16 input), `archmage`, `fearless_simd` and `wide` (MSRV 1.89 or compile-time selection), `multiversion`. **Chosen: `pulp`**, because it selects AVX2+FMA (or AVX-512, or a scalar path) at run time and our crates keep `#![forbid(unsafe_code)]` (the `unsafe` lives in the dependency). The alternatives (a launcher with per-level builds, `unsafe` in a second crate) stay open.
+**SIMD choice.** `std::simd` is nightly-only and baseline builds get SSE2 only, so run-time dispatch needs a library. Considered: `pulp` (the layer under `faer` and `gemm`, about 13 small crates), `gemm` (no bf16 input), `archmage`, `fearless_simd`, `wide`, `multiversion`. **Chosen: `pulp`**: it picks AVX2+FMA at run time and our crates stay `#![forbid(unsafe_code)]` (the `unsafe` is inside the dependency). It has no SSE level, so other CPUs use the fallback below.
 
-**Design.**
-- **bf16 without conversion instructions:** two bf16 values live in one `u32` (element `2i` low, `2i+1` high). The high half read as f32 is `v & 0xFFFF0000`, the low half is `v << 16`. Activations are split into even and odd elements, so a dot is `low·even + high·odd`.
-- **Prefill (2+ tokens):** a register-blocked GEMM, 4 weight rows × 2 tokens per tile (4×3 and 6×2 spill registers and run at half the speed), weights and activations packed into panels (256 pairs along the shared dimension, 64 tokens per block).
-- **Decode (1 token):** a GEMV, one weight row at a time with a low-half and a high-half accumulator. Four rows at a time was slower: with 1,024 columns the rows sit 2 KiB apart and the streams interfere (16–19 GB/s against 24–28 GB/s for one row, cold, on a 311 MB matrix).
-- **Load:** `Matrix::new` packs from the last rows to the first and shrinks the 16-bit source as it goes, so a large tensor is never held twice. New files in `crates/tensor`: `kernel.rs`, `gemm.rs`, `gemv.rs`, `accuracy_tests.rs`.
+**Design** (files in `crates/tensor`: `kernel.rs`, `gemm.rs`, `gemv.rs`, `dispatch.rs`, `accuracy_tests.rs`):
+- **No bf16 conversion:** two bf16 are read as one `u32` (`v << 16` is the low one as f32, `v & 0xFFFF0000` the high one). Activations are split into even and odd elements, so a dot is `low·even + high·odd`.
+- **Storage:** the loader's `Vec<u16>` is viewed as `u32` pairs in place (`bytemuck`, via `pulp`; needs an even width, little-endian, 4-byte alignment). Otherwise it is repacked block by block, shrinking the source as it goes.
+- **Prefill (2+ tokens):** register-blocked GEMM, 4 weight rows × 2 tokens per tile (4×3 and 6×2 spill registers and run at half speed), weights and activations packed into panels (256 pairs, 64 tokens per block).
+- **Decode (1 token):** GEMV, one weight row at a time with two accumulators. Four rows at a time was slower: with 1,024 columns the rows sit 2 KiB apart and the streams interfere (16–19 GB/s against 24–28).
+- **Fallback:** CPUs without AVX2+FMA run the original loop (convert a row to f32 once, one dot per token). `MARIN_MATMUL_SCALAR=1` forces it on any machine; that switch is how it was tested, since no older CPU was available.
 
-**Results** (one thread, same machine and method as section 21; old = section 21 figures, spot-checked today: 26.1 and 11.1 tok/s for the 0.6B at 127 tokens):
+**Results** (one thread; old = section 21 and a same-day run of the old build; a browser was running):
 
 | Model | Prompt | First token | Prefill | Decode | Weight reads | Peak RAM |
 |---|---|---|---|---|---|---|
-| 0.6B | 127 | 4.8 → 1.34 s | 26.4 → 94.6 tok/s (**3.6x**) | 11.0 → 17.2 (**1.56x**) | 13.2 → 20.5 GB/s | 1.30 → 1.38 GB |
-| 0.6B | 511 | 21.4 → 7.0 s | 23.8 → 72.7 (**3.05x**) | 9.5 → 15.7 (**1.66x**) | 11.3 → 18.8 | 1.41 → 1.53 |
-| 0.6B | 1,023 | 49.2 → 20.1 s | 20.8 → 50.8 (2.44x) | 8.5 → 13.2 (**1.56x**) | 10.1 → 15.8 | 1.57 → 1.70 |
-| 1.7B | 127 | 16.5 → 3.85 s | 7.7 → 33.0 (**4.3x**) | 3.6 → 6.09 (**1.69x**) | 12.4 → 20.9 | 3.55 → 3.65 |
-| 1.7B | 511 | 67.4 → 16.9 s | 7.6 → 30.2 (**4.0x**) | 3.5 → 5.98 (**1.71x**) | 12.2 → 20.6 | 3.69 → 3.76 |
+| 0.6B | 127 | 4.8 → 1.35 s | 26.4 → 94.4 tok/s (**3.5x**) | 11.0 → 17.5 (**1.54x**) | 13.2 → 20.9 GB/s | 1.30 → 1.30 GB |
+| 0.6B | 511 | 21.4 → 7.4 s | 23.8 → 69.4 (2.8x) | 9.5 → 15.5 (**1.6x**) | 11.3 → 18.5 | 1.41 → 1.42 |
+| 0.6B | 1,023 | 49.2 → 18.4 s | 20.8 → 55.7 (2.7x) | 8.5 → 13.3 (**1.6x**) | 10.1 → 15.9 | 1.57 → 1.58 |
+| 1.7B | 127 | 16.5 → 3.8 s | 7.7 → 33.6 (**4.4x**) | 3.6 → 6.6 (**1.8x**) | 12.4 → 22.8 | 3.55 → 3.55 |
+| 1.7B | 511 | 67.4 → 17.3 s | 7.6 → 29.6 (**3.9x**) | 3.5 → 6.2 (**1.8x**) | 12.2 → 21.5 | 3.69 → 3.69 |
 
-Against llama.cpp on one thread: decode is at 89–91% of its BF16 figure; prefill is at 93–97% of its AVX2-only build and 43–45% of its AVX-512 build. Matrix stages of a prompt pass run at 90–100 GFLOP/s (they ran at 20); decode reads weights at 21–23 GB/s, at the memory ceiling.
+Against llama.cpp on one thread: decode is at 90–93% of its BF16 figure (17.5 vs 18.8; 6.6 vs 6.8); prefill is at 93–99% of its AVX2-only build (94.4 vs 102; 33.6 vs 33.9) and about 45% of its AVX-512 build.
 
-**Correctness.** `marin-run verify` on Qwen3-1.7B-Base (CPU, against Hugging Face) passes with the unchanged tolerance: max logit diff 3.24e-5 / 3.43e-5 / 3.05e-5 (before: 3.05e-5 / 4.20e-5 / 3.05e-5), token choices match. Kernel accuracy is below 1e-5 relative to an f64 reference over 528 shapes (1–13 rows, 1–1,001 columns including odd, 1–129 tokens) on the dispatched and the scalar path. The full suite passes (65 programs, 560 tests).
+**Correctness.** `marin-run verify` on Qwen3-1.7B-Base (CPU, against Hugging Face) passes at the unchanged tolerance on both paths: max logit diff 3.24e-5 / 3.43e-5 / 3.05e-5 (SIMD) and 3.05e-5 / 4.20e-5 / 3.05e-5 (scalar, identical to before). For the 0.6B-Base, which has no saved reference, greedy output (3 prompts, 48 tokens) is byte-identical between the old build, the SIMD path and the scalar path. Kernel error is below 1e-5 relative to an f64 reference over 528 shapes (odd widths, remainders, 1–129 tokens) on both paths. Full suite: 65 programs, 561 tests.
 
-**Gates.**
+**Gates**
 
 | Gate | Result |
 |---|---|
-| Correctness | met |
-| Prefill ≥3x | met at 127 and 511 tokens (0.6B) and for the 1.7B; **missed at 1,023 tokens (2.44x)**: scalar attention now takes a growing share |
-| Decode ≥1.4x | met everywhere (1.56–1.71x) |
-| Scalar fallback at most 5% slower | **missed:** forced to the scalar path (a CPU without AVX2+FMA), a 6144×2048 matrix takes 3.0x as long for one token and 1.24x for 128 tokens versus the old code, which the compiler vectorizes for SSE2 |
-| Peak RAM at most +50 MB | **missed:** +80 / +120 / +130 MB (0.6B) and +100 / +70 MB (1.7B). No second copy of the weights is kept; the extra is memory glibc keeps after freeing each tensor's 16-bit source (with `MALLOC_MMAP_THRESHOLD_=1048576` the 0.6B peaks at 1.28 GB) plus activation copies |
+| Correctness, tolerance unchanged | met |
+| Decode ≥1.4x | met (1.5–1.8x) |
+| Prefill ≥3x | met for the 1.7B and the 0.6B at 127 tokens; **missed for the 0.6B at 511 (2.8x) and 1,023 tokens (2.7x)** |
+| Scalar fallback at most 5% slower | met: 0.6B prefill 26.9 vs 26.7 tok/s, decode 11.35 vs 11.36; 1.7B decode 3.95–3.98 vs 3.91–4.01 (interleaved) |
+| Peak RAM at most +50 MB | met: +0 to +10 MB everywhere |
 
-**What failed on the way.** The four-row GEMV (1.16x decode, 15 GB/s); 4×3 and 6×2 tiles (50 GFLOP/s against 91–101); a first packing that held both copies of a tensor (+120 MB); `pulp`'s array-backed `Scalar128b`/`Scalar256b` as a fallback (13–23x slower than the old code).
+**Peak RAM: live against retained.** Live memory is the weights plus KV cache and pass buffers. The first version's excess (+70 to +130 MB) was retained, not live: it packed into a new buffer and freed the 16-bit source, and glibc kept the freed heap chunks (+80 MB at load for the 0.6B), then a whole-prompt activation copy added up to 50 MB more. Raising the allocator's trim or mmap thresholds brought the peak back to 1.28 GB, which located the cause. The fix removes the allocation rather than tuning the allocator: weights are used in place and activations are split per 64-token block (about 0.5 MB, reused). The allocator settings now change nothing.
 
-**Limits and next bottleneck.**
-- The fallback miss matters for the target: CPUs without AVX2 (older Celeron and Pentium parts) get slower decode and prefill than before. `pulp` has no SSE level. Options: keep the old loop as the fallback (a second implementation) or write an SSE2 path; neither is built.
-- Only this machine (the AVX2 path) was measured; `pulp`'s AVX-512 path (a feature) was not tried.
-- Single-thread decode is at the memory ceiling; more needs threads (stage 2) or smaller weights (stage 3).
-- Profile of the 0.6B at 127 tokens (prefill 1.32 s): MLP 52%, QKV and output projections 34% (about 60% of the AVX2 peak), scalar attention 7.5%, RoPE 3.9%. At 1,023 tokens attention is the largest non-matmul share.
+**Long-prompt prefill: attention.** Profile of the 0.6B at 1,023 tokens:
+
+| Stage | Old | New |
+|---|---|---|
+| matrix stages (MLP, q/k/v, output) | 36.1 s | 8.8 s (4.1x) |
+| attention | 8.85 s (19%) | 8.78 s (**48%**) |
+| rest | 0.6 s | 0.6 s |
+| pass total | 45.6 s | 18.2 s |
+
+Attention did not change and is now half the pass. It runs at about 14 GFLOP/s (120 GFLOP over 28 layers) against 90–100 for the matrix stages. The 3x gate needs about 16.4 s, so attention must get about 22% faster; at matrix-stage speed (an estimate, not built) the first token would be near 12 s. At 127 tokens attention is 7.5% of the pass, so the gate holds there. The scalar attention loop (`crates/model/src/qwen3/attention.rs`) was left alone on purpose.
+
+**Failures on the way.** Four-row GEMV (1.16x decode); 4×3 and 6×2 tiles (50 vs 91–101 GFLOP/s); packing that held both copies of a tensor; `pulp`'s array-backed `Scalar128b`/`Scalar256b` as a fallback (13–23x slower than the old code); a fallback unpacking loop that did not vectorize (4x slower decode).
+
+**Trade-offs and recommendation.**
+- The fallback was tested only through the forced switch on an AVX2 machine; those CPUs keep the old speed, not the new one, and there is no SSE2 kernel.
+- `pulp` (and `bytemuck` with it) is a new dependency; the AVX-512 path was not tried.
+- The in-place view relies on a 4-byte-aligned loader buffer (checked at run time, with the repack fallback).
+- Single-thread decode is at the memory ceiling (21–23 GB/s); more needs threads (stage 2) or smaller weights (stage 3).
+- **Recommendation: close stage 1.** The one miss, 0.6B prefill at 511 and 1,023 tokens, comes from unchanged scalar attention, not from the matmul work. Vectorizing attention is the natural first item of the next CPU step, since it also limits what threads can give at long prompts.
 
 ## Tried and not adopted
 

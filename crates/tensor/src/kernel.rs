@@ -6,11 +6,23 @@ use pulp::Simd;
 
 pub(crate) struct Operands<'a> {
     pub weights: &'a [u32],
-    pub even: &'a [f32],
-    pub odd: &'a [f32],
+    pub x: &'a [f32],
     pub out: &'a mut [f32],
     pub rows: usize,
+    pub cols: usize,
     pub pairs: usize,
+}
+
+/// The even and odd elements of every `cols`-long token row; an odd row gets a zero for its missing last odd.
+pub(crate) fn split_pairs(x: &[f32], cols: usize, even: &mut Vec<f32>, odd: &mut Vec<f32>) {
+    even.clear();
+    odd.clear();
+    for token in x.chunks_exact(cols.max(1)) {
+        for pair in token.chunks(2) {
+            even.push(pair.first().copied().unwrap_or(0.0));
+            odd.push(pair.get(1).copied().unwrap_or(0.0));
+        }
+    }
 }
 
 /// The low and high bf16 of each pair, as f32.
