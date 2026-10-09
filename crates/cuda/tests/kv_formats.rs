@@ -180,3 +180,123 @@ fn a_cache_in_one_format_is_independent_of_another() -> Result<()> {
     }
     Ok(())
 }
+
+// The tensor-core attention for prompt passes over an f16 cache rounds the queries and the softmax weights to f16, so
+// it is held to a wider gate than the scalar kernels, which stay the reference for the f32 cache.
+const LAYOUT: (usize, usize, usize) = (16, 8, 128);
+const LARGEST: f32 = 2e-3;
+const MEAN: f32 = 2e-4;
+
+/// Largest and mean absolute error over every layer for `tokens` new tokens on top of what `mirror` holds.
+fn stats(gpu: &cuda::Gpu, mirror: &mut Mirror, tokens: usize, tensor: bool) -> Result<(f32, f32)> {
+    gpu.set_fast_attention(tensor);
+    let errors: Vec<f32> = mirror
+        .outputs(gpu, tokens)?
+        .iter()
+        .flat_map(|(got, expected)| got.iter().zip(expected).map(|(a, e)| (a - e).abs()))
+        .collect();
+    let largest = errors.iter().copied().fold(0.0_f32, f32::max);
+    let total: f64 = errors.iter().map(|e| f64::from(*e)).sum();
+    Ok((largest, (total / errors.len() as f64) as f32))
+}
+
+/// The same after `cached` positions.
+fn errors(cached: usize, tokens: usize, tensor: bool) -> Result<Option<(f32, f32)>> {
+    let Some(gpu) = gpu()? else { return Ok(None) };
+    let mut mirror = Mirror::new(&gpu, LAYOUT, 4200, KvFormat::F16)?;
+    if cached > 0 {
+        mirror.append(&gpu, cached)?;
+    }
+    Ok(Some(stats(&gpu, &mut mirror, tokens, tensor)?))
+}
+
+#[test]
+fn the_tensor_core_kernel_stays_within_its_error_gate_at_every_boundary() -> Result<()> {
+    // The reference runs on the CPU, so the long cases are few: the full gate (up to 2049 new positions) was run once.
+    let short = [9, 63, 64, 65, 127, 128, 129];
+    let long = [511, 512, 513];
+    let cases = (short.iter().flat_map(|t| [0, 1, 64, 100].map(|c| (c, *t))))
+        .chain(long.iter().flat_map(|t| [0, 100].map(|c| (c, *t))));
+    let (mut worst, mut worst_mean) = (0.0_f32, 0.0_f32);
+    for (cached, tokens) in cases {
+        let Some((largest, mean)) = errors(cached, tokens, true)? else {
+            return Ok(());
+        };
+        assert!(
+            largest <= LARGEST && mean <= MEAN,
+            "{cached} cached, {tokens} new: largest {largest:e}, mean {mean:e}"
+        );
+        worst = worst.max(largest);
+        worst_mean = worst_mean.max(mean);
+    }
+    eprintln!(
+        "tensor-core attention: worst largest error {worst:e}, worst mean error {worst_mean:e}"
+    );
+    Ok(())
+}
+
+#[test]
+fn the_scalar_kernel_still_gives_its_exact_results_when_the_tensor_path_is_off() -> Result<()> {
+    for (cached, tokens) in [(0, 65), (100, 129), (64, 511)] {
+        let Some((largest, mean)) = errors(cached, tokens, false)? else {
+            return Ok(());
+        };
+        assert!(largest <= 2e-5 && mean <= 2e-6, "{largest:e} {mean:e}");
+    }
+    Ok(())
+}
+
+#[test]
+fn the_tensor_core_kernel_follows_a_page_table_that_was_rolled_back_and_regrown() -> Result<()> {
+    let Some(gpu) = gpu()? else { return Ok(()) };
+    let mut mirror = Mirror::new(&gpu, LAYOUT, 4200, KvFormat::F16)?;
+    mirror.append(&gpu, 300)?;
+    mirror.truncate(70)?;
+    mirror.append(&gpu, 150)?;
+    let (largest, mean) = stats(&gpu, &mut mirror, 90, true)?;
+    assert!(largest <= LARGEST && mean <= MEAN, "{largest:e} {mean:e}");
+    Ok(())
+}
+
+// One new token over an f16 cache reads 16 bytes per lane and sums in a different order from the scalar kernel, so it is
+// held to its own gate against the same f64 reference.
+const DECODE_LARGEST: f32 = 1e-5;
+const DECODE_MEAN: f32 = 1e-6;
+
+#[test]
+fn the_wide_decode_kernel_stays_within_its_error_gate_at_every_boundary() -> Result<()> {
+    let cached = [
+        0, 1, 30, 31, 32, 62, 63, 64, 126, 127, 128, 254, 255, 256, 999, 2048, 4096,
+    ];
+    let (mut worst, mut worst_mean) = (0.0_f32, 0.0_f32);
+    for cached in cached {
+        let Some((largest, mean)) = errors(cached, 1, true)? else {
+            return Ok(());
+        };
+        assert!(
+            largest <= DECODE_LARGEST && mean <= DECODE_MEAN,
+            "{cached} cached: largest {largest:e}, mean {mean:e}"
+        );
+        worst = worst.max(largest);
+        worst_mean = worst_mean.max(mean);
+    }
+    eprintln!(
+        "wide decode attention: worst largest error {worst:e}, worst mean error {worst_mean:e}"
+    );
+    Ok(())
+}
+
+#[test]
+fn the_wide_decode_kernel_follows_a_page_table_that_was_rolled_back_and_regrown() -> Result<()> {
+    let Some(gpu) = gpu()? else { return Ok(()) };
+    let mut mirror = Mirror::new(&gpu, LAYOUT, 4200, KvFormat::F16)?;
+    mirror.append(&gpu, 300)?;
+    mirror.truncate(70)?;
+    mirror.append(&gpu, 150)?;
+    let (largest, mean) = stats(&gpu, &mut mirror, 1, true)?;
+    assert!(
+        largest <= DECODE_LARGEST && mean <= DECODE_MEAN,
+        "{largest:e} {mean:e}"
+    );
+    Ok(())
+}

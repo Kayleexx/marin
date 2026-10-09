@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use model::{BackendChoice, Precision};
+use model::BackendChoice;
 
 use super::app::{App, PanelCache, Parked};
 use super::raw::RawMode;
@@ -33,14 +33,13 @@ impl App {
         backend: BackendChoice,
         parked: &Parked,
     ) -> Result<Session, CliError> {
-        let loaded = load::load(
+        let loaded = load::load_chat(
             path,
-            Some(parked.ctx),
-            parked.ctx,
+            (Some(parked.ctx), parked.ctx),
             backend,
-            Precision::default(),
+            self.precision,
             &self.style,
-            true,
+            (true, false),
         )?;
         Session::new(loaded, parked.settings, self.style)
     }

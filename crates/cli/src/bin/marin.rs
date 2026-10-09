@@ -8,10 +8,12 @@ use clap::Parser;
 use model::BackendChoice;
 use runtime::StopReason;
 
+use cli::arg_types::KvTypeArg;
 use cli::args::BackendArg;
 use cli::chat::Chat;
 use cli::config::{self, Choice, Config, Home};
 use cli::error::CliError;
+use cli::load::ChatPrecision;
 use cli::marin_args::{MarinCli, MarinCommand, Options};
 use cli::render::{MarkdownStream, MarkdownWriter, Theme};
 use cli::session::{Session, Settings};
@@ -167,6 +169,13 @@ fn remember(home: Option<&Home>, path: &Path) {
     }
 }
 
+fn chat_precision(options: &Options) -> Result<ChatPrecision, CliError> {
+    Ok(ChatPrecision {
+        weights: options.quantize.scheme(options.quant_group)?,
+        kv: options.kv_type.map(KvTypeArg::format),
+    })
+}
+
 fn open(
     options: &Options,
     home: Option<&Home>,
@@ -176,19 +185,13 @@ fn open(
     let settings = settings(options)?;
     let path = absolute(&choose_model(options, home, interactive, style)?);
     let backend = backend_choice(options.backend);
-    let open = if options.snapshot.is_some() {
-        load::load_for_snapshot
-    } else {
-        load::load
-    };
-    let loaded = open(
+    let loaded = load::load_chat(
         &path,
-        options.ctx,
-        CHAT_CTX,
+        (options.ctx, CHAT_CTX),
         backend,
-        model::Precision::default(),
+        chat_precision(options)?,
         &style,
-        stderr_is_terminal(),
+        (stderr_is_terminal(), options.snapshot.is_some()),
     )?;
     remember(home, &path);
     let mut session = Session::new(loaded, settings, style)?;
@@ -263,6 +266,7 @@ fn session(options: &Options, home: Option<Home>, style: Style) -> Result<ExitCo
             interrupt,
             home,
             backend: backend_choice(options.backend),
+            precision: chat_precision(options)?,
             style,
             caps,
             splash: Some(splash),

@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod gemm;
+mod gemv;
+mod kernel;
 mod matrix;
 mod ops;
 mod quant;

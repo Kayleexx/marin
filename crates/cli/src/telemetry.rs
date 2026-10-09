@@ -102,7 +102,14 @@ pub fn resource_lines(s: &Session) -> Vec<String> {
         None => format!("{} reserved", units::bytes(fp.kv_window)),
     };
     let mut lines = vec![
-        format!("weights         {}", units::bytes(fp.weights)),
+        format!(
+            "weights         {} · {}",
+            units::bytes(fp.weights),
+            s.loaded
+                .precision
+                .weights
+                .map_or_else(|| "bf16 weights".to_string(), |q| q.label())
+        ),
         format!(
             "kv cache        {held} · {} in use ({} of {} positions)",
             units::bytes(used),

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
+use crate::arg_types::{ChatQuantArg, KvTypeArg};
 use crate::args::BackendArg;
 
 const EXAMPLES: &str = "\
@@ -74,6 +75,18 @@ pub struct Options {
     /// conversation starts the same way: the shared start is not read again. Only the GPU can do this
     #[arg(long, global = true, value_name = "FILE")]
     pub snapshot: Option<PathBuf>,
+    /// How the KV cache stores keys and values: f16 (the default on the GPU) takes half the memory and fits twice the
+    /// context, and rounding can change a reply slightly; f32 is exact (the only choice on the CPU)
+    #[arg(long, value_enum, global = true)]
+    pub kv_type: Option<KvTypeArg>,
+    /// Keep the layer weights as 8-bit numbers on the GPU: much less memory to read per token, so replies come faster,
+    /// at a small cost in accuracy (the GPU only)
+    #[arg(long, value_enum, default_value_t = ChatQuantArg::None, global = true)]
+    pub quantize: ChatQuantArg,
+    /// Weights that share one scale when quantizing, a multiple of 32: smaller is more accurate and takes more memory
+    /// [default: 128]
+    #[arg(long, global = true)]
+    pub quant_group: Option<usize>,
     /// Never use colors (also honors NO_COLOR)
     #[arg(long, global = true)]
     pub no_color: bool,

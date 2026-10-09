@@ -1,22 +1,21 @@
 # Marin
+
 <img width="532" height="331" alt="image" src="https://github.com/user-attachments/assets/ad91e0dd-1ff3-424b-8d2b-91652ac77165" />
 
 Marin is a small language-model engine written from scratch in Rust, built to run well on ordinary laptops and desktops. No Python, no outside inference library. The goal is to understand every step of running a model, measure it, and make it faster on weak hardware. A chat assistant on top gives the engine real work to be judged by.
 
 - **Models:** Qwen3 (1.7B is the reference), on the CPU or on an NVIDIA GPU with CUDA kernels written for this project.
 - **Checked against Hugging Face**, token for token.
-- **Faster where it matters:** tensor-core prefill, tuned attention, int8 / int4 weights, a chat cache that survives between turns, a KV cache that grows with the conversation (optionally stored in half the bytes), and opt-in guessing ahead.
-- **Measured:** every optimization has before/after numbers, and tools to repeat them, in [BENCHMARKS.md](BENCHMARKS.md).
+- **Fast where it matters:** tensor-core prefill, tuned attention, int8 / int4 weights, a chat cache that survives between turns, a KV cache that grows with the conversation (stored as f16 on the GPU), prefix snapshots across restarts, opt-in guessing ahead, and SIMD matmul kernels on the CPU.
+- **Measured:** every optimization has before/after numbers, and the commands to repeat them, in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Quick start
 
-You need Rust (the right version is picked from `rust-toolchain.toml`) and a model folder from Hugging Face (`config.json`, `tokenizer.json`, `model.safetensors`). The GPU path needs an NVIDIA GPU and CUDA.
+You need Rust (the version is pinned in `rust-toolchain.toml`) and a model folder from Hugging Face (`config.json`, `tokenizer.json`, `model.safetensors`). The GPU path also needs an NVIDIA GPU and CUDA.
 
 ```bash
 cargo install --path crates/cli --locked
 ```
-
-This installs two programs:
 
 | Program | For |
 |---|---|
@@ -29,7 +28,17 @@ marin run "explain a mutex in one line"  # one answer, then exit
 marin-run MODEL -p "The capital of France is"
 ```
 
-Marin uses the GPU when CUDA works and the model fits, and the CPU otherwise. `--backend cpu` or `--backend cuda` forces a choice. Add `--quantize int8` (or `int4`) for smaller weights: int8 costs almost no quality, int4 is clearly less accurate.
+Marin uses the GPU when CUDA works and the model fits, and the CPU otherwise; `--backend cpu` or `--backend cuda` forces a choice.
+
+### Options worth knowing
+
+| Option | What it does |
+|---|---|
+| `--quantize int8` | smaller weights (`marin-run` also takes `int4`). On the GPU: decode 33–63% faster, about 1.7 GB less memory, same first-token time. It rounds the weights, so wording often differs from bf16; bf16 stays the default. [Details](BENCHMARKS.md#16-int8-weights-in-chat) |
+| `--kv-type f32\|f16` | KV cache precision. `marin` uses f16 on the GPU (half the memory, twice the context, about half the first-token time at 8k–16k) and f32 on the CPU. `marin-run` and `verify` stay on f32. [Details](BENCHMARKS.md#12-kv-cache-precision-f16) |
+| `--snapshot FILE` | save the conversation's cache when the session ends and reuse the shared start next time. GPU only; nothing is saved unless you ask. [Details](BENCHMARKS.md#13-prefix-snapshot) |
+| `--ctx N` | the longest conversation allowed (not a reservation, see below) |
+| `--speculate` (`marin-run`) | guess ahead by copying repeated text. [Details](BENCHMARKS.md#5-guessing-ahead-opt-in-gpu-only) |
 
 ### `marin-run` subcommands
 
@@ -37,13 +46,13 @@ Marin uses the GPU when CUDA works and the model fits, and the CPU otherwise. `-
 |---|---|
 | `inspect MODEL` | How big is this model and how much memory will it need? |
 | `verify MODEL --reference FILE` | Does the output match Hugging Face? |
-| `bench MODEL [--profile] [--sample-gpu]` | How fast is it, and where does the time go (GPU load, power, clock)? |
+| `bench MODEL [--profile] [--sample-gpu]` | How fast is it, and where does the time go? |
 | `trace MODEL` | How long does each stage of each layer take? |
 | `compare before.json after.json` | Did the change help, or is it noise? |
 | `probe` | What can this GPU do on its own (memory and math speed)? |
-| `quality MODEL --text FILE` | How much accuracy does quantization cost? |
-| `turns MODEL` | How much sooner is the first token of a chat turn when the cache is kept? |
-| `restart MODEL --mode save\|restore\|cold` | How much sooner is the first token after a restart when a saved snapshot is restored? |
+| `quality MODEL --text FILE` | How much accuracy does quantization or a KV format cost? |
+| `turns MODEL` | How much sooner is a chat turn's first token when the cache is kept? |
+| `restart MODEL --mode save\|restore\|cold` | How much sooner is the first token after a restart with a snapshot? |
 | `spec-bench`, `guess`, `guess-report`, `pass-cost` | Guessing-ahead experiments |
 
 ## How it works
@@ -51,60 +60,46 @@ Marin uses the GPU when CUDA works and the model fits, and the CPU otherwise. `-
 A model turns text into token numbers, runs them through a stack of identical layers, and picks the next token. Marin does each step itself.
 
 1. **Tokenizer** splits text into tokens.
-2. **Layers** normalize, run attention, then an MLP. Attention looks back at earlier tokens. Their keys and values live in the **KV cache**, so past work is never repeated.
+2. **Layers** normalize, run attention, then an MLP. Attention looks back at earlier tokens, whose keys and values live in the **KV cache** so past work is never repeated.
 3. **Sampler** picks the next token from the model's scores.
 
 Reading the prompt is **prefill** (big passes, limited by arithmetic and, for long prompts, attention). Writing the answer is **decode**, one token per pass, limited by how fast weights can be read from memory, which is why smaller weights decode faster.
 
-### The chat cache survives between turns
+### Features
 
-Each chat turn sends the whole conversation. Marin remembers which token ids its KV cache holds. On the next turn it finds the longest exactly shared start, cuts the cache back to it, and reads only what is new.
+- **Chat cache kept between turns.** Marin remembers which token ids its KV cache holds, finds the longest exactly shared start on the next turn, cuts the cache back to it, and reads only what is new. The record is written only after a reply ends cleanly and cleared on any error. After 4,000 tokens of history the first token arrives in about 0.25 s instead of 9 s, with identical replies. [Details](BENCHMARKS.md#10-keeping-the-cache-between-chat-turns)
 
-```text
-cached : A B C D E F
-turn 2 : A B C D E F G H I   -> keep 6, read G H I
-edited : A B C X Y           -> keep 3, read X Y
-```
+  ```text
+  cached : A B C D E F
+  turn 2 : A B C D E F G H I   -> keep 6, read G H I
+  edited : A B C X Y           -> keep 3, read X Y
+  ```
 
-The record is written only after a reply ends cleanly and is cleared on any error, so a half-written cache is never trusted. After 4,000 tokens of history the first token arrives in about 0.25 s instead of 9 s, with identical replies. Details in [BENCHMARKS.md](BENCHMARKS.md#10-keeping-the-cache-between-chat-turns).
+- **KV cache that grows (GPU).** The cache is kept in pages of 64 positions (14 MiB for Qwen3-1.7B), allocated eight at a time as the conversation needs them. A short chat with `--ctx 8192` holds about 117 MB of KV instead of 1.88 GB, at a cost of 0–4% speed at long contexts. A conversation that fills the GPU stops with a clear out-of-memory error. [Details](BENCHMARKS.md#11-paged-kv-cache)
+- **Snapshots across restarts (GPU, opt-in).** After 4,000 tokens the first token arrives in 0.2–0.4 s instead of 6.5–7 s. The file is checked against the exact model, tokenizer, KV type and weight format; anything wrong with it means the prompt is simply read in full. [Details](BENCHMARKS.md#13-prefix-snapshot)
+- **Guessing ahead (GPU, opt-in).** When a reply repeats text it was just shown, Marin guesses up to 7 tokens by copying, checks them in one pass, and rolls back wrong guesses, so the output equals normal decoding. Code edits run 1.5–2.5x faster; chat and fresh code are unchanged.
 
-### The KV cache grows with the conversation (GPU)
+  ```bash
+  marin-run MODEL --speculate -p "..."
+  ```
 
-- The cache is kept in pages of 64 positions (14 MiB for Qwen3-1.7B), allocated eight at a time as the conversation needs them, not reserved for the whole `--ctx` window up front.
-- A short chat with `--ctx 8192` holds about 117 MB of KV instead of 1.88 GB.
-- `--ctx` is only the longest conversation allowed. Starting needs the model plus one slab; if the whole window would not fit the GPU, a note says so, and a conversation that fills the GPU stops with a clear out-of-memory error.
-- The cost is 0 to 4% in speed at long contexts, and memory is not given back to the GPU until the session ends.
-- `--kv-type f16` (marin-run) stores keys and values in half the bytes: twice the context fits, with no quality loss measured. f32 stays the default.
-
-Details in [BENCHMARKS.md](BENCHMARKS.md#11-paged-kv-cache-v4) and [section 12](BENCHMARKS.md#12-kv-cache-precision-optional-f16).
-
-### Snapshot between runs (GPU, opt-in)
-
-`marin --snapshot FILE` saves the conversation's cache when the session ends and, next time, reuses the part of it that the new conversation shares, so a long start is not read again. After 4,000 tokens the first token arrives in about 0.2 to 0.4 s instead of 6.5 to 7 s. The file is checked against the exact model, tokenizer, KV type and weight format, and anything wrong with it means the prompt is simply read in full. It contains your conversation, so nothing is saved unless you ask. Details in [BENCHMARKS.md](BENCHMARKS.md#13-prefix-snapshot-v6-phase-1).
-
-### Guessing ahead (opt-in, GPU only)
-
-When a reply repeats text it was just shown, Marin can guess the next few tokens by copying, then check them all in one pass. Wrong guesses are rolled back, so the output is exactly what normal decoding gives. It guesses only after the last 8 tokens match earlier text, and at most 7 at a time.
-
-```bash
-marin-run MODEL --speculate -p "..."
-```
-
-Code edits ran roughly 1.5 to 2.5 times faster. Normal chat and fresh code stay about the same speed.
+- **CPU kernels.** On the CPU, weights are packed as bf16 pairs and multiplied with run-time-dispatched SIMD (AVX2 + FMA when present): a register-blocked GEMM for prompts and a streaming GEMV for decode. On one thread this is 3.6–4.3x faster at prefill and 1.6–1.7x at decode than the earlier loop, and decode reaches the memory ceiling. Threads and CPU quantization are not built yet. [Details](BENCHMARKS.md#22-cpu-matmul-kernels-stage-1-one-thread)
 
 ## Speed
 
-Qwen3-1.7B on a laptop GPU held to about 40 W (the power limit decides a lot, so every change is checked end to end):
+Qwen3-1.7B on a laptop GPU held to about 40 W (the power limit decides a lot, so every change is checked end to end). All numbers are before/after on the same machine.
 
 | What | Result |
 |---|---|
 | int8 vs bf16 decode | 65% faster, half the weight memory |
-| 3,500-token prompt, first token | about 7 s, 40% sooner after the prefill attention work |
-| 4,000-token conversation, decode | 13 to 17% faster after the decode attention work |
+| Prompt, first token (f16 cache, tensor-core prefill attention) | 4,000 tokens: 8.0 s → 2.8 s (energy 318 → 109 J); 8,000 tokens: 25 s → 6 s |
+| Decode with 16-byte cache loads (f16 cache) | +13 / +34 / +65 / +95% (bf16) at 2k / 4k / 8k / 16k tokens of context |
 | Chat turn after 4.1k tokens of history | first token 35x (bf16) / 37x (int8) sooner with the kept cache |
-| Short chat, `--ctx 8192` | 117 MB of KV instead of 1.88 GB, GPU peak 1.8 GB lower; 0 to 4% slower at 2 to 4k tokens |
-| 4,000-token conversation, `--kv-type f16` | KV memory halved; 32k context fits (f32: 16k); decode 6.5% and first token 19.5% faster |
-| Restart after 4,000 tokens, `--snapshot` | first token 0.2 to 0.4 s instead of 6.5 to 7 s |
+| Short chat, `--ctx 8192` | 117 MB of KV instead of 1.88 GB; GPU peak 1.8 GB lower |
+| f16 KV cache | KV memory halved; 32k context fits (f32: 16k); first token about half at 8k–16k |
+| Restart after 4,000 tokens, `--snapshot` | first token 0.2–0.4 s instead of 6.5–7 s |
+
+On the CPU (Ryzen 7 260, **one thread**, Qwen3-0.6B at a 127-token prompt): prefill 26 → 95 tok/s and decode 11 → 17 tok/s; Qwen3-1.7B: prefill 7.7 → 33 and decode 3.6 → 6.1. llama.cpp on the same machine and thread count reaches 210 / 18.8 (0.6B, AVX-512) and 102 / 19.4 (AVX2-only build).
 
 Methods, tables and commands to repeat each number are in [BENCHMARKS.md](BENCHMARKS.md).
 
@@ -112,7 +107,7 @@ Methods, tables and commands to repeat each number are in [BENCHMARKS.md](BENCHM
 
 | Crate | What it does |
 |---|---|
-| `tensor` | math on f32 data: matmul, norms, rotary embeddings, quantization |
+| `tensor` | math on CPU data: SIMD matmul, norms, rotary embeddings, quantization |
 | `loader` | reads the config, tokenizer and safetensors weights |
 | `model` | the Qwen3 network on CPU and GPU |
 | `cuda` | GPU kernels and the paged KV cache behind a safe API |
@@ -127,7 +122,7 @@ Methods, tables and commands to repeat each number are in [BENCHMARKS.md](BENCHM
 
 ## Correctness
 
-Output is compared with Hugging Face in float32: same tokens, logits within about 3e-5. Quantized models cannot match that exactly, so they are checked against their own 16-bit version. Every kernel change is tested against a plain reference. Kept-cache and guessing-ahead output must equal a fresh read token for token, and tests break the logic on purpose to prove they would notice.
+Output is compared with Hugging Face in float32: same tokens, logits within about 3e-5, on the CPU and on the GPU. Quantized models and the f16 cache cannot match that exactly, so they are checked against their own higher-precision version with written pass/fail gates (see BENCHMARKS.md). Every kernel change is tested against a plain reference. Kept-cache, snapshot and guessing-ahead output must equal a fresh read token for token, and the tests break the logic on purpose to prove they would notice.
 
 ## Development
 

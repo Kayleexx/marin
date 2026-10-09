@@ -109,11 +109,124 @@ __device__ void attention_body(const float* q, const unsigned long long* pages, 
 #define MAX_GROUP 8
 #define HEAD_STEPS 8
 #define SCORE_BATCH 4
+// Decode attention over an f16 cache with head size 128, loading 16 bytes per lane: a half-warp (16 lanes) covers one
+// 256-byte row, so one load instruction moves two rows where the general path moves a quarter of one. The sums add in
+// a different order from the general path.
+#define VEC_LANES 16
+#define VEC_STREAMS 8  // half-warps in a block of 128 threads
+
+__device__ __forceinline__ void unpack_f16x8(const uint4& v, float* f) {
+    f[0] = f16_to_f32(v.x & 0xffffu); f[1] = f16_to_f32(v.x >> 16);
+    f[2] = f16_to_f32(v.y & 0xffffu); f[3] = f16_to_f32(v.y >> 16);
+    f[4] = f16_to_f32(v.z & 0xffffu); f[5] = f16_to_f32(v.z >> 16);
+    f[6] = f16_to_f32(v.w & 0xffffu); f[7] = f16_to_f32(v.w >> 16);
+}
+
+// Scores of the chunk's positions for every query head of the group into `weights[g * chunk + position]`.
+__device__ void scores_f16_vec(const float* q_s, float* weights, const unsigned long long* pages,
+                               unsigned int key_offset, unsigned int row_bytes, unsigned int kv_head,
+                               unsigned int first, unsigned int count, unsigned int chunk, unsigned int group,
+                               float scale) {
+    const unsigned int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, warps = blockDim.x >> 5;
+    const unsigned int half = lane >> 4, slot = lane & (VEC_LANES - 1);
+    for (unsigned int base = warp * 2 * SCORE_BATCH; base < count; base += warps * 2 * SCORE_BATCH) {
+        uint4 keys[SCORE_BATCH];
+#pragma unroll
+        for (int p = 0; p < SCORE_BATCH; ++p) {
+            const unsigned int pos = base + p * 2 + half;
+            keys[p] = make_uint4(0, 0, 0, 0);
+            if (pos < count)
+                keys[p] = *reinterpret_cast<const uint4*>(kv_row(pages, key_offset, first + pos, row_bytes) +
+                                                          (size_t)kv_head * 256 + slot * 16);
+        }
+        float dots[SCORE_BATCH][MAX_GROUP];
+#pragma unroll
+        for (int p = 0; p < SCORE_BATCH; ++p) {
+            float k[8];
+            unpack_f16x8(keys[p], k);
+#pragma unroll
+            for (int g = 0; g < MAX_GROUP; ++g) {
+                dots[p][g] = 0.0f;
+                if (g < group) {
+                    const float4 a = *reinterpret_cast<const float4*>(q_s + g * 128 + slot * 8);
+                    const float4 b = *reinterpret_cast<const float4*>(q_s + g * 128 + slot * 8 + 4);
+                    dots[p][g] = a.x * k[0] + a.y * k[1] + a.z * k[2] + a.w * k[3] + b.x * k[4] + b.y * k[5] +
+                                 b.z * k[6] + b.w * k[7];
+                }
+            }
+        }
+#pragma unroll
+        for (int p = 0; p < SCORE_BATCH; ++p)
+#pragma unroll
+            for (int g = 0; g < MAX_GROUP; ++g) {
+                if (g >= group) continue;
+                float sum = dots[p][g];
+                for (int offset = VEC_LANES / 2; offset > 0; offset >>= 1)
+                    sum += __shfl_xor_sync(0xffffffffu, sum, offset);
+                const unsigned int pos = base + p * 2 + half;
+                if (slot == 0 && pos < count) weights[g * chunk + pos] = sum * scale;
+            }
+    }
+}
+
+// Weighted sum of the chunk's value rows for every query head. Each half-warp sums every 8th position; `partial`
+// ([stream][group][128] floats of shared memory) holds the 8 sums, which are added in a fixed order.
+__device__ void values_f16_vec(const float* weights, float* partial, float* partial_acc,
+                               const unsigned long long* pages, size_t value_offset, unsigned int row_bytes,
+                               unsigned int kv_head, unsigned int first, unsigned int count, unsigned int chunk,
+                               unsigned int group, size_t out_base) {
+    const unsigned int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const unsigned int half = lane >> 4, slot = lane & (VEC_LANES - 1), stream = warp * 2 + half;
+    float acc[MAX_GROUP][8];
+#pragma unroll
+    for (int g = 0; g < MAX_GROUP; ++g)
+#pragma unroll
+        for (int j = 0; j < 8; ++j) acc[g][j] = 0.0f;
+    for (unsigned int i = stream; i < count; i += VEC_STREAMS * 4) {
+        uint4 rows[4];
+#pragma unroll
+        for (int u = 0; u < 4; ++u) {
+            const unsigned int pos = i + u * VEC_STREAMS;
+            rows[u] = make_uint4(0, 0, 0, 0);
+            if (pos < count)
+                rows[u] = *reinterpret_cast<const uint4*>(kv_row(pages, value_offset, first + pos, row_bytes) +
+                                                          (size_t)kv_head * 256 + slot * 16);
+        }
+#pragma unroll
+        for (int u = 0; u < 4; ++u) {
+            const unsigned int pos = i + u * VEC_STREAMS;
+            if (pos >= count) continue;
+            float f[8];
+            unpack_f16x8(rows[u], f);
+#pragma unroll
+            for (int g = 0; g < MAX_GROUP; ++g)
+                if (g < group) {
+                    const float w = weights[g * chunk + pos];
+#pragma unroll
+                    for (int j = 0; j < 8; ++j) acc[g][j] += w * f[j];
+                }
+        }
+    }
+#pragma unroll
+    for (int g = 0; g < MAX_GROUP; ++g)
+        if (g < group)
+#pragma unroll
+            for (int j = 0; j < 8; ++j) partial[(stream * group + g) * 128 + slot * 8 + j] = acc[g][j];
+    __syncthreads();
+    for (unsigned int d = threadIdx.x; d < 128; d += blockDim.x)
+        for (unsigned int g = 0; g < group; ++g) {
+            float sum = 0.0f;
+            for (unsigned int s = 0; s < VEC_STREAMS; ++s) sum += partial[(s * group + g) * 128 + d];
+            partial_acc[out_base + (size_t)g * gridDim.x * 128 + d] = sum;
+        }
+}
+
 template <int F>
 __device__ void attention_partial_body(const float* q, const unsigned long long* pages, unsigned int key_offset,
                                        unsigned int row_bytes, float* partial_acc, float* partial_ml,
                                        unsigned int heads, unsigned int kv_heads, unsigned int head_dim,
-                                       unsigned int visible, unsigned int chunk, unsigned int splits, float scale) {
+                                       unsigned int visible, unsigned int chunk, unsigned int splits, float scale,
+                                       unsigned int vector) {
     extern __shared__ float shared[];
     const unsigned int group = heads / kv_heads;
     float* q_s = shared;                      // [group][head_dim]
@@ -131,7 +244,10 @@ __device__ void attention_partial_body(const float* q, const unsigned long long*
     // Scores: one warp per position, lanes stride across the head so the row is read coalesced. A warp takes
     // SCORE_BATCH positions at a time and loads all their rows before using any, so enough loads are in flight to
     // hide the memory latency. Each score is summed in the same order as for a single position.
-    for (unsigned int base = warp; base < count; base += SCORE_BATCH * warps) {
+    const bool wide = F == KV_F16 && vector != 0;
+    if (wide)
+        scores_f16_vec(q_s, weights, pages, key_offset, row_bytes, kv_head, first, count, chunk, group, scale);
+    for (unsigned int base = warp; !wide && base < count; base += SCORE_BATCH * warps) {
         float key[SCORE_BATCH][HEAD_STEPS];
 #pragma unroll
         for (int p = 0; p < SCORE_BATCH; ++p) {
@@ -197,6 +313,11 @@ __device__ void attention_partial_body(const float* q, const unsigned long long*
 
     // Weighted values: threads stride across the head, each row read coalesced and used for every query head. Four
     // rows are loaded before they are used; the sums still add the rows in order.
+    if (wide) {
+        values_f16_vec(weights, weights + group * chunk, partial_acc, pages, value_offset, row_bytes, kv_head, first,
+                       count, chunk, group, ((size_t)(kv_head * group) * splits + split) * head_dim);
+        return;
+    }
     for (unsigned int d = tid; d < head_dim; d += blockDim.x) {
         float acc[MAX_GROUP];
 #pragma unroll
@@ -232,9 +353,9 @@ __device__ void attention_partial_body(const float* q, const unsigned long long*
 #define PARTIAL_ARGS                                                                                                \
     const float *q, const unsigned long long *pages, unsigned int key_offset, unsigned int row_bytes,               \
         float *partial_acc, float *partial_ml, unsigned int heads, unsigned int kv_heads, unsigned int head_dim,    \
-        unsigned int visible, unsigned int chunk, unsigned int splits, float scale
+        unsigned int visible, unsigned int chunk, unsigned int splits, float scale, unsigned int vector
 #define PARTIAL_CALL \
-    q, pages, key_offset, row_bytes, partial_acc, partial_ml, heads, kv_heads, head_dim, visible, chunk, splits, scale
+    q, pages, key_offset, row_bytes, partial_acc, partial_ml, heads, kv_heads, head_dim, visible, chunk, splits, scale, vector
 
 // Attention for a few new tokens at once (checking guessed tokens), split over the context like the decode kernel above.
 // Grid (splits, kv_heads), 128 threads. A block takes `chunk` consecutive positions for one kv head and for every

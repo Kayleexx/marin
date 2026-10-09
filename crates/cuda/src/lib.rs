@@ -2,6 +2,7 @@
 //! every launch is funneled through `Gpu::launch` after the wrappers in `ops` check sizes.
 
 mod attention;
+mod attention_mma;
 mod counters;
 mod error;
 mod gpu;

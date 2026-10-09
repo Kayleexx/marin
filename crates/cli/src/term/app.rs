@@ -13,6 +13,7 @@ use super::screen::Screen;
 use crate::CliError;
 use crate::chat::Chat;
 use crate::config::Home;
+use crate::load::ChatPrecision;
 use crate::session::Session;
 use crate::signal::Interrupt;
 use crate::style::Style;
@@ -23,6 +24,8 @@ pub struct Launch {
     pub interrupt: Interrupt,
     pub home: Option<Home>,
     pub backend: BackendChoice,
+    /// What the user asked for; a model switch keeps it.
+    pub precision: ChatPrecision,
     pub style: Style,
     pub caps: Caps,
     /// The startup view is on screen, with the first prompt at this column (0 without a portrait).
@@ -71,6 +74,7 @@ pub(super) struct App {
     pub(super) interrupt: Interrupt,
     pub(super) home: Option<Home>,
     pub(super) backend: BackendChoice,
+    pub(super) precision: ChatPrecision,
     pub(super) style: Style,
     pub(super) caps: Caps,
     pub(super) screen: Screen,
@@ -99,6 +103,7 @@ pub fn run(launch: Launch) -> Result<i32, CliError> {
         interrupt: launch.interrupt,
         home: launch.home,
         backend: launch.backend,
+        precision: launch.precision,
         style: launch.style,
         caps: launch.caps,
         editor: Editor::with_history(history),

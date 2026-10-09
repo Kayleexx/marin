@@ -82,9 +82,12 @@ impl Mirror {
         Ok(())
     }
 
-    pub fn check(&mut self, gpu: &Gpu, tokens: usize) -> Result<()> {
+    /// The attention output of every layer for `tokens` new tokens, next to the f64 reference for them. Frees the pages
+    /// it opened.
+    pub fn outputs(&mut self, gpu: &Gpu, tokens: usize) -> Result<Vec<(Vec<f32>, Vec<f32>)>> {
         let (heads, kv_heads, head_dim) = self.dims;
         let len = self.kv.len();
+        let mut pairs = Vec::new();
         let seed = self.next_seed();
         let q = values(tokens.saturating_mul(heads).saturating_mul(head_dim), seed);
         let new = self.fresh(tokens);
@@ -104,10 +107,19 @@ impl Mirror {
             let vals = [held.vals.as_slice(), &round_trip(self.format, &add.vals)].concat();
             let expected =
                 reference_attention(&q, &keys, &vals, (heads, kv_heads, head_dim, len, tokens));
-            assert_close(&gpu.download(&out)?, &expected, 1e-4);
+            pairs.push((gpu.download(&out)?, expected));
         }
         // Frees a page the check may have opened.
         self.kv.truncate(len)?;
+        Ok(pairs)
+    }
+
+    /// Checks the scalar kernels against the reference to 1e-4.
+    pub fn check(&mut self, gpu: &Gpu, tokens: usize) -> Result<()> {
+        gpu.set_fast_attention(false);
+        for (got, expected) in self.outputs(gpu, tokens)? {
+            assert_close(&got, &expected, 1e-4);
+        }
         Ok(())
     }
 

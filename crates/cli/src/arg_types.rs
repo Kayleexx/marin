@@ -25,10 +25,35 @@ pub enum QuantBitsArg {
     Int4,
 }
 
+/// The weight formats the chat offers.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatQuantArg {
+    /// The weights as the model file stores them (bf16)
+    None,
+    Int8,
+}
+
+impl ChatQuantArg {
+    /// The scheme `marin-run --quantize int8` builds; `group` is `--quant-group`, if given.
+    pub fn scheme(self, group: Option<usize>) -> Result<Option<QuantScheme>, CliError> {
+        match (self, group) {
+            (Self::None, None) => Ok(None),
+            (Self::None, Some(_)) => Err(CliError::BadOption(
+                "--quant-group needs --quantize int8".into(),
+            )),
+            (Self::Int8, group) => {
+                QuantScheme::new(QuantBits::Int8, group.unwrap_or(DEFAULT_GROUP))
+                    .map(Some)
+                    .map_err(|e| CliError::BadOption(e.to_string()))
+            }
+        }
+    }
+}
+
 #[derive(Args, Debug, Clone, Copy)]
 pub struct QuantArgs {
     /// Keep the layer weights as 8-bit (int8) or 4-bit (int4) numbers on the GPU: less memory to read per token, a
-    /// little accuracy lost (the embedding and output head stay bf16)
+    /// little accuracy lost (the embedding table and output head become int8 too)
     #[arg(long, value_enum)]
     pub quantize: Option<QuantBitsArg>,
     /// Weights that share one scale when quantizing, a multiple of 32: smaller is more accurate and takes more memory
@@ -69,11 +94,17 @@ impl QuantArgs {
     }
 }
 
+impl KvTypeArg {
+    pub fn format(self) -> KvFormat {
+        match self {
+            Self::F32 => KvFormat::F32,
+            Self::F16 => KvFormat::F16,
+        }
+    }
+}
+
 impl KvArgs {
     pub fn format(&self) -> KvFormat {
-        match self.kv_type {
-            KvTypeArg::F32 => KvFormat::F32,
-            KvTypeArg::F16 => KvFormat::F16,
-        }
+        self.kv_type.format()
     }
 }

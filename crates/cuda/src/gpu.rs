@@ -15,6 +15,7 @@ const KERNELS: &str = concat!(
     include_str!("kernels.cu"),
     include_str!("kv_format.cu"),
     include_str!("attention.cu"),
+    include_str!("attention_mma.cu"),
     include_str!("mma.cu"),
     include_str!("quant.cu")
 );
@@ -27,6 +28,7 @@ pub(crate) struct Kernels {
     pub rope: CudaFunction,
     /// The kernels that touch the KV cache exist once per `KvFormat`, indexed by `KvFormat::index`.
     pub attention: Vec<CudaFunction>,
+    pub attention_prefill_mma: CudaFunction,
     pub silu_mul: CudaFunction,
     pub add: CudaFunction,
     pub attention_partial: Vec<CudaFunction>,
@@ -52,6 +54,8 @@ pub struct Gpu {
     pub(crate) kernels: Kernels,
     pub(crate) counters: Counters,
     pub(crate) sm_count: usize,
+    /// Whether an f16 cache may use the fast attention kernels: tensor cores for prompt passes, 16-byte loads for one token.
+    pub(crate) fast_attention: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +146,7 @@ impl Gpu {
             matmul: module.load_function("matmul_bf16")?,
             rope: module.load_function("rope")?,
             attention: per_format(&module, "attention")?,
+            attention_prefill_mma: module.load_function("attention_prefill_mma")?,
             silu_mul: module.load_function("silu_mul")?,
             add: module.load_function("add_in_place")?,
             attention_partial: per_format(&module, "attention_partial")?,
@@ -172,6 +177,9 @@ impl Gpu {
             kernels,
             counters: Counters::default(),
             sm_count: usize::try_from(sm_count).unwrap_or(1),
+            fast_attention: std::sync::atomic::AtomicBool::new(
+                std::env::var_os("MARIN_ATTENTION_SCALAR").is_none(),
+            ),
         })
     }
 

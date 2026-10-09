@@ -10,4 +10,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+pulp = { version = "0.22.3", default-features = false, features = ["std", "x86-v3"] }
 thiserror = "2.0.21"

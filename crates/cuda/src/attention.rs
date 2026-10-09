@@ -62,11 +62,11 @@ pub(crate) fn split_scratch(
 }
 
 /// Where a layer's keys and values are, for the kernels.
-struct KvView<'a> {
-    pages: &'a CudaSlice<u64>,
-    key_offset: u32,
-    row_bytes: u32,
-    format: usize,
+pub(crate) struct KvView<'a> {
+    pub(crate) pages: &'a CudaSlice<u64>,
+    pub(crate) key_offset: u32,
+    pub(crate) row_bytes: u32,
+    pub(crate) format: usize,
 }
 
 fn kernel(set: &[CudaFunction], format: usize) -> Result<&CudaFunction, CudaError> {
@@ -78,6 +78,13 @@ fn kernel(set: &[CudaFunction], format: usize) -> Result<&CudaFunction, CudaErro
 }
 
 impl Gpu {
+    /// Chooses whether an f16 cache with head size 128 uses the fast kernels (the default): tensor cores for prompt
+    /// passes and 16-byte loads for one token. The scalar kernels serve the other caches and head sizes always.
+    pub fn set_fast_attention(&self, on: bool) {
+        self.fast_attention
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Causal grouped-query attention for the `tokens` new tokens at `start..`, reading
     /// cached keys and values of `layer` (which must already include these tokens).
     pub fn attention(
@@ -168,6 +175,15 @@ impl Gpu {
                 (start, tokens),
             );
         }
+        if tokens > MULTI_MAX_TOKENS
+            && head_dim == crate::attention_mma::HEAD_DIM
+            && view.format == KvFormat::F16.index()
+            && self
+                .fast_attention
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return self.attention_prefill_mma(q, &view, out, (heads, kv_heads), (start, tokens));
+        }
         let threads = head_dim.next_multiple_of(32);
         let shared_floats = head_dim.saturating_add(threads).saturating_add(32);
         let config = LaunchConfig {
@@ -231,8 +247,22 @@ impl Gpu {
                 });
             }
         }
+        let wide = view.format == KvFormat::F16.index()
+            && head_dim == crate::attention_mma::HEAD_DIM
+            && self
+                .fast_attention
+                .load(std::sync::atomic::Ordering::Relaxed);
+        // The wide kernel also keeps one partial sum per half-warp of the block.
+        let sums = if wide {
+            (SPLIT_BLOCK as usize / 16)
+                .saturating_mul(group)
+                .saturating_mul(head_dim)
+        } else {
+            0
+        };
         let shared = group
             .saturating_mul(head_dim.saturating_add(chunk))
+            .saturating_add(sums)
             .saturating_mul(size_of::<f32>());
         let partial = LaunchConfig {
             grid_dim: (
@@ -244,6 +274,7 @@ impl Gpu {
             shared_mem_bytes: to_u32(shared, "shared memory")?,
         };
         let scale = 1.0 / (head_dim as f32).sqrt();
+        let wide_u = u32::from(wide);
         let (heads_u, kv_heads_u, head_dim_u, visible_u, chunk_u, splits_u) = (
             to_u32(heads, "heads")?,
             to_u32(kv_heads, "kv heads")?,
@@ -260,7 +291,11 @@ impl Gpu {
                 .arg(&view.row_bytes);
             a.arg(&mut partial_acc.data).arg(&mut partial_ml.data);
             a.arg(&heads_u).arg(&kv_heads_u).arg(&head_dim_u);
-            a.arg(&visible_u).arg(&chunk_u).arg(&splits_u).arg(&scale);
+            a.arg(&visible_u)
+                .arg(&chunk_u)
+                .arg(&splits_u)
+                .arg(&scale)
+                .arg(&wide_u);
         })?;
         let merge = LaunchConfig {
             grid_dim: (heads_u, 1, 1),

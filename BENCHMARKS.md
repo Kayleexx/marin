@@ -1,702 +1,477 @@
 # Benchmarks
 
-What the Marin engine measures on a laptop, how each optimization changed it, and how to repeat every measurement. Every claim comes from a saved run. Numbers from different sessions are never mixed unless the text says so.
+What Marin measures on a laptop, what each optimization changed, and how to repeat every number. Every claim comes from a saved run; numbers from different sessions are never mixed unless the text says so.
 
-**Contents:** [Words](#words) · [Setup and method](#setup-and-method) · [Results at a glance](#results-at-a-glance) · [The power cap](#the-power-cap) · [Starting point](#starting-point) · [Optimizations 1 to 11](#optimizations) · [Appendix: design study](#appendix-the-design-study-before-paging) · [Not adopted](#tried-and-not-adopted) · [Repeating a measurement](#repeating-a-measurement)
+**Contents:** [Method](#method) · [Results at a glance](#results-at-a-glance) · [The power cap](#the-power-cap) · [Starting point](#starting-point) · [Optimizations 1–22](#optimizations) · [Not adopted](#tried-and-not-adopted) · [Repeating a measurement](#repeating-a-measurement)
 
-## Words
+## Method
+
+**Terms**
 
 | Term | Meaning |
 |---|---|
 | Prefill | Reading the prompt, in big passes. |
 | TTFT | Time to first token. Mostly prefill. |
 | Decode | Writing the reply, one token per pass. |
-| KV cache | Keys and values of earlier tokens, kept so attention never recomputes them. Stored as f32. |
-| Guessing ahead | Opt-in speculative decoding: copy likely next tokens from earlier text and check them all in one pass. |
-| Kept cache | Reusing the KV cache of the previous chat turn instead of rebuilding it (section 10). |
-| Page | 64 positions of keys and values for every layer: 14 MiB for Qwen3-1.7B. The unit the cache hands out and takes back. |
-| Slab | 8 pages allocated together, so a layer's keys stay contiguous across them (V4). |
+| KV cache | Keys and values of earlier tokens, kept so attention never recomputes them. |
+| Guessing ahead | Opt-in speculative decoding: copy likely next tokens from earlier text and check them in one pass. |
+| Kept cache | Reusing the previous chat turn's KV cache instead of rebuilding it (section 10). |
+| Page / slab | 64 positions of KV for every layer (14 MiB for Qwen3-1.7B) / 8 pages allocated together (section 11). |
 
-## Setup and method
+**Setup**
 
-- **Models:** Qwen3-1.7B-Base for the baseline and `verify`; Qwen3-1.7B (chat) for chat, guessing and sampling runs. bf16 weights unless stated, f32 math, batch size 1.
-- **Machine:** AMD Ryzen 7 260 (16 threads), 16 GB RAM, NVIDIA GeForce RTX 5060 Laptop GPU (8 GB, 20 multiprocessors, 32 MB L2, 384 GB/s memory speed on paper), driver 610.57.04, CUDA 13.3.
-- **Power limit:** the GPU is held to about 40 W by software. The driver reports the cap active in every decode sample.
-- **Desktop programs:** a browser and an editor were open during every run. They use 1.5 to 1.7 GB of GPU memory, so "peak GPU memory" is for the whole device.
+- **Models:** Qwen3-1.7B-Base for the baseline and `verify`; Qwen3-1.7B (chat) for chat, guessing and sampling; Qwen3-0.6B where stated. bf16 weights unless stated, f32 math, batch 1.
+- **GPU machine:** AMD Ryzen 7 260 (16 threads), 16 GB RAM, RTX 5060 Laptop GPU (8 GB, 20 multiprocessors, 384 GB/s on paper), CUDA 13.3. The GPU is held to about **40 W** by software. A browser and an editor were open during every run (1.5–1.7 GB of GPU memory), so "peak GPU memory" is device-wide.
+- **CPU runs (sections 21–22):** the same Ryzen 7 260 (Zen 4, 8 cores, AVX2 and AVX-512), one thread, 6.5 GB of RAM free.
 
-How runs are compared:
+**Comparing runs**
 
-- One warmup round, then medians. Old and new builds run interleaved (old, new, new, old) in one session.
-- GPU clock and power state differ between sessions, so only ratios inside one session mean anything. Speeds in different tables are not comparable.
-- `--profile` adds one extra pass that times every stage. It is slower than a normal pass: use it for shares of time, never for speed.
-- `marin-run compare before.json after.json` calls a change "same" when the old and new min..max ranges overlap, so noise is not reported as a win. Take more `--runs` before believing a small difference.
+- One warm-up round, then medians. Old and new builds run interleaved (old, new, new, old) in one session.
+- GPU clock and power differ between sessions, so only ratios inside one session mean anything.
+- `--profile` adds one slower pass that times every stage: use it for shares of time, never for speed.
+- `marin-run compare before.json after.json` calls a change "same" when the min..max ranges overlap. Differences of a few percent are noise unless the ranges are clearly apart.
+- Each optimization section follows the same order: problem, change, result, verdict. Investigations that did not ship say so in the title.
 
 ## Results at a glance
 
-| # | Change | What it did | Headline |
-|---|---|---|---|
-| 1 | Decode attention split across the context | one block per head used only 16 of 20 multiprocessors | decode at 4096 tokens +48% |
-| 2 | Prefill matrix multiply on tensor cores | 5 to 8x faster matrix stages | prefill 2 to 3x faster up to 512 tokens |
-| 3 | Fixed workspace, grouped launches | 339 allocations per token gone | speed unchanged |
-| 4 | int8 / int4 weights | half / a third of the bytes to read | decode +65% / +91%; int8 loses almost no quality |
-| 5 | Guessing ahead (opt-in) | copy repeated text, check in one pass | code edits 1.5 to 2.5x, chat unchanged |
-| 6 | Shared-read attention for guessed tokens | each key/value row read once per pass | 4k edits 1.9 to 2.5x (was 1.4 to 2.3x) |
-| 7 | Faster top-k / top-p sampler | 3.7 ms to 0.2 ms per token | plain decode 1 to 5% slower, guessing up to 17% faster |
-| 8 | One-token attention | load more rows at once | 4k chat +13% (bf16), +17% (int8) |
-| 9 | Prefill attention | fix the load pattern | 2048-token TTFT -35%, a real 3.6k prompt -40% |
-| 10 | Kept cache between chat turns | read only what is new in each turn | first token after 2.3k / 4.1k tokens of history 21x / 35x sooner (bf16), 23x / 37x (int8) |
-| 11 | Paged KV cache | allocate KV as the sequence grows, not for the whole `--ctx` | `--ctx 8192`, 64-token chat: 117 MB of KV instead of 1.88 GB, GPU peak -1.8 GB; speed within 0 to 4% |
-| 12 | f16 KV cache (option) | store keys and values in half the bytes | KV memory halved, 32k context fits (f32: 15.9k), decode at 4k +6.5%, first token after 4k 19.5% sooner, no measured quality loss; bf16 and q8 dropped |
-| 13 | Prefix snapshot (`--snapshot FILE`) | save the finished conversation's KV to disk, restore the shared start after a restart | restart to first token 3.4x sooner at 4k (f16), 12x at 8k (f32); output identical to the live cache |
+| # | Change | Headline |
+|---|---|---|
+| 1 | Decode attention split across the context | decode at 4,096 tokens +48% |
+| 2 | Prefill matmul on tensor cores | prefill 2–3x faster up to 512 tokens |
+| 3 | Fixed workspace, grouped launches | 339 allocations per token gone; speed unchanged |
+| 4 | int8 / int4 weights | decode +65% / +91%; int8 loses almost no quality |
+| 5 | Guessing ahead (opt-in) | code edits 1.5–2.5x, chat unchanged |
+| 6 | Shared-read attention for guessed tokens | 4k edits 1.9–2.5x (was 1.4–2.3x) |
+| 7 | Faster top-k / top-p sampler | 3.7 ms → 0.2 ms per token; plain decode 1–5% slower (power cap) |
+| 8 | One-token attention | 4k chat +13% (bf16), +17% (int8) |
+| 9 | Prefill attention | 2,048-token TTFT −35%; a real 3.6k prompt −40% |
+| 10 | Kept cache between chat turns | first token after 4.1k tokens of history 35x (bf16) / 37x (int8) sooner |
+| 11 | Paged KV cache | `--ctx 8192`, 64-token chat: 117 MB of KV instead of 1.88 GB; speed within 0–4% |
+| 12 | f16 KV cache (default of `marin` on the GPU) | KV memory halved, 32k context fits (f32: 15.9k); first token about half at 8k–16k |
+| 13 | Prefix snapshot (`--snapshot FILE`) | restart to first token 3.4x sooner at 4k (f16), 12x at 8k (f32) |
+| 14 | Parking idle sessions in RAM (not built) | 40–200x faster than re-reading, but Marin has one session: no-go |
+| 15 | Draft-model speculation (not built) | +17% on bf16 code, −15–25% at long context, slower on int8: no-go |
+| 16 | `marin --quantize int8` (option) | decode +33–63%, 1.7 GB less GPU memory; wording differs from bf16; bf16 stays default |
+| 17 | Mixed precision, int8 KV values (not adopted) | ≤0.2 points of quality for 7–9% speed; no decode gain: no-go |
+| 18 | Tensor-core prefill attention (f16 cache) | first token −34 / −49 / −65 / −77% at 511 / 2k / 4k / 8k tokens |
+| 19 | Prefill matmul rewrite (reverted) | −12% first token, below the 15% gate |
+| 20 | Decode attention with 16-byte loads | decode +13 / +34 / +65 / +95% (bf16) at 2k / 4k / 8k / 16k tokens |
+| 21 | CPU inference (investigation) | Marin CPU: 1 core, prefill 26 and decode 11 tok/s vs llama.cpp 1,061 and 19.8 (8 threads) |
+| 22 | CPU matmul kernels, stage 1 (one thread) | prefill 3.6x, decode 1.6x on the 0.6B; 1.7B prefill 4.3x, decode 1.7x; `verify` unchanged |
 
-Rows 7 and 9 did not simply get faster. The cause is the power cap, explained next.
+Rows 7 and 9 did not simply get faster; the cause is the power cap, explained next.
 
 ## The power cap
 
-With a 40 W limit the GPU trades clock speed for work. When it rests between tokens, the next burst runs at a higher clock. When it never rests, the clock settles lower. Measured with `bench --token-pause-ms N` (greedy, 128-token prompt, 3 interleaved rounds, warmed GPU):
+With a 40 W limit the GPU trades clock speed for work. When it rests between tokens the next burst runs at a higher clock; when it never rests the clock settles lower. Measured with `bench --token-pause-ms N`:
 
 | pause after each token | engine speed | GPU clock | GPU power | energy per token | tokens/s on the wall clock |
 |---|---|---|---|---|---|
 | 0 ms | 61.4 tok/s | 1383 MHz | 36.4 W | 0.78 J | 46.8 |
-| 3 ms | 70.2 tok/s | 1641 MHz | 36.6 W | 0.82 J | 45.0 |
-| 8 ms | 77.5 tok/s | 1890 MHz | 36.5 W | 0.95 J | 38.9 |
+| 3 ms | 70.2 | 1641 MHz | 36.6 W | 0.82 J | 45.0 |
+| 8 ms | 77.5 | 1890 MHz | 36.5 W | 0.95 J | 38.9 |
 
-Power stays at the cap whatever share of time the GPU is busy, so energy per token follows time per token. Pauses raise the engine's own speed but lower the real speed, so idling gains nothing.
-
-Where this showed up:
-
-- The 3.7 ms CPU sampler cost only 1.1 ms of each step, because the GPU rested during it (61.5 vs 56.8 tok/s for greedy vs chat sampling).
-- Making the sampler 19x faster made plain decoding 1 to 5% slower. The GPU's work per token grew by about the 3.5 ms the sampler gave back.
-- The faster prefill attention made the matrix stages slower (clock 2074 to 1532 MHz), which took back about 19% of its saving.
-
-So every kernel win here is checked end to end, with the cap on.
+Power stays at the cap whatever share of time the GPU is busy, so energy per token follows time per token, and idling gains nothing. It showed up three times: the 3.7 ms CPU sampler cost only 1.1 ms of each step because the GPU rested during it; making the sampler 19x faster made plain decoding 1–5% slower; and the faster prefill attention slowed the matrix stages (clock 2074 → 1532 MHz), giving back about 19% of its saving. **Every GPU win here is checked end to end with the cap on.**
 
 ## Starting point
 
-First measurements before any optimization (bf16, greedy, 64 generated tokens, median of 5 runs after a warmup, `--profile --sample-gpu`):
+Before any optimization (bf16, greedy, 64 generated tokens, median of 5 after a warm-up):
 
-| prompt tokens | TTFT | prefill | decode | time between tokens p50 / p95 | sampling per token |
-|---|---|---|---|---|---|
-| 32 | 125 ms | 264 tok/s | 49.6 tok/s | 20.0 / 21.1 ms | 3.7 ms |
-| 128 | 351 ms | 369 tok/s | 55.7 tok/s | 17.7 / 19.4 ms | 3.6 ms |
-| 512 | 1477 ms | 348 tok/s | 49.1 tok/s | 20.4 / 20.9 ms | 3.7 ms |
+| prompt tokens | TTFT | prefill | decode | sampling per token |
+|---|---|---|---|---|
+| 32 | 125 ms | 264 tok/s | 49.6 tok/s | 3.7 ms |
+| 128 | 351 ms | 369 | 55.7 | 3.6 ms |
+| 512 | 1477 ms | 348 | 49.1 | 3.7 ms |
 
-(The 32-token row ran on a cold GPU and is the least steady.) Loading takes about 2.4 s, of which copying the 3.4 GB of weights to the GPU is 0.38 s.
+Loading takes about 2.4 s (copying 3.4 GB of weights: 0.38 s). Where the time went: prefill at 512 tokens was MLP 64%, q/k/v 14%, attention 14%; decode at 512 tokens was MLP 37%, attention 26%. Decode reads every weight once per token, so it is limited by memory; attention grows with context and became the next cost.
 
-Where the time went:
-
-| | MLP | q/k/v projections | attention output proj | LM head | attention |
-|---|---|---|---|---|---|
-| prefill, 512 tokens | 64% | 14% | 7% | | 14% |
-| decode, 128 tokens | 45% | 13% | 6% | 12% | 11% |
-| decode, 512 tokens | 37% | 11% | 5% | 10% | 26% |
-
-Decode reads all weights for every token, so it is limited by memory. Attention grows with the context and becomes the next cost. The CPU backend (one core) manages 3.7 tok/s decode and 8.3 tok/s prefill, with the MLP at 64 to 74% of the time. It is the correctness reference and the fallback, and is not optimized.
-
-**What the GPU itself can do** (`marin-run probe`, no model, 4 runs of 4 s; "sustained" is the median after the opening burst):
-
-| | opening burst | sustained |
-|---|---|---|
-| memory read (1 GB buffer) | 320 to 344 GB/s | 277 to 302 GB/s |
-| fp32 math | 7.0 to 11.2 TFLOP/s | 7.0 to 11.2 TFLOP/s (follows the clock) |
-| bf16 tensor cores | 15 to 28 TFLOP/s | 28.1 to 28.3 TFLOP/s |
-
-Decode weight stages already sit near the memory limit (MLP 295 GB/s, LM head 351 GB/s), so smaller weights are the lever for decode speed.
+**What the GPU itself can do** (`marin-run probe`, sustained): memory read 277–302 GB/s, fp32 7.0–11.2 TFLOP/s, bf16 tensor cores 28.1–28.3 TFLOP/s. Decode weight stages already sit near the memory limit (MLP 295 GB/s), so smaller weights are the lever for decode speed.
 
 ## Optimizations
 
 ### 1. Decode attention split across the context
 
-**Problem.** One block per (token, head) gave 16 blocks on a 20-multiprocessor GPU, each scanning the whole context alone.
-**Change.** The context is split across about 80 blocks per layer. Each block reads a key/value row once for both query heads that share it, and a small second kernel merges the pieces (exact softmax, same result up to rounding).
+*Problem.* One block per head gave 16 blocks on a 20-multiprocessor GPU, each scanning the whole context alone. *Change.* The context is split across about 80 blocks per layer; a small second kernel merges the pieces (exact softmax).
 
-| context | decode before -> after | attention per token before -> after |
+| context | decode before → after | attention per token |
 |---|---|---|
-| 128 | 60.0 -> 59.2 tok/s (same) | 1.98 -> 1.77 ms |
-| 1024 | 44.9 -> 52.7 tok/s (+17.5%) | 9.17 -> 4.64 ms |
-| 2048 | 33.4 -> 41.4 tok/s (+24.2%) | 16.47 -> 9.54 ms |
-| 4096 | 23.1 -> 34.2 tok/s (+48.2%) | 30.64 -> 14.14 ms |
+| 1,024 | 44.9 → 52.7 tok/s (+17.5%) | 9.17 → 4.64 ms |
+| 2,048 | 33.4 → 41.4 (+24.2%) | 16.47 → 9.54 ms |
+| 4,096 | 23.1 → 34.2 (+48.2%) | 30.64 → 14.14 ms |
 
-Weight stages do not change with context, so all the slowdown is attention. At 4096 tokens the cache is 0.94 GB (about 3 ms at 300 GB/s), so attention was still about 4x above that (see section 8). A 16-bit KV cache fails `verify` at the existing tolerances (largest logit difference 2.8e-3 against 5e-4 allowed) and the tolerances were not loosened; it is judged by separate quality gates in section 12.
+A 16-bit KV cache fails `verify` at the existing tolerances (2.8e-3 against 5e-4); the tolerances were not loosened, and f16 is judged by separate gates (section 12).
 
 ### 2. Prefill matrix multiply on tensor cores
 
-**Change.** For passes of 16 or more tokens, a tensor-core kernel (bf16 `mma.sync`, f32 accumulation, 64 weight rows by 64 tokens per block) replaces the 32-bit multiply-add kernel. Activations are f32, so each is split into a bf16 high part and a bf16 low part and both are multiplied, because one rounding loses too much. Decode keeps the old kernel.
+For passes of 16+ tokens, a bf16 `mma.sync` kernel (f32 accumulation) replaces the fp32 kernel. Activations are split into a bf16 high and low part and both are multiplied, because one rounding loses too much. Decode keeps the old kernel.
 
-| prompt tokens | TTFT before -> after | prefill before -> after |
+| prompt tokens | TTFT before → after | prefill |
 |---|---|---|
-| 128 | 352 -> 127 ms | 364 -> 1009 tok/s |
-| 512 | 1576 -> 519 ms | 325 -> 986 tok/s |
-| 1024 | 3499 -> 1469 ms | 293 -> 697 tok/s |
-| 2048 | 8531 -> 4351 ms | 240 -> 471 tok/s |
+| 128 | 352 → 127 ms | 364 → 1009 tok/s |
+| 512 | 1576 → 519 ms | 325 → 986 |
+| 2,048 | 8531 → 4351 ms | 240 → 471 |
 
-Matrix stages went from about 1.1 TFLOP/s to 4 to 8.7 TFLOP/s. Gains shrink for long prompts because attention was not a matrix kernel here (section 9). Crossover is at 16 tokens (equal speed); 48 tokens take 129 ms before and 51 ms after. Energy for a 2048-token prompt roughly halves (169 J to 86 J). `verify` prompts are under 16 tokens and never reach this kernel, so it was checked with greedy output on five long prompts (identical to the old build) and kernel tests against the CPU code at 1e-4.
+Matrix stages went from about 1.1 to 4–8.7 TFLOP/s; gains shrink for long prompts because attention was not a matrix kernel yet (section 9). Energy for a 2,048-token prompt halves (169 → 86 J).
 
 ### 3. Fixed workspace, fewer launches
 
-Three changes, each measured against the one before: (1) every buffer a pass needs is allocated once and reused by all 28 layers; (2) q/k/v is one launch and gate/up is one launch (same arithmetic, same bits); (3) prompts longer than 512 tokens run in pieces of 512, which keeps the workspace near 55 MB (without it, peak memory at a 4096-token prompt rose from 5700 to 6100 MB).
-
-| | before | after all three |
-|---|---|---|
-| device allocations per one-token pass | 339 | 0 |
-| kernel launches per one-token pass | 507 | 423 |
-| decode at 128 / 1024 / 4096 tokens | 61.3 / 54.2 / 39.5 tok/s | 62.1 / 54.3 / 39.6 tok/s |
-| peak GPU memory at 4096 tokens | 5700 MB | 5691 MB |
-
-Decode speed did not change beyond noise (grouped launches: +0.7% over 3 interleaved pairs). The remaining 423 launches cost about 0.55 ms of a 16 ms step. CUDA graphs gave +1.2% in a throwaway prototype, so they were not adopted; further fusion could save only a few tenths of a percent each.
+Every buffer a pass needs is allocated once; q/k/v and gate/up are one launch each; prompts over 512 tokens run in pieces of 512. Device allocations per one-token pass 339 → 0, launches 507 → 423, decode unchanged beyond noise (+0.7%). CUDA graphs gave +1.2% in a prototype and were not adopted.
 
 ### 4. Weight quantization
 
-`--quantize int8|int4` stores the 7 projection matrices of each layer as integer codes with one f32 scale per group of 128 columns (`--quant-group`). The embedding and output head stay int8 whenever quantization is on, because a 4-bit head hurt quality badly. Codes are made at load time on the CPU (about 1.5 s extra). GPU only; the CPU backend refuses it. Quantized models cannot match Hugging Face logits, so `marin-run quality` measures perplexity and top-token agreement instead.
+`--quantize int8|int4` stores each layer's 7 projection matrices as integer codes with one f32 scale per group of 128 columns. The embedding and head stay int8 whenever quantization is on (a 4-bit head hurt quality badly). Codes are made at load time. Quantized models cannot match Hugging Face logits, so `marin-run quality` measures perplexity and top-token agreement instead.
 
-Accuracy (Qwen3-1.7B-Base on 2048 tokens of Vim release notes and of this repository's Rust code; loss change is the change in perplexity; "same top" is how often the first choice equals bf16's):
+| (Qwen3-1.7B-Base, 2,048 tokens) | loss change, notes / code | same top choice | weights | decode | peak GPU | J/token |
+|---|---|---|---|---|---|---|
+| bf16 | | | 3441 MB | 56.8 tok/s | 5052 MB | 0.73 |
+| int8, groups of 128 | +0.03% / +0.11% | 98.2% / 98.9% | 1774 MB | 93.6 (+65%) | 3404 MB | 0.45 |
+| int4, groups of 128 | +14.6% / +16.6% | 84.0% / 85.6% | 1070 MB | 108.4 (+91%) | 2712 MB | 0.39 |
+| int4, groups of 32 | +9.1% / +8.2% | 86.9% / 90.1% | 1231 MB | | | |
 
-| | notes: loss change / same top | code: loss change / same top | weights |
-|---|---|---|---|
-| bf16 | | | 3441 MB |
-| int8, groups of 128 | +0.03% / 98.2% | +0.11% / 98.9% | 1774 MB |
-| int4, groups of 128 | +14.6% / 84.0% | +16.6% / 85.6% | 1070 MB |
-| int4, groups of 32 | +9.1% / 86.9% | +8.2% / 90.1% | 1231 MB |
-
-Speed (decode of 128 tokens after a 128-token prompt, interleaved, 40 W cap in every run):
-
-| | decode | peak GPU memory | energy per token |
-|---|---|---|---|
-| bf16 | 56.8 tok/s | 5052 MB | 0.73 J |
-| int8 | 93.6 tok/s (+65%) | 3404 MB | 0.45 J |
-| int4 | 108.4 tok/s (+91%) | 2712 MB | 0.39 J |
-
-**int8 is the setting to use.** int4 is clearly lossy even with small groups. At 4096 tokens the gain shrinks (36.6 to 49.8 tok/s for int8, 53.5 for int4) because attention still reads the same f32 cache. Peak memory at 4096 drops from 5990 MB to 4266 MB (int8), so about 1.7 GB more context fits. Prefill speed is unchanged. Not done: calibrated 4-bit weights (GPTQ style), per-layer widths, grouping q/k/v when quantized (about 1%).
+int8 is the setting to use; int4 is clearly lossy even with small groups. At 4,096 tokens the gain shrinks because attention still reads the same cache.
 
 ### 5. Guessing ahead (opt-in, GPU only)
 
-**Rule.** The prompt and reply so far are indexed by every run of 8 tokens. When the last 8 tokens exactly repeat an earlier run, up to 7 tokens that followed it are guessed. One pass checks all of them and returns logits for every position. Guesses are kept while they equal the token the sampler picks, and the KV cache is rolled back over the rest. The sampler is called once per delivered token, so seeded output is identical to plain decoding. Off unless asked for (`marin-run MODEL --speculate`); `marin` never turns it on; the CPU ignores it.
+The prompt and reply so far are indexed by every run of 8 tokens. When the last 8 tokens repeat an earlier run, up to 7 following tokens are guessed; one pass checks all of them, correct guesses are kept, and the KV cache is rolled back over the rest. The sampler runs once per delivered token, so seeded output is identical to plain decoding. Off unless asked for (`marin-run MODEL --speculate`).
 
-**First, a measurement only** (40 prompts replayed through the guesser, no engine changes). Copying only helps when the reply repeats text in view. Tokens settled per model pass, greedy, guessing after 3 matching tokens (1.00 means no gain):
-
-| prompts | tokens settled per pass |
-|---|---|
-| chat, writing new code, explaining, summaries | 1.08 to 1.26 |
-| whole-file code edits | 3.10 |
-
-A longer pass costs more than a one-token pass. For bf16, 2 / 4 / 8 tokens cost 1.19 / 1.44 / 1.90x at 128 tokens of context and 1.57 / 1.91 / 2.91x at 4096 (int8 is dearer because its cheaper weights leave less time to hide the extra arithmetic). Passes of 9 tokens cost much more than 8, so guesses stop at 7.
-
-**The match rule decides whether it is safe.** Guessing after only 3 matching tokens lost 25% on int8 fresh code and 13% on int8 chat at 4k context, because a wrong 8-token pass at 4k costs about 5 normal steps. Guessing after 8 gave up none of the edit gains. Pausing guesses after a wrong one did not help and was removed.
-
-**In the engine** (`marin-run spec-bench`: the real `generate` loop, 12 prompts, up to 300 tokens, interleaved, 40 W cap held): every guessing reply was identical to the plain reply with the same seed, sampled replies included.
+Copying only helps when the reply repeats text in view: tokens settled per pass were 1.08–1.26 for chat and fresh code, 3.10 for whole-file edits. A longer pass costs more (bf16, 4 / 8 tokens: 1.44x / 1.90x a one-token pass at 128 tokens of context; int8 is dearer). Guessing after only 3 matching tokens lost 25% on int8 fresh code at 4k context; requiring 8 gave up none of the edit gains. Every guessing reply equalled the plain reply with the same seed.
 
 ### 6. Shared-read attention for guessed tokens
 
-**Problem.** Checking 2 to 8 tokens used the prompt kernel, one block per (token, head), so every guessed token re-read the whole cache: 15 GB asked for against 0.94 GB held at 4096 tokens. Attention was 71 to 77% of an 8-token pass, and a wrong guess wasted about 61 ms against 18 ms at 128 tokens.
-**Change.** For 2 to 8 new tokens, one block reads each key and value row once and applies it to every (token, head) row, with a causal mask per row, split over 64-position blocks and merged. One-token decode, prefill and the cache layout are untouched.
+Checking 2–8 tokens used the prompt kernel, so each guessed token re-read the whole cache (attention was 71–77% of an 8-token pass). Now one block reads each key/value row once and applies it to every (token, head) row.
 
-| tokens in the pass (bf16, 4096 context) | attention before -> after | whole pass before -> after |
+| bf16, 4,096 context | attention before → after | whole pass |
 |---|---|---|
-| 2 | 37.4 -> 14.5 ms | 49.9 -> 35.6 ms |
-| 4 | 44.6 -> 13.7 ms | 60.3 -> 44.2 ms |
-| 8 | 65.3 -> 21.6 ms | 92.1 -> 60.0 ms |
+| 2 tokens | 37.4 → 14.5 ms | 49.9 → 35.6 ms |
+| 8 tokens | 65.3 → 21.6 ms | 92.1 → 60.0 ms |
 
-Gain over plain decoding with the same sampler, greedy, old kernel -> new kernel, and energy per token against plain decoding (new kernel):
-
-| scenario | bf16 gain | int8 gain | energy bf16 / int8 |
-|---|---|---|---|
-| whole-file edit, short | 2.31x -> 2.50x | 1.77x -> 1.99x | -60% / -50% |
-| whole-file edit, 4k | 1.85x -> 2.46x | 1.56x -> 2.18x | -59% / -54% |
-| diff-style edit, short | 1.81x -> 1.91x | 1.51x -> 1.64x | -39% / -32% |
-| diff-style edit, 4k | 1.69x -> 2.13x | 1.40x -> 1.87x | -53% / -46% |
-| fresh code, short / 4k | 1.03x / 1.10x | 1.06x / 1.10x | -3% / -9% (bf16) |
-| chat, short / 4k | 1.01x / 1.00x | 1.00x / 0.98x | -1% / 0% (bf16) |
-
-- Edits gain the most; nothing is gained where nothing is copied. The only loss is int8 chat at 4k (0.98x, about 2% more energy), from one or two wrong 8-token guesses per reply.
-- The chat sampler gains a little less than greedy (the CPU sampler is a fixed cost per token).
-- Overhead per token: the guesser 0.4 to 1.9 microseconds, rollback under 0.02 microseconds, against 11 to 30 ms per step. Memory: under 0.4 MB plus about 25 MB of workspaces.
-- Tokens settled by one pass arrive together, so the 95th percentile gap between tokens is longer where guessing fires (61 to 66 ms in 4k edits, plain decoding 26 to 36 ms). Time to first token is unchanged.
-- Still limited by the kernel's own work, not memory: about 55 GB/s for the 8-token pass.
-- Limits: 2 timed rounds, 12 prompts, whole-file and diff edits of files from this repository; per-run ranges are wide in some rows.
+Gain over plain decoding: whole-file edit 2.31x → 2.50x short and 1.85x → 2.46x at 4k (bf16); fresh code and chat about 1.0x. The only loss is int8 chat at 4k (0.98x). Energy per token on edits −40% to −60%. Tokens settled by one pass arrive together, so the p95 gap between tokens is longer where guessing fires; TTFT is unchanged.
 
 ### 7. Faster top-k and top-p sampling
 
-**Problem.** The chat sampler (temperature, top-k, top-p) fully sorted all 151,936 logits for every token: about 3.7 ms. Greedy is one pass over the logits (0.15 ms) and was never affected.
-**Change** (same results, no approximation):
+The chat sampler fully sorted all 151,936 logits per token (3.7 ms). Top-k up to 128 now keeps a short sorted list in one scan; top-p without top-k ranks only logits within 18 temperatures of the best (the rest weigh less than 2^-24 and cannot change an f32 sum). Results are bit-for-bit the same as a full sort (`crates/sampler/tests/exact.rs`). The sampler now takes 0.2 ms.
 
-- Top-k up to 128: one scan keeps a short sorted list of the best `k`. Ties keep the old order (higher logit first, then the lower token id).
-- No top-k, top-p below 1: only logits within 18 temperatures of the best are ranked. Anything further down weighs less than 2^-24, which cannot change an f32 sum that already holds the best token's 1.0, so every probability is bit for bit the same. If the top-p set is not complete inside that group, everything is ranked as before.
-- Top-k above 128, or no top-k with top-p at 1: unchanged (full sort).
-
-`crates/sampler/tests/exact.rs` compares the distribution with a plain full-sort reference bit for bit (ties, repeated maxima, +0.0 and -0.0, 1 to 20,000 logits, 7 temperatures, 9 top-k values around 128, 8 top-p values) and checks the seeded token sequence draw by draw. Shrinking the cutoff or breaking the tie rule makes it fail.
-
-**Result.** The sampler took 3.7 ms before and 0.2 ms after in every row. Interleaved real replies (chat sampler, 4 runs per side per weight type):
-
-| scenario | plain decode bf16 / int8 | guessing bf16 / int8 |
-|---|---|---|
-| whole-file edit, short | -1.7% / -0.7% | +15.7% / +17.4% |
-| whole-file edit, 4k | -2.3% / -3.5% | +11.3% / +14.9% |
-| diff-style edit, short / 4k | -4.5, -4.8% / -1.0, -4.0% | -1.8, +5.7% / +2.0, +8.6% |
-| fresh code, short / 4k | -4.0, -2.6% / -3.5, -3.8% | -4.7, +13.2% / -3.2, -2.7% |
-| chat, short / 4k | -4.1, -3.5% / -2.8, -4.1% | -4.4, -3.4% / -2.1, -3.3% |
-
-Plain decoding got 0.7 to 4.8% slower, with 1 to 5% more energy per token (every row has the same sign). The cause is the power cap: the GPU's busy time per token grew by 3.6 to 5.1 ms, almost exactly the 3.5 ms the sampler gave back, and the mean clock fell (bf16 chat, short: 1116 to 822 MHz) while power stayed at the cap. A guessing pass samples every token it settles, so it gains about 3.5 ms per settled token and pays the slower clock once per pass (bf16 whole-file edit, short: 33.5 to 28.9 ms per pass). Rows where guessing rarely fires (about 1 token per pass) are 2 to 5% slower, like plain decoding.
+Plain decoding got 0.7–4.8% *slower* (1–5% more energy per token): the GPU's busy time per token grew by about the 3.5 ms the sampler gave back, and the clock fell at the same power. Guessing, which samples every settled token, gained up to 17%.
 
 ### 8. One-token attention
 
-**Problem.** At 4096 tokens attention took 14 to 16 ms of a 31 ms step.
+At 4,096 tokens attention took 14–16 ms of a 31 ms step, about 2x above a plain streaming read of the same bytes. The key loop held one 512-byte row in flight at a time and reduced over 8 query-head groups when this model has 2. Now a warp scores 4 positions at a time and loads their rows before using any; sums keep their old order (bit-identical).
 
-**Where the time went** (a standalone program running the shipped kernels over 28 separate layer-sized buffers so the L2 cannot help; isolated runs drift about 10%):
-
-- 128 blocks of 128 threads (6.4 per multiprocessor), 64 registers, 3 KB of shared memory. Up to 8 blocks fit, so no resource ran out.
-- Reading keys and scoring took 5.7 to 6.9 ms, reading values 3.0 to 3.6 ms, for the same bytes. Merge (0.07 to 0.09 ms), softmax and shared-memory work (0.07 to 0.13 ms) and launches (0.10 ms) are about 3% together.
-- The key loop was slow: a warp held one 512-byte row in flight at a time, then did 40 shuffle-reductions for it, because the loop ran over the maximum of 8 query-head groups when this model has 2. The value loop issued one load at a time.
-- Realistic floor: a plain streaming read of the same bytes reached 199 to 245 GB/s (3.8 to 4.7 ms), so with merge and launches the kernel was about 2x above the floor, not 4 to 5x.
-
-**Change** (split decode kernel only). A warp scores 4 positions at a time and loads all their rows before using any; only the real groups are reduced; 4 value rows are loaded before use. Every sum adds in the old order, so results are bit for bit the same. The attention kernels moved into their own file (a pure move).
-
-**In the engine** (`pass-cost --stages`, 4 interleaved runs per side):
-
-| | context | attention per token | key/value bandwidth | whole pass |
+| | context | attention per token | KV bandwidth | whole pass |
 |---|---|---|---|---|
-| bf16 | 1024 | 6.51 -> 3.82 ms (-41%) | 36 -> 62 GB/s | 22.6 -> 21.7 ms |
-| bf16 | 4096 | 15.75 -> 10.29 ms (-35%) | 60 -> 91 GB/s | 31.4 -> 28.0 ms (-11%) |
-| int8 | 1024 | 5.67 -> 3.54 ms (-38%) | 41 -> 66 GB/s | 14.8 -> 14.3 ms |
-| int8 | 4096 | 13.80 -> 9.31 ms (-33%) | 68 -> 101 GB/s | 22.6 -> 20.1 ms (-11%) |
+| bf16 | 4,096 | 15.75 → 10.29 ms (−35%) | 60 → 91 GB/s | 31.4 → 28.0 ms |
+| int8 | 4,096 | 13.80 → 9.31 ms (−33%) | 68 → 101 GB/s | 22.6 → 20.1 ms |
 
-**Real replies** (chat sampler, 120 tokens, 2 interleaved runs per side; both builds have the new sampler):
-
-| scenario | bf16 tok/s | int8 tok/s | energy per token (bf16 / int8) | gap p95 plain (bf16) |
-|---|---|---|---|---|
-| chat, short | 50.0 -> 50.9 (+1.7%) | 86.3 -> 84.7 (-1.9%) | 0.798 -> 0.784 / 0.462 -> 0.469 J | 24.8 -> 22.0 ms |
-| chat, 4k | 33.4 -> 37.8 (+13%) | 46.7 -> 54.5 (+17%) | 1.198 -> 1.057 / 0.857 -> 0.735 J | 34.7 -> 30.3 ms |
-| whole-file edit, 4k, guessing | 56.5 -> 62.2 (+10%) | 67.3 -> 74.0 (+10%) | 0.707 -> 0.643 / 0.594 -> 0.541 J | 59.4 -> 59.6 ms |
-
-The gain survives the cap: power stayed at 39.7 to 40.0 W, and every 4k run of the new build beat every run of the old. Short context is flat within noise (the int8 short result may be a real slowdown under 2%). Greedy output of the real model is byte for byte identical, and `verify` still passes.
+Real 4k chat replies: bf16 33.4 → 37.8 tok/s (+13%), int8 46.7 → 54.5 (+17%); short context flat. Greedy output byte-identical; `verify` passes.
 
 ### 9. Prefill attention
 
-**Problem.** Prefill uses the general attention kernel: one block of 128 threads per (token, head), 8,192 blocks per 512-token chunk, each walking every earlier position. Measured before changing anything (`bench --profile`, 3 runs after a warmup):
+Prefill attention used one 128-thread block per (token, head), each thread reading its own key row (every warp load touched 32 cache lines). It was 50% of a 512-token pass and 79% of a 2,048-token one, running at 2% of the fp32 peak. Keys are now read four values per load, each position's weight is computed once, and four value rows are loaded before use (bit-identical).
 
-| bf16 prompt tokens | TTFT | attention | share of the pass | MLP | other stages |
-|---|---|---|---|---|---|
-| 128 | 91 ms | 14.7 ms | 16% | 48.9 ms | 27 ms |
-| 512 | 537 ms | 224.7 ms | 50% | 158.4 ms | 64 ms |
-| 1024 | 1337 ms | 878 ms | 65% | 334 ms | 130 ms |
-| 2048 | 4404 ms | 3519 ms | 79% | 666 ms | 260 ms |
+| | prompt | TTFT | attention | energy |
+|---|---|---|---|---|
+| bf16 | 512 | 504 → 318 ms (−37%) | 228 → 114 ms | 6.0 → 4.2 J |
+| bf16 | 2,048 | 4378 → 2838 ms (−35%) | 3473 → 1581 ms | 85.5 → 53.2 J |
+| int8 | 2,048 | 4205 → 2748 ms (−35%) | 3360 → 1448 ms | 80.8 → 50.5 J |
 
-(int8 is the same to within a few percent.) Attention grows with the square of the prompt (x3.9 and x4.0 per doubling above 512), the other stages linearly.
-
-**Why it was slow** (standalone program, one layer of a 2048-token prefill, 113.6 ms):
-
-- At 2048 tokens there are 0.94 billion (token, head, position) triples, about 481 GFLOP. In 3.4 s that is 0.14 TFLOP/s, about 2% of the fp32 peak, so arithmetic was not the limit. A layer's keys and values (16.8 MB) fit in the L2 and occupancy was 100%, so neither memory nor occupancy was the limit.
-- Each thread scores one position by reading its own key row, so every warp load touches 32 different cache lines. Removing the value loop left 83% of the time, removing the key read left 30%, and softmax plus barriers cost 0.7 ms. Computing `expf` once per position (my first guess) changed nothing alone (1.003x). No profiler is installed here, so "limited by the load pipeline" is inferred from these variants.
-
-**Change** (general kernel only). Keys are read four values per load (when the head size is a multiple of 4), each position's weight is computed once by the thread that scored it, and four value rows are loaded before use. Sums keep their old order, so results are bit for bit the same. Registers 40 to 47, occupancy 100% to 83%.
-
-| variant (one layer, isolated) | time vs old kernel |
-|---|---|
-| exp once + 4 value loads | 0.90x |
-| float4 keys | 0.67x |
-| float4 keys + 4 value loads | 0.49x |
-| **float4 keys + exp once + 4 value loads (shipped)** | **0.44x** (114.5 -> 52.1 ms) |
-| warp per position with shuffles (not bit-identical) | 0.56x |
-
-**In the engine** (`bench --prompt-tokens N --tokens 2 --runs 3 --warmup 1 --profile --sample-gpu`, old, new, new, old per row):
-
-| | prompt tokens | TTFT | attention (profiled) | rest of the pass | GPU clock | energy |
-|---|---|---|---|---|---|---|
-| bf16 | 128 | 84.6 -> 85.2 ms (+0.8%) | 14.3 -> 6.0 ms | 75 -> 81 ms | 1732 -> 1672 MHz | 0.6 -> 0.6 J |
-| bf16 | 512 | 504 -> 318 ms (-37%) | 228 -> 114 ms | 228 -> 354 ms | 1724 -> 1766 MHz | 6.0 -> 4.2 J |
-| bf16 | 1024 | 1359 -> 1044 ms (-23%) | 910 -> 409 ms | 475 -> 611 ms | 1954 -> 1566 MHz | 24.3 -> 17.3 J |
-| bf16 | 2048 | 4378 -> 2838 ms (-35%) | 3473 -> 1581 ms | 902 -> 1262 ms | 2074 -> 1532 MHz | 85.5 -> 53.2 J |
-| int8 | 128 | 92.5 -> 76.6 ms (-17%) | 15.3 -> 4.9 ms | 74 -> 74 ms | 2092 -> 1830 MHz | 0.7 -> 0.6 J |
-| int8 | 512 | 584 -> 326 ms (-44%) | 219 -> 119 ms | 223 -> 376 ms | 1886 -> 1800 MHz | 7.7 -> 4.8 J |
-| int8 | 1024 | 1428 -> 984 ms (-31%) | 893 -> 388 ms | 474 -> 593 ms | 1928 -> 1624 MHz | 25.2 -> 17.4 J |
-| int8 | 2048 | 4205 -> 2748 ms (-35%) | 3360 -> 1448 ms | 879 -> 1172 ms | 2100 -> 1538 MHz | 80.8 -> 50.5 J |
-
-A real 3,563-token prompt through the normal path (old, new, new, old): bf16 first token 11.79 and 11.53 s -> 7.04 and 6.90 s (-40%); int8 12.36 and 12.08 s -> 7.27 and 7.01 s (-42%).
-
-- Attention is 45 to 57% shorter from 512 tokens up, matching the 2.25x seen in isolation. At 2048 tokens the prefill's energy falls 37 to 38%. Memory is unchanged (the kernel allocates nothing; process peak 854 to 855 MB for bf16).
-- The cap takes part back: the rest of the pass slows (bf16, 2048: 902 -> 1262 ms) and the clock falls while power stays at the cap. Attention saved 1,892 ms and TTFT fell by 1,540 ms.
-- Short prompts: no regression (bf16 128 is within noise, int8 128 is faster).
-- **Correctness:** bit-identical to the old logic at 21 chunk starts; greedy replies of the real model are byte for byte identical for a short and a 3.6k-token prompt, bf16 and int8; `verify` shows the same logit differences as before (1.72e-5, 2.67e-5, 1.91e-5 against 5e-4 allowed). `compute-sanitizer --tool racecheck` finds the same 3,748 warnings and 0 errors as the old kernel (from the shared `block_max` helper); with the new barrier removed it reports 9,413 errors.
-- **Tests** added to `attention.rs`: more than 8 tokens (the only way to reach this kernel), awkward history lengths, head sizes 10, 13, 18 and 30. A wrong weight, a dropped tail loop and the vector load for every head size each make them fail. Removing the barrier does not, which is why the race check was run.
-- Attention is still the largest stage: 56% of the 2048-token pass (1,581 of 2,843 ms). Candidates, not measured: the two query heads that share keys read the same rows in separate blocks, and no key or value row is reused across tokens, which a tile-based kernel would fix.
+A real 3,563-token prompt: first token 11.8 s → 7.0 s (−40%). The power cap took part back (the rest of the pass slowed). Greedy replies byte-identical; `compute-sanitizer racecheck` finds the same warnings as the old kernel and no errors.
 
 ### 10. Keeping the cache between chat turns
 
-**Problem.** `generate` emptied the KV cache at the start of every reply, so each chat turn read the whole conversation again: system message, every earlier question and answer, then the new question. A turn after 4,000 tokens of history paid a 4,000-token prefill (about 9 s here) to read one new sentence.
-
-**Change.** The chat session keeps a record of the exact token ids the cache holds. The next prompt keeps the cached positions it shares with that record from the first token on (the longest common prefix, compared id by id), cuts the cache back there, and reads only what follows. Nothing else changes: no paging, the same contiguous f32 cache, the same kernels.
+*Problem.* `generate` emptied the KV cache at every reply, so a turn after 4,000 tokens of history paid a 4,000-token prefill (about 9 s) to read one new sentence. *Change.* The chat session records the exact token ids the cache holds; the next prompt keeps the longest shared start, cuts the cache back to it, and reads only what follows.
 
 ```text
-cached ids : A B C D E F
-new prompt : A B C D E F G H I   -> keep 6, read G H I
-new prompt : A B C X Y           -> keep 3 (A B C), read X Y
+cached : A B C D E F
+turn 2 : A B C D E F G H I   -> keep 6, read G H I
+edited : A B C X Y           -> keep 3, read X Y
 ```
 
-**Rules for trusting the cache**
+The record is written only after a reply ends cleanly and is cleared on any error, so a half-written cache is never trusted. Qwen3's template drops earlier reasoning blocks, so a turn rereads the last answer, the new question and the framing (52 tokens).
 
-| Situation | What happens |
-|---|---|
-| New session, new model, tokenizer or `--ctx` | record is empty, whole prompt is read |
-| Reply ends normally (stop token, length limit, full context, cancelled) | record = prompt + every generated token that was fed back (all after a stop token, all but the last otherwise, never the stop token) |
-| Reply fails | record is cleared first, so whatever the failed pass wrote is never trusted |
-| Guesses rejected | cache and record are cut back together |
-| Record length differs from the cache length | nothing is kept |
-| Prompt is invalid or too long | refused before anything changes |
-| `/profile`, next-token view, `spec-bench` touch the cache | they go through `Session::engine_and_kv`, which clears the record |
-| `bench`, `spec-bench`, `guess generate` | still read every prompt from scratch |
-| Prompt equals the cache | the last token is still read (the pass needs one to produce logits) |
+| Qwen3-1.7B, last turn | prompt | read | TTFT kept | TTFT replay | change |
+|---|---|---|---|---|---|
+| bf16, after 2,280 tokens | 2,328 | 52 | 158 ms | 3,324 ms | −95% (21x) |
+| bf16, after 4,142 tokens | 4,190 | 52 | 264 ms | 9,293 ms | −97% (35x) |
+| int8, after 4,142 tokens | 4,190 | 52 | 244 ms | 8,955 ms | −97% (37x) |
+| first message edited (4.1k) | 4,193 | 4,162 | 9,469 ms | 9,417 ms | +1% (an edit costs nothing extra) |
 
-Qwen3's template drops the empty reasoning block from earlier answers, so a turn keeps everything up to the last `<|im_start|>assistant` marker and reads the last answer, the new question and the framing again (52 tokens in the runs below).
+Replies were identical between kept and replay in every row, bf16 and int8; energy 44 J against 400 J at 4.1k. GPU tests (`crates/model/tests/reuse.rs`) compare a kept cache with a fresh read for greedy and sampled replies, with and without guessing, across edits, stop tokens and cancelled replies. Thirteen deliberate breaks were each caught. Limits: 32-token greedy replies, one conversation shape; a near-tie flipped by rounding could still appear in a long or sampled reply (none did).
 
-**Correctness**
+### 11. Paged KV cache
 
-- **Unit and CPU tests:** a fake model that reads its history back out of the cache checks exact-prefix, partial, zero and shorter prefixes, mid-history divergence, stop token, cancellation, failure, guessing on and off, and the context limit. A CPU chat test compares 6-turn chats with a full replay. Thirteen deliberate breaks (prefix match, truncation, record after a rollback or failure, forgetting in the session tools) all make a test fail.
-- **GPU tests** (`crates/model/tests/reuse.rs`): a kept cache against a fresh read on bf16 and int8, greedy and sampled (temperature 0.7 and 1.2), with and without guessing ahead, across 3-turn chats, an edit mid-history, a stop token and a cancelled reply. Breaking the truncation, the guess rollback or the prefix match fails them (the guess-rollback break fails only the GPU tests, so guessing really fires in them).
-- **Rounding:** a kept position was computed by a pass of a different length than a full replay uses, so logits could differ in the last bits, as with guessing ahead. No token changed anywhere we looked.
-- `verify` against Hugging Face is unchanged (1.72e-5, 2.67e-5, 1.91e-5 against 5e-4 allowed).
+*Problem.* The cache reserved the whole `--ctx` window for every layer at load (1.88 GB of KV at `--ctx 8192` even for a 64-token chat; GPU peak 6.11 GB). Section 10 removed repeated *compute*; paging removes repeated *reservation*.
 
-**Results, Qwen3-1.7B chat** (`marin-run turns`, greedy, 32-token replies, `--ctx 5120`, 3 timed rounds after a warmup, kept and replay interleaved; median with min..max). The conversation is a system message plus story exchanges built from the fixed benchmark sentence, then "What does a lighthouse keeper do?", the model's reply, and "And what about at night?". The last turn is timed. "Replay" clears the record first, which is what every turn did before. "Edited" changes the first message, so only the system message is shared.
+*Change (GPU only).* A page is 64 positions of every layer's keys and values (14 MiB). Pages are allocated in slabs of 8 (112 MiB) the first time one is needed, laid out `[layer][keys, values][page][row]` so a layer's keys stay contiguous. A `PagePool` hands out ids (freed ids reused first), a `PageTable` maps logical page → id, and the three attention kernels follow the table (`p` → page `p/64` → slab `id/8`, slot `id%8` → row `p%64`). `truncate` returns whole pages to the pool; nothing is freed on the GPU until the session ends.
 
-| bf16 | prompt | kept | read | TTFT keep | TTFT replay | change | energy keep / replay |
-|---|---|---|---|---|---|---|---|
-| short, then a second turn | 96 | 44 | 52 | 80.8 ms (80.0..81.3) | 114.1 ms (108.5..115.5) | -29% | 27.4 / 28.6 J |
-| same, first message edited | 99 | 31 | 68 | 103.1 ms (100.4..103.6) | 112.8 ms (107.9..116.6) | -9% | 28.0 / 28.9 J |
-| after 2,280 tokens | 2,328 | 2,276 | 52 | 158.2 ms (158.0..159.6) | 3,324 ms (3,310..3,492) | -95% (21x) | 34.9 / 161.4 J |
-| same, edited | 2,331 | 31 | 2,300 | 3,292 ms (3,281..3,293) | 3,323 ms (3,306..3,326) | -1% | 160.2 / 161.7 J |
-| after 4,142 tokens | 4,190 | 4,138 | 52 | 264.2 ms (250.8..272.1) | 9,293 ms (9,137..9,366) | -97% (35x) | 44.2 / 399.7 J |
-| same, edited | 4,193 | 31 | 4,162 | 9,469 ms (9,399..9,758) | 9,417 ms (9,254..9,513) | +1% (overlap) | 413.6 / 410.9 J |
-
-| int8 | prompt | kept | read | TTFT keep | TTFT replay | change | energy keep / replay |
-|---|---|---|---|---|---|---|---|
-| short, then a second turn | 96 | 44 | 52 | 85.7 ms (82.9..88.3) | 117.0 ms (110.7..120.5) | -27% | 17.6 / 18.5 J |
-| same, first message edited | 99 | 31 | 68 | 107.2 ms (102.6..109.3) | 114.2 ms (109.6..118.4) | -6% | 18.2 / 18.7 J |
-| after 2,280 tokens | 2,328 | 2,276 | 52 | 154.3 ms (152.8..157.6) | 3,505 ms (3,352..3,587) | -96% (23x) | 24.8 / 159.5 J |
-| same, edited | 2,331 | 31 | 2,300 | 3,502 ms (3,394..3,532) | 3,536 ms (3,457..3,661) | -1% | 155.0 / 161.2 J |
-| after 4,142 tokens | 4,190 | 4,138 | 52 | 244.4 ms (244.1..247.8) | 8,955 ms (8,954..8,962) | -97% (37x) | 34.0 / 382.2 J |
-| same, edited | 4,193 | 31 | 4,162 | 8,951 ms (8,937..8,951) | 8,991 ms (8,974..9,001) | -0.4% | 381.2 / 382.7 J |
-
-- **Replies** were identical between kept and replay in every row and every round, bf16 and int8.
-- **Tokens not read:** 2,276 of 2,328 (97.8%) after 2.3k tokens of history and 4,138 of 4,190 (98.8%) after 4.1k. The 52 that are read are the last answer, the new question and the template framing; reading them over 4.1k kept positions takes about 0.25 s.
-- **An edit costs nothing extra.** With the first message edited the turn reads almost everything again and takes the same time as a replay (within 1% at 2.3k and 4.1k). The short edited row is 6 to 9% faster only because the 31 shared tokens are skipped.
-- **Prefill time** equals TTFT to within 0.3 ms, so the whole saving is prefill.
-- **Energy** is mean GPU power times the time of the whole turn (prompt pass plus 32 reply tokens), so the kept turn still pays for its decode: 34 to 44 J against 382 to 415 J at 4.1k. The GPU sat at the cap throughout (a spot reading: 39.8 W at 1,410 MHz), so energy follows time.
-- **Peak VRAM** is the device's used memory sampled between tokens, with about 1 GB of desktop programs, so it differs between runs (int8 at 4.1k read 5,001 MB, then 4,040 MB when repeated). In every pair the kept turn read the same or lower, by 0 to 76 MB, except one short int8 pair that read 339 MB lower; that is mostly desktop noise (a replay's larger prefill workspaces may explain the small gap; not checked). The cache is reserved in full at load whatever it holds, so keeping it adds no memory.
-- **The 4.1k int8 pair ran twice:** the first run was cut off before its edited pair, so those rows are a repeat of that case alone. The first run's unedited rows agree: 264.9 ms against 9,745 ms (37x).
-
-**With guessing ahead on the real model** (`turns --speculate --ask "Repeat your last answer exactly, word for word." --history 0,2048,4096 --reply-tokens 128 --rounds 2 --ctx 5120 --no-energy`). The repeat copies earlier text, so the 8-token rule fires; on a fresh answer it hardly does (0 of 7 drafted tokens right in a first try). A kept cache and a full replay, both guessing, gave identical replies in all 24 rows, bf16 and int8, with guesses accepted and rejected so the rollback ran.
-
-| | short | 2.3k history | 4.1k history | tokens accepted / drafted |
-|---|---|---|---|---|
-| bf16 kept / replay TTFT | 156 / 182 ms | 370 / 3,633 ms | 777 / 9,787 ms | 12/21, 24/42, 18/28 |
-| int8 kept / replay TTFT | 143 / 156 ms | 361 / 3,651 ms | 777 / 9,787 ms | 28/42, 20/42, 8/14 |
-
-These turns read 140 to 152 tokens instead of 52 because the previous 128-token answer and the longer question are read again. This checks that tokens are equal, not what guessing gains.
-
-**Limits.** Greedy replies of 32 tokens in the main tables, one conversation shape, 2 to 3 rounds per row. A near-tie that a rounding difference flips could still appear in a longer or sampled real reply; none did in the real-model runs or in the GPU tests on the test model with sampling and guessing ahead.
-
-### 11. Paged KV cache (V4)
-
-**Problem.** The cache reserved the whole `--ctx` window for every layer at load, whatever the conversation held. At `--ctx 8192` a 64-token chat reserved 1.88 GB of KV (224 KiB per token) and the GPU peaked at 6.11 GB (tables in the appendix). Keeping the cache between turns (section 10) removed repeated *compute*; paging removes repeated *reservation*. They are separate: reuse decides which positions are valid, paging decides how much memory holds them.
-
-**Change** (GPU only; the CPU cache stays contiguous):
-
-| Part | What it is |
-|---|---|
-| Page | 64 positions, keys and values of every layer: 64 x 229,376 B = 14 MiB |
-| Slab | 8 pages (112 MiB) allocated at once, the first time one of its pages is needed. Inside: `[layer][keys, values][page][row][kv_head][head_dim]` |
-| `PagePool` | hands out page ids; freed ids are reused first, most recently freed first; the limit is `ceil(ctx / 64)` |
-| `PageTable` | one sequence's logical page -> page id; a device copy holds each page's address and changes only when a page is added |
-| Lookup | position `p` -> page `p / 64` -> table -> slab `id / 8`, slot `id % 8` -> row `p % 64` |
-
-```text
-position p -> page p/64 -> table -> page id -> slab (id/8), slot (id%8) -> row p%64
-```
-
-| Event | What happens |
-|---|---|
-| Append `n` tokens | `write` reserves pages for `[len, len + n)` (idempotent, so every layer asks for the same ones), maps new pages into the table, and copies each page's run with one keys copy and one values copy |
-| `truncate(len)` | pages beyond `ceil(len / 64)` go back to the pool, nothing is freed on the GPU, and the next growth reuses them first |
-| `clear` | `truncate(0)` |
-| Past the window | an error before anything is allocated, as before |
-| Attention | refused unless every page below the visible length is mapped (the safety check for the table the kernels follow) |
-| Cross-turn reuse | unchanged: the record decides how far to `truncate`, the cache gives back whole pages and keeps the shared start |
-| Guessing ahead | unchanged: a rejected guess rolls back with `truncate`, which frees at most one page, reused by the next pass |
-
-The three attention kernels (prefill, one-token decode, few-token) only change how they find a row; every sum adds in the old order.
-
-**Correctness**
-
-- Tests: 9 bookkeeping tests that need no GPU (page counts at 0, 1, 63, 64, 65 tokens, the window edge, reuse after free, truncating inside, at and across pages, two sequences sharing a pool, a randomized check) and 12 GPU tests against the f64 reference (every 64-boundary, token-by-token growth, reversed and mixed page tables, rollback cycles like guessing, a window that is not a page multiple, refusing unmapped pages).
-- Replies are byte-identical to the contiguous build: 20 of 20 (greedy and sampled, bf16 and int8, five prompts from a few tokens to about 4,000). `verify` shows the same logit differences as before (1.72e-5, 2.67e-5, 1.91e-5 against 5e-4 allowed).
-- Kept cache against full replay on the paged cache: 24 of 24 rows identical, and with guessing ahead 24 of 24 again (accepted of drafted per reply: bf16 12/21, 24/42, 18/28; int8 28/42, 20/42, 8/14), so rollbacks across page boundaries ran.
-- 17 deliberate breaks, each caught by a failing test: wrong page, row or slot; values read from or written over the keys (in each kernel and the host write); kernel and host disagreeing on page or slab size; the layer offset; truncate keeping or freeing the wrong pages; page counts at multiples of 64; the mapped-pages safety check removed.
-- 498 tests passed at the end of V4 and 512 after the V4.1 pass below, with no GPU skips.
-
-**What the lookup cost, and the two designs that failed first**
-
-| Design | Result | Verdict |
-|---|---|---|
-| Table lookup in the prefill kernel for every group of four value rows | 2048-token prefill TTFT +9.1% (2,591 -> 2,827 ms), attention +17.4%; at 512 tokens attention +33% | Rejected: each group of four loads waited on a pointer load |
-| One lookup per page of value rows; one 14 MiB allocation per page, laid out `[page][layer][keys, values]` | 512 and 2048 tokens: TTFT +0.5% and +0.2%. At **4096 tokens: TTFT +12.9%** (8,009 -> 9,039 ms), energy +13% | Rejected: at the same ~38.9 W the mean clock fell 11.6% (1,456 -> 1,287 MHz) and every stage slowed, the untouched matmuls too (MLP +10.8%) |
-| Same lookup, **slabs of 8 pages laid out `[layer][keys, values][page]`** | 4096 tokens: TTFT +2.3% in the profiled A/B, +4.0% in the plain one; clock -1.9%; energy +2.5% | Kept |
-
-What the third design changed is where a layer's keys sit: in the second a layer's keys for 4,096 positions were 64 slices of 256 KiB spread 14 MiB apart; in the third they are contiguous in runs of 512 positions. That the layout, not the lookup, was the cause rests on the clock and every stage slowing under the same power cap and on the layout change removing it; no profiler is installed here, so the memory-system mechanism is not measured. Decode and few-token attention showed no lookup cost in either layout.
-
-**Speed against the contiguous build** (final build, A B B A, medians, 40 W cap held):
-
-| precision | context | tokens/s base -> paged | change | p95 token gap | TTFT change | energy per token |
-|---|---|---|---|---|---|---|
-| bf16 | 128 | 51.09 -> 51.17 | +0.2% | 20.81 -> 20.71 ms | -0.3% | 0.76 -> 0.76 J |
-| bf16 | 2048 | 44.95 -> 44.30 | -1.5% | 23.20 -> 23.73 ms | +0.3% | 1.38 -> 1.39 J |
-| bf16 | 4096 | 37.12 -> 36.08 | -2.8% | 27.69 -> 28.63 ms | +4.0% | 2.70 -> 2.79 J |
-| int8 | 4096 | 51.64 -> 49.91 | -3.3% | 19.92 -> 20.62 ms | +3.7% | 2.41 -> 2.49 J |
-
-- Prefill (profiled, bf16): 512 tokens TTFT +1.2% (attention -2.4%), 2048 tokens +0.1% (attention +0.5%), 4096 tokens +2.3% (attention +3.0%).
-- Chat turns on the paged cache (section 10's benchmark again): first token after 4.1k tokens of history 251 ms kept against 8,842 ms replayed in bf16 (35x) and 240 against 8,801 ms in int8 (37x), replies identical.
-- **Short-context sanity check** (not a full benchmark: context 128, 1 warmup, 2 timed rounds, one INT8 tie-break): few-token attention differs by 0.2 ms or less with mixed signs (bf16 1 / 2 / 4 / 8 tokens: 1.38 -> 1.31, 3.15 -> 3.04, 2.63 -> 2.73, 4.00 -> 4.13 ms) and whole bf16 passes are within +2.8% to -0.4%. INT8 first read -9.2% and +10.7% on the 1- and 2-token passes, the reversed tie-break +3.4% and -6.1%, and the two-run means -3.1%, +2.0%, +0.9%, -1.1%: noise. An earlier run on the second layout agreed (attention within -3.4% to +3.4%, one -11.6% row at 128 tokens). A longer four-run comparison was stopped for taking too long; its partial output is not used.
-- Decode at 2 to 4k is 1.5 to 3.3% slower with a slightly lower clock. This build allocates a slab of 112 MiB every 512 tokens during decode; the plain benchmark reports p95 only, so the allocation spikes themselves were not measured.
-
-**Memory** (`bench --ctx 8192`, GPU peak is device-wide with about 1 GB of desktop programs; live positions = prompt + 1):
-
-| live positions | pages used | KV held | bf16 peak, paged / contiguous | int8 peak, paged / contiguous |
-|---|---|---|---|---|
-| 64 | 1 | 117 MB | 4.34 / 6.11 GB | 2.66 / 4.44 GB |
-| 65 | 2 | 117 MB | 4.34 | 2.66 |
-| 512 | 8 | 117 MB | 4.37 | 2.73 |
-| 2,048 | 32 | 470 MB | 4.74 | 3.06 |
-| 4,096 | 64 | 940 MB | 5.21 / 6.15 | 3.53 / 4.47 |
-| 8,000 | 125 (of 128) | 1.88 GB | 6.15 / 6.11 | 4.47 / 4.47 |
-
-KV memory now follows the live tokens, rounded up to a slab. Pages used x 14.7 MB matches the formula (64 pages = 940 MB, the same as 4,096 x 224 KiB). At 64 live tokens the cache holds 117 MB, not 1.88 GB, and the peak drops 1.8 GB. At 8,000 of 8,192 the two builds are equal, as they should be.
-
-**Waste, honestly.** Two layers of rounding: the last page may be nearly empty (up to 63 positions, 14.4 MiB) and the last slab may hold up to 7 unused pages (103 MiB). A 65-token chat uses 2 pages (29 MB) inside a 117 MB slab, so 75% of what is held is unused; at 8,000 tokens 125 of 128 pages are used. Slabs of 8 were chosen because the one-allocation-per-page layout cost +13% at 4k; slab sizes between 1 and 8 were not tried.
-
-**Slab-boundary token latency.** A slab is allocated when the sequence first needs one of its pages, so one decode step in 512 allocates. `bench --json` records every token's latency; a fresh process per row, three rows each. Run 1 allocates the next slab at the boundary; run 2 in the same process reuses it, so the same token position is compared with and without the allocation. Token gaps in ms (prompt 1000 for the 1024 rows, where the GPU is already warm after a long prefill, and 480 for the others):
-
-| precision | boundary | token at the boundary, run 1 (allocates) | same token, run 2 | its 12 neighbours, run 1 (median) |
-|---|---|---|---|---|
-| bf16 | position 1024 | 15.6, 15.6, 16.6 | 17.1, 18.4, 20.0 | 15.7 |
-| int8 | position 1024 | 10.8, 10.7, 11.0 | 10.2, 10.3, 10.4 | 10.2 |
-| int8 | position 512 | 9.6, 12.2, 9.8 | 8.6, 9.6, 9.3 | 9.5 |
-| int8 | page boundary 576, no allocation | 9.1, 9.0, 9.1 | 12.2, 10.4, 10.4 | 9.3 |
-
-The allocating token costs the same as its neighbours, within about 1 ms, and the worst single sample was +2.7 ms (int8 at 512). BF16 and INT8 do not differ in a way that matters. The allocation itself was not timed (it is asynchronous, and a 112 MiB memset is about 0.4 ms at the 300 GB/s `probe` measured), so "harmless" here rests on the token gaps. One row is excluded: bf16 with a 480-token prompt, boundary 512, where every token near it is ~40 ms against 16 in run 2. That slow stretch starts at tokens 23 to 26, before the allocation at token 32, in all three processes, and run 2 never shows it, so it is the cold GPU settling under the 40 W cap, not the allocation. No fix is needed.
-
-**What `--ctx` and the startup check mean now.** Before, the load-time check asked whether the weights plus the KV for the whole `--ctx` window plus 512 MiB fit. With a 32,768-token window that is 11.5 GB: `--backend cuda` refused (7,277 MB free), and `--backend auto` quietly moved to the CPU, which refused too (11.2 GB needed, 9.5 GB available). Now:
-
-- `--ctx` is the logical maximum length, not a reservation.
-- The GPU must have room for the weights, the first slab (112 MiB), the page table and the split-attention scratch (about 9 MB at `--ctx` 8192, 34 MB at 32768), plus the 512 MiB slack. If not, it is refused (`cuda`) or the CPU is used (`auto`), as before.
-- If the whole window would not fit, the GPU is still used and a note says so: `note: the GPU has 7277 MB free but the whole --ctx window needs about 11494 MB: a conversation that fills it will stop with an out-of-memory error`. Nothing is silently overcommitted.
-- The CPU path still reserves and checks the whole window. `inspect` shows both figures ("up to X for this context, Y before the first token on the GPU").
-
-Checked on the real model: `--ctx 32768` with a short prompt answered on the GPU in both `cuda` and `auto`; the old binary refused both.
-
-**When the GPU cannot allocate another slab.** The allocation happens in the first layer's write of a pass, before anything of that pass is written. A failure returns `CudaError::KvMemory { held, needed, positions }` and then:
-
-- the length does not advance, the page table and the device table are unchanged (the pages taken for the attempt are returned), and no page is counted as held that has no storage; a second attempt fails the same way;
-- attention refuses the page that was never mapped; what is cached still reads correctly, and the cache can be cleared and refilled inside the slabs it has;
-- a failed run leaves the cross-turn record empty (it is taken at the start of every run), and so does a failure in the middle of a guessing run: the next turn reads from scratch and equals a fresh read;
-- the CLI says `error: the GPU could not allocate 117440512 more bytes for the KV cache, which holds 3640655872 bytes for 15872 positions: ...`, with the hint to close other programs, start a new chat or use `--backend cpu`.
-
-Tested with a slab larger than half the GPU, so the first fits and a second never can on any GPU, with nothing depending on how much is free (a first version that filled the GPU by hand was flaky, because the driver refuses very large allocations and small ones near the limit on its own, and was replaced). Two deliberate breaks, removing the rollback and counting handed-out ids as held pages, are each caught. End to end, a ~19,000-token prompt at `--ctx 32768` on the real model stopped after 31 slabs (15,872 positions, 3.64 GB held) with the error above and exit code 1, no panic, and the GPU memory was released when the process ended.
-
-**Freed pages are reused.** A rollback returns whole pages to the pool, and regrowing takes them first: 600 tokens (10 pages, 2 slabs), truncate to 100, regrow to 600 made 0 GPU allocations (counted), kept the same bytes and the same 10 physical pages, and read correctly. Slabs are kept until the session ends, as under "Limits".
-
-**Boundary coverage** (tests): page and slab boundaries (63/64/65, 511/512/513, 1023/1024/1025) across every kernel; truncating exactly on a page boundary and across a slab; rejected guesses across a page and across a slab; cross-turn reuse after a truncate; a window that is not a multiple of 64, smaller than a page, filled exactly and one token past it; a slab that cannot be allocated and a failure in the middle of a guessing run.
-
-**Limits**
-
-- Memory is not returned to the driver while a session lives: freed pages go back to the pool and the slabs stay allocated (a high-water mark).
-- The smallest cache is one 117 MB slab, even for a window under 512 tokens.
-- The split-attention scratch is still sized for `--ctx` (about 1 KB per position, 8 MB at 8192).
-- Prefill at 4k costs +2 to +4% TTFT and decode at 2 to 4k 1.5 to 3.3%. That is the price of the memory saving above.
-- Not tested: windows over 8,192, other models, more than one live sequence on the GPU (the pool and tables support it, nothing uses it yet).
-
-**New bottleneck.** KV is no longer the memory floor: at 64 live tokens the GPU holds the weights (3.44 GB bf16, 1.77 GB int8) plus a slab. Prefill attention is still 72% of a 4096-token prefill and one-token attention 32% of a decode step.
-
-**What it unlocks (V5, V6, V7)**
-
-- **V5, tiering.** A page is the unit that moves between VRAM, pinned RAM and disk (512 KiB per layer is a sensible copy size). Decoding one token reads every position (0.94 GB per token at 4096 tokens; the only PCIe figure so far is a small 608 KB copy at 6.3 GB/s), so a cold page of the *active* sequence is needed every step. Tiering pays for parked sessions, shared prefixes and cold history, not the sequence being decoded now.
-- **V6, prefix reuse.** Sequences share leading pages by reference count; only a diverging partial page is copied or recomputed (at most 63 tokens). Sharing is page-granular: a 3,500-token system prompt shares 54 of its 55 pages. A hash of each full page's tokens finds a reusable page.
-- **V7, batching.** One pool serves many sequences: a table per sequence, admission control is the number of free pages, and a sequence no longer reserves its worst case.
-- **Quantized KV** fits naturally: a scale per page and head can live in the page.
-
-**In plain words**
-
-While the model writes, it keeps a notebook of everything it has read. Before, Marin bought a notebook big enough for the longest conversation you allow before the first word (1.88 GB at `--ctx 8192`, even for "hello"). Now the notebook is cut into sheets of 64 words, kept in binders of 8 sheets, and a new binder is only taken out when the conversation needs one. Each conversation keeps an index card ("words 0 to 63 are on sheet 17, words 64 to 127 on sheet 3"), and attention reads the sheets through it. Taking words back (a rejected guess, or a changed message) hands whole sheets back to be used next. A short chat in a big window now holds one binder, 117 MB, instead of 1.88 GB; the price is 0 to 4% in speed at long contexts, and sheets are not given back to the GPU while the session lives. Keeping the notebook between turns (section 10) and paging the notebook are different things: one saves reading, the other saves space.
-
-### 12. KV cache precision (optional f16)
-
-**Question.** Is it worth storing keys and values in fewer bits than f32 (224 KiB per token for Qwen3-1.7B)? Formats tried: bf16, f16, q8 (one signed byte per value plus one f32 scale per token and kv head). Attention math stays f32 and paging is unchanged.
-
-**Pass/fail rules, fixed before any code was written.** Compared with f32 KV and the same weights, using `marin-run quality` on 4096 tokens of two texts (Vim release notes, this repository's Rust code), with bf16 and int8 weights:
-
-| Gate | Passes if |
-|---|---|
-| Loss | at most +0.30% on both texts (int8 weights cost +0.03% and +0.11%) |
-| Agreement | same first choice at 97.5% or more of positions on both texts |
-| Real replies | 8 fixed prompts, greedy, 100 tokens: at least 6 identical to f32's, none broken |
-| Memory | at most 55% of f32 bytes per token |
-| Speed | decode at 2k and 4k at most 3% slower, first token after 4k at most 5% slower (interleaved runs, non-overlapping ranges count) |
-| Correctness | paging, reuse, guessing and weight-format tests pass; kernels match an f64 reference computed from the stored values |
-
-A format that fails a quality gate is dropped. If two pass, only the better one is kept. A format becomes the default only if it also beats f32 at 4096 tokens on decode and loses at most 0.15% loss and 1 point of agreement.
-
-**Outcome.** f16 is kept as an option (`marin-run ... --kv-type f16`). bf16 and q8 were removed from the code. f32 stays the default and the reference.
-
-Measured on Qwen3-1.7B-Base, 40 W cap. Speed is the median of four interleaved rounds (old f32 build, new f32, bf16, f16, q8, then reversed, twice), 128 tokens decoded.
-
-**Memory**
-
-| | bytes per token | KV held, 64-token chat | KV held, 4096 positions |
+| live positions | KV held | bf16 peak, paged / contiguous | int8 peak, paged / contiguous |
 |---|---|---|---|
-| f32 | 229,376 | 117 MB | 1,057 MB |
-| bf16, f16 | 114,688 (50%) | 59 MB | 528 MB |
-| q8 | 59,136 (26%) | 30 MB | 272 MB |
+| 64 | 117 MB | 4.34 / 6.11 GB | 2.66 / 4.44 GB |
+| 2,048 | 470 MB | 4.74 | 3.06 |
+| 4,096 | 940 MB | 5.21 / 6.15 | 3.53 / 4.47 |
+| 8,000 | 1.88 GB | 6.15 / 6.11 | 4.47 / 4.47 |
 
-**Quality against f32 KV** (same first choice / loss change; Vim | code)
+Speed against the contiguous build (A B B A, 40 W): decode −1.5% at 2k and −2.8% (bf16) / −3.3% (int8) at 4k, TTFT +0.3% at 2k and +4.0% at 4k.
 
-| | bf16 weights | int8 weights | Result |
-|---|---|---|---|
-| bf16 KV | 99.6% / -0.01% \| 99.8% / 0.00% | 99.9% / -0.02% \| 99.9% / +0.01% | pass |
-| f16 KV | 99.9% / 0.00% \| 99.9% / 0.00% | 100% / 0.00% \| 100% / 0.00% | pass |
-| q8 KV | 95.5% / +0.88% \| 97.5% / +0.56% | not run | fail |
+**Two designs failed first.** A table lookup per group of four value rows in prefill gave +9.1% TTFT at 2,048 tokens. One 14 MiB allocation per page (`[page][layer][keys, values]`) gave +12.9% TTFT at 4,096 tokens: the clock fell 11.6% at the same power and every stage slowed. The kept layout (slabs, keys contiguous) costs +2–4%.
 
-Real replies identical to f32's for 100 tokens: f16 8 of 8, bf16 6 of 8, q8 1 of 8. Two of the prompts were 2,000-token documents.
+**`--ctx` now means** the longest conversation allowed, not a reservation. Starting needs the weights, one slab and a small scratch; if the whole window would not fit, a note says so and a conversation that fills the GPU stops with a clear out-of-memory error (`the GPU could not allocate N more bytes for the KV cache…`). On a failed allocation the cache length and tables are unchanged, the cross-turn record is cleared, and the process exits cleanly (tested, including a real ~19,000-token prompt at `--ctx 32768`).
 
-**Speed** (decode tokens per second; first token in ms after a prompt of 127 / 2047 / 4095 tokens)
+**Correctness.** 9 bookkeeping tests and 12 GPU tests against the f64 reference (every 64-boundary, reversed and mixed page tables, rollbacks, unmapped pages refused); 20 of 20 replies byte-identical to the contiguous build; `verify` unchanged; kept-cache and guessing runs identical; 17 deliberate breaks each caught.
 
-| | decode 128 | decode 2k | decode 4k | first token 128 | first token 2k | first token 4k |
+**Limits.** Memory is not returned to the driver during a session; the smallest cache is one 117 MB slab; up to 63 positions and 7 pages of rounding waste; the split-attention scratch is still sized for `--ctx`; windows over 8,192 and several live sequences were not tested. Paging makes pages the unit for later work: moving them to RAM or disk (section 14), snapshots (13), sharing (not built).
+
+### 12. KV cache precision (f16)
+
+*Question.* Is it worth storing keys and values in fewer bits than f32 (224 KiB per token for Qwen3-1.7B)? bf16, f16 and q8 (one byte per value plus an f32 scale per token and head) were tried; attention math stays f32.
+
+**Gates, fixed before any code** (against f32 KV, `marin-run quality` on 4,096 tokens of two texts, bf16 and int8 weights): loss at most +0.30%; same first choice at least 97.5%; 8 greedy replies, at least 6 identical; at most 55% of f32 bytes; decode at 2k/4k at most 3% slower and first token after 4k at most 5% slower; kernels match an f64 reference. To become a default, a format also had to beat f32 at 4,096 tokens and lose at most 0.15% loss and 1 point of agreement.
+
+| | bytes per token | same first choice (Vim / code) | loss change | replies identical | result |
+|---|---|---|---|---|---|
+| f32 | 229,376 | reference | | | default elsewhere |
+| bf16 | 114,688 | 99.6–99.9% | −0.02–0.01% | 6 of 8 | pass, but f16 is better: removed |
+| **f16** | **114,688** | **99.9–100%** | **0.00%** | **8 of 8** | **kept** |
+| q8 | 59,136 | 95.5% / 97.5% | +0.88% / +0.56% | 1 of 8 | fail: removed |
+
+q8 fails because of the *keys* (keys only: +1.10%; values only: −0.01%; one scale per 32 values cut the loss 4.4x but missed the agreement gate by 0.1 point).
+
+**Speed, f16 vs f32** (Qwen3-1.7B-Base, 40 W, four interleaved rounds): decode at 4k +6.5%, unchanged at 128 and 2k; first token 13% sooner at 2k and 19.5% sooner at 4k; energy per token at 4k 3.69 → 3.15 J. The likely reason is half the bytes read; the runs do not prove it.
+
+**Long contexts and a second model** (f16 vs f32, `--ctx 32768`):
+
+| Model | Prompt | Weights | First token | Decode | KV held | Peak GPU |
 |---|---|---|---|---|---|---|
-| old f32 (before this change) | 51.2 | 44.5 | 35.9 | 109 | 2633 | 8659 |
-| f32 | 51.3 | 44.4 | 35.5 | 108 | 2648 | 8519 |
-| bf16 | 51.6 | 44.8 | 38.0 | 111 | 2296 | 6796 |
-| f16 | 51.4 | 44.3 | 37.8 | 110 | 2316 | 6856 |
-| q8 | 51.7 | 45.3 | 37.8 | 112 | 2485 | 7416 |
+| 1.7B | 8,191 | bf16 | 39.9 → 22.1 s (−45%) | 33.7 → 35.7 (+5.9%) | 2.00 → 1.00 GB | 6.57 → 5.60 GB |
+| 0.6B | 8,191 | bf16 | 39.1 → 19.6 s (−50%) | 51.1 → 52.1 | 2.00 → 1.00 GB | 4.32 → 3.31 GB |
+| 1.7B | 16,383 | int8 | 217 → 108 s (−50%) | 26.7 → 28.3 | 3.88 → 1.94 GB | 6.80 → 4.86 GB |
+| 1.7B | 16,383 | bf16 | out of memory at 14,848 positions | 24.2 (f16) | 1.94 GB | 6.54 GB |
 
-Energy per token, prompt included: f32 0.75 / 1.66 / 3.69 J, f16 0.75 / 1.57 / 3.15 J at 128 / 2k / 4k.
+A 32,000-token prompt reads fully in f16 (3.70 GB of KV); f32 runs out at 15,872 positions. Quality at 8k–16k tokens: the same first choice at 100.0% of about 100,000 scored positions, loss change below 0.00005 nats; 40 of 40 base-model replies identical; **7 of 8 chat replies identical** (one differed at a near-tie, "test cases" against "testing").
 
-- **f16 against f32:** decode at 4k is 6.5% faster (ranges do not overlap), unchanged at 128 and 2k. First token is 13% sooner at 2k and 19.5% sooner at 4k. Prefill attention at 4k drops from 6169 to 4933 ms in the profile. The likely reason is half the bytes read; these runs do not prove it.
-- **Old against new f32:** equal within noise, except decode at 4k, 1.1% slower (inside the 3% gate, cause not investigated).
-- **bf16 against f16:** same memory and speed within noise, f16 has better quality, so bf16 was deleted.
-- **Dequantization cost** could not be separated from the saving. The per-token attention figures in `--profile` disagreed with whole-decode speed, so whole decode is the measure used.
+**Verdict.** `marin` defaults to **f16 on the GPU and f32 on the CPU**; `marin-run`, `verify`, `quality` and `bench` keep f32. `--kv-type f32|f16` overrides (an explicit f16 on the CPU is refused). Strict `verify` stays on f32 and passes (1.7e-5 to 2.7e-5); f16 fails it by design (2.83e-3 against 5e-4, the expected size of f16 rounding), and is judged by the gates above. Not lossless: one chat reply of eight changed. Open: two model sizes, one GPU, no long multi-turn chats, no f32 reference beyond 16k tokens. A pseudo-terminal test (`crates/cli/tests/marin_pty_kv.rs`) proves the flag reaches the loaded cache and survives a model switch; three deliberate breaks were caught.
 
-**Longest context** (8 GB GPU with a browser open, `--ctx 32768`, 32,000-token prompt; the model's maximum is 32,768)
+### 13. Prefix snapshot
 
-| | result |
+*What was built.* One snapshot file holds the KV cache of the last finished reply and its token ids. `marin --snapshot FILE` saves it when the session ends and, on the first prompt of the next session, loads the part the prompt shares; only the rest is read. GPU only, f32 and f16, any weights. Opt-in, because the file contains the conversation.
+
+- **File:** an 80-byte header (magic, version, KV type, layout, positions, hashes of weights, config, token ids and the header), the token ids, one hashed block per 64-position page, and an end mark. A fingerprint of weights, config, tokenizer, quantization, KV type and layout means anything foreign or damaged is ignored and the prompt is read in full.
+- **Restore rule:** the longest shared start, rounded down to whole pages (at most 63 tokens are recomputed). The token record is set only after the whole copy succeeded.
+- **Save rule:** after a normal or cancelled reply, write a temp file, fsync, rename, fsync the folder. The weight hash (0.8 s) runs on its own thread while the model loads.
+
+Restart to first token, Qwen3-1.7B-Base, separate processes, median of 3:
+
+| saved start | KV | file | re-read: first token / process | restore: first token / process | save |
+|---|---|---|---|---|---|
+| 512 | f16 | 59 MB | 316 ms / 2.62 s | 65 ms / 2.48 s | 40 ms |
+| 2,048 | f16 | 235 MB | 2149 ms / 4.42 s | 130 ms / 2.54 s | 138 ms |
+| 4,096 | f16 | 470 MB | 6517 ms / 8.82 s | 224 ms / 2.62 s | 285 ms |
+| 4,096 | f32 | 940 MB | 7177 ms / 9.49 s | 430 ms / 2.85 s | 870 ms |
+| 8,192 | f32 | 1.88 GB | 39355 ms / 41.67 s | 974 ms / 3.41 s | 929 ms |
+
+A restore is 15–50x shorter than reading the text and uses 1–2% of the GPU energy from 2k tokens up. Checksums cost about a third of a restore and stay (they make a damaged file safe). Below about 1k tokens it saves nothing a user would notice.
+
+**Same output as the live cache:** a greedy 24-token reply after restoring was identical to the saving process's reply and to a cold read in all 16 combinations of start (512–4,096), KV type and weights. Tests cover the page rule around every 64/512 boundary, truncation and flipped bits at 15 places, snapshots refused for another KV type, quantization, config, tokenizer or weights, failed saves leaving the old file, and 12 deliberate breaks. Found while building: restoring only the first pages of a longer snapshot read the end mark from the wrong place (fixed).
+
+*Why a file and not shared pages.* Marin runs one chat at a time, so there is no second live sequence to share pages with. For about 1,000 lines of code it turns 2–40 s of waiting into 0.2–1 s. Not built: shared pages, a prefix index, eviction, compression, background saving.
+
+### 14. Parking idle sessions in RAM (investigated, not built)
+
+*Question.* Is it worth copying an inactive conversation's KV to pinned RAM and back? A throwaway experiment (not in the repo) parked 2–3 sessions taking turns on Qwen3-1.7B-Base.
+
+- Pinned copies run at 13.5–13.8 GB/s (4,096 f32 = 896 MiB in 69 ms); ordinary memory 7–12 GB/s; the page-by-page snapshot path only 2–3 GB/s; cold disk reads 2–3 GB/s.
+- Switch time versus re-reading the history: 11 vs 443 ms (512 tokens, f16), 71 vs 6,808 ms (4,096 f16), 140 vs 22,765 ms (8,192 f16). **40–200x faster than re-reading, 5–6x faster than the snapshot disk path**, at about the energy of keeping every session resident.
+- It matters for memory only when live sessions together hold more than about 16k tokens in f32 (33k in f16): three 8,192-token f32 sessions ran out of memory when resident but worked when parked.
+- Parked sessions resumed bit-identically.
+
+**Verdict: no-go for now.** The gain exists only for several simultaneous conversations, and `Session` owns exactly one cache. For one conversation, snapshots (section 13) already restore a session in 0.2–1 s. Revisit together with multi-session support; the numbers and two design points (the page-pointer table must be rewritten after slabs are reallocated; memory is released a slab at a time) carry over.
+
+### 15. Draft-model speculative decoding (investigated, not built)
+
+*Question.* Would Qwen3-0.6B proposing tokens for Qwen3-1.7B beat plain decoding or the n-gram guesser on this 40 W GPU? A throwaway experiment loaded both models (identical tokenizers, 28 layers, 8 KV heads) and used the real check pass; output followed the target's samples exactly in 229 of 234 runs (the other 5 were one floating-point near-tie).
+
+Decode speed, tokens per second (Qwen3-1.7B target, f16 KV):
+
+| Weights | Workload | Plain | n-gram | Draft k=2 |
+|---|---|---|---|---|
+| bf16 | chat | 62.1 | 62.3 | 61.4 |
+| bf16 | code | 62.4 | 63.1 | 73.2 (+17%) |
+| bf16 | edit | 59.1 | 129.9 (+120%) | 77.2 (+31%) |
+| bf16 | long, 6k | 37.0 | 36.4 | 31.3 (−15%) |
+| int8 | code | 105.8 | 105.7 | 89.9 (−15%) |
+| int8 | long, 6k | 46.3 | 44.9 | 34.8 (−25%) |
+
+*Why it loses.* A 0.6B draft step still costs 43–53% of a target step at short context (28 layers of small kernels) and 79–88% at 6k (same KV size); and a 3-token check costs 1.74x one token with int8 (1.22x with bf16), so rounds rarely pay (int8 code needs 2.83 tokens per round, gets 2.47). Even a free check would give +20% at best. It also costs 0.6–1.2 GB of weights, a second KV cache that halves the longest context, and seconds of extra prompt processing.
+
+**Verdict: no-go.** The n-gram guesser already gives +70–120% on edits for no memory. Better next steps, in measured order: int8 weights in `marin` chat (section 16); a cheaper several-token pass with int8; only then a draft that shares the target's KV cache.
+
+### 16. INT8 weights in chat
+
+`marin --quantize none|int8` (with `--quant-group N`, default 128) uses the same quantizer and GPU kernels as `marin-run`. bf16 stays the default; the Model tab names the weight format; an explicit `--quantize int8` on the CPU is refused.
+
+**Bug or quantization noise?** Replies often differ from bf16's in wording. Three runs of the same text were compared: original bf16, real int8, and the same weights rounded to int8 by an independent numpy script and run on the plain bf16 path. Real int8 agrees with the ideal rounded weights at 99.6–99.8% of positions, but with the original at only 98.1–98.7%: the difference is the weight rounding (0.7% relative error per matrix), not the kernels. At about 1.5% of positions choosing another token, a 200-token greedy reply stays identical with a probability near 5%.
+
+**Correctness, not wording** (264 items scored by program: 16 Python functions with assertions, 32 facts, 12 instruction checks, 6 long-document lookups; both models, greedy and chat sampler): bf16 passes 217 (82.2%), int8 214 (81.1%). The paired difference is −1.1 points with a 95% interval of −3.3 to +1.1: not shown worse, a loss up to 3 points not excluded. One real, reproduced semantic regression on code ("rewrite this slow Python": int8 produced a set intersection that loses order).
+
+| Model | Prompt | First token bf16 → int8 | Decode tok/s | Peak GPU | J/token |
+|---|---|---|---|---|---|
+| 1.7B | 127 | 109 → 105 ms | 51.4 → 83.8 (+63%) | 4.56 → 2.87 GB | 0.75 → 0.44 |
+| 1.7B | 2,047 | 2391 → 2338 ms | 44.5 → 67.2 (+51%) | 4.74 → 3.06 GB | 1.58 → 1.30 |
+| 1.7B | 8,191 | 23.4 → 22.6 s | 29.6 → 39.4 (+33%) | 5.38 → 3.69 GB | 8.57 → 8.06 |
+| 0.6B | 127 | 71 → 34 ms | 142.6 → 221.3 (+55%) | 2.11 → 1.54 GB | 0.24 → 0.13 |
+
+Start-up grows 1.2–1.6 s (quantizing at load). Compatible with snapshots (a mismatch is refused), the f16 cache and `marin-run --speculate` (guessed output equals plain decoding).
+
+**Verdict: option, not the default.** The gains are large and the kernels are correct, but int8 changes the text of most replies, its same-first-choice rate (98.1–98.7%) misses the 99% the f16 default had to meet, and the small correctness set cannot exclude a loss of up to 3 points. What would decide it: a larger executable code set (about 150 tasks) with a pass rule written first.
+
+### 17. Mixed precision and int8 KV values (not adopted)
+
+Three ideas tried alone with the other settings fixed (experiment code not committed).
+
+1. **bf16 output head with int8 layers.** The head was already int8 (the old help text was wrong; fixed). Rounding error is spread over all 197 tensors roughly in proportion to their size; the head is not special. A real bf16 table gained 0.0–0.2 points of agreement and 7–10% of drift for 7–9% of decode speed and 0.3 GB more memory. Groups of 64 (`--quant-group 64`) recover as much for a fifth of the cost. **No-go.**
+2. **f16 keys + int8 values** (scale per 32 values or per head). Quality is good (99.6–99.9% same choice, correctness within one item), and memory drops 22–24% (28–32% more positions). But decode was unchanged (−1%), first token 8–13% slower and energy 7–11% higher. The attention stage took the same time with 44% fewer value bytes because the kernel was not limited by memory speed. **No-go** (worth re-measuring after section 20's kernel).
+3. **What moves speed or error:** finer groups are the cheapest lever and exist; for the cache, kernel structure, not bytes, set the speed at that point.
+
+*Correction (found in section 20):* the `pass-cost` "KV held" column prints the f32 size whatever the cache type, so the "96 GB/s" attention figure here was really 48 GB/s.
+
+### 18. Tensor-core prefill attention
+
+*Why.* A 4,095-token prompt took 6.7 s, of which attention was 71.5% at 0.40 TFLOP/s: 1.4% of the 28.3 TFLOP/s tensor-core ceiling.
+
+*Design.* A FlashAttention-2-style kernel ([paper](https://arxiv.org/pdf/2307.08691)) for the f16 cache, head size 128, passes of more than 8 tokens: one block per (64 query positions, query head), four warps, keys and values staged in shared memory 64 positions at a time, `mma.sync.m16n8k16` with f32 accumulation, online softmax, causal mask only on the diagonal tile. Everything else keeps the old kernel; `MARIN_ATTENTION_SCALAR=1` forces it.
+
+**Gates, fixed before code:** kernel error ≤2e-3 (max) / 2e-4 (mean) against an f64 reference at 12 lengths; strict `verify` unchanged; quality (same choice ≥99.5%, loss ≤+0.001, 264-item set within 2 passes, 6 of 8 chat replies identical); first token ≥25% / 40% / 50% lower at 2k / 4k / 8k and not slower at 511; prompt energy ≥30% lower at 4k; decode within 2%, memory within +50 MB.
+
+| Prompt | First token old → new | GPU joules | Attention stage |
+|---|---|---|---|
+| 511 | 432 → 285 ms (−34%) | 13 → 9 | 126 → 9.8 ms |
+| 2,047 | 2702 → 1391 ms (−49%) | 104 → 52 | 1330 → 66 ms |
+| 4,095 | 8024 → 2815 ms (−65%) | 318 → 109 | 5107 → 250 ms |
+| 8,191 | 25350 → 5904 ms (−77%) | 1012 → 233 | 20510 → 934 ms |
+
+At 4,095 tokens the kernel runs at 7.7 TFLOP/s (27% of ceiling). The power cap slowed the matmul stages about 10% (MLP +12%), but the gain was not cancelled. Quality: kernel error worst 2.3e-4 (gate 2e-3); same first choice 100% (one run 99.9%); 217 passes on the 264-item set with identical text on 264 of 264; 8 of 8 chat and 3 of 3 long-document replies identical; strict `verify` unchanged (1.91e-5).
+
+**Verdict: kept.** Every gate holds for one 150-line kernel and one fallback switch. Next prefill bottleneck: the matrix multiplies (86% of a 4k pass).
+
+### 19. Prefill matrix multiplication (investigated; best prototype reverted)
+
+After section 18 the three matmul stages are 80–90% of a prompt pass and run at 5.0–6.1 TFLOP/s of the 28.3 ceiling. Ablations on the real shapes: memory movement and launch overhead are not the limit (loads and conversion alone take a fifth of the time); the multiply phase alone reaches 76% of the ceiling; the production kernel is slower because loading, converting and multiplying run one after another behind two barriers per 16 columns (38% of the time is not tensor work), and the power cap sets the clock it runs at.
+
+**Gates, fixed before any change:** output bit-identical for bf16/int8/int4; strict `verify` unchanged; matmul stages ≥1.25x faster at 2k/4k/8k; first token ≥10% lower at 2k and ≥15% at 4k and 8k; decode within 2%; energy at 4k ≥10% lower.
+
+| Variant (gate/up at 4,096 tokens, bit-identical) | Time vs production (15.4–16.2 ms) |
 |---|---|
-| f32 | out of memory after 3.64 GB of KV, at 15,872 positions |
-| f16 | whole prompt read and first token produced, 3.70 GB of KV, GPU peak 8.01 GB |
+| next tile fetched early, two shared tiles | −6% |
+| 32 columns per step | +3% (slower) |
+| `ldmatrix` alone | 0% |
+| pipelined + `ldmatrix` | −11% |
+| + 2x2 warps | −14% |
+| cuBLAS bf16 (single multiply), for reference | 5.25 ms (×2 for the high/low split = 10.5) |
 
-At least twice the context fits; f16 reached the model's limit, so the real gain is larger than the test could show.
+End to end (best candidate, bit-identical): first token −20.6% / −11.5% / −13.2% / −11.5% at 511 / 2k / 4k / 8k tokens, energy −13% at 4k, matmul stages 1.15x. **Missed:** stages 1.15x (gate 1.25x) and first token −13% at 4k and 8k (gate −15%). **No-go as specified; the prototype was reverted.** A stronger version needs a different design (a cuBLAS-style GEMM with 3–4 stage `cp.async` pipelines and activations split once in a pre-pass, estimated −20–25% first token, ~300 lines) or dropping the low part on the f16 path (1.5–2x on matmuls, changes every matmul's numerics).
 
-**Strict `verify`.** f32 still passes (largest logit difference 1.7e-5 to 2.7e-5, tolerance unchanged). f16 fails it, reproducing the earlier attempt: 2.83e-3 against 5e-4 allowed. That is the expected size of f16 rounding of keys and values, not a bug. `verify` stays strict for f32; f16 is judged by the gates above.
+### 20. Decode attention with 16-byte loads
 
-**Correctness of f16.** Tests check the stored values bit for bit against a host rounding model, attention against the f64 reference at every page boundary and after rollbacks, saturation (values beyond 65,504 are stored as 65,504, not infinity), guessing ahead (exactly plain decoding's tokens, bf16 and int8 weights) and kept chat turns (greedy replies identical, logits within 5e-3). Sampled replies on a kept cache are not required to match a fresh read: rounding turns tiny differences between a prefill and a decode pass into occasional one-step jumps, and one temperature-1.2 test on the tiny model did diverge. Five deliberate breaks of the kernels were each caught.
+*Profile.* The weight stages read at 250–333 GB/s (the practical ceiling here: 277 sustained), but decode attention read the cache at only 37–64 GB/s and flattened near 60 GB/s, so at 16k tokens attention was 70% (bf16) and 78% (int8) of a decode step. The old kernel did eight 2-byte loads per lane per row.
 
-**Why q8 failed.** The keys, not the values. With q8 rounding faked on top of f32 storage (Vim text, bf16 weights):
+*Diagnosis.* Stand-alone ablations on all 28 layers: the keys phase held the bandwidth down (10.7 of 14.0 ms at 8k tokens); 16-byte loads in both phases made the step 2.2x faster at 8k and 3.5x at 2k with outputs equal to 1e-8; vectorizing only the values phase made it slower (register pressure); changing the split size moved the step by less than 10%. The old kernel was nowhere near the power cap at 2k tokens.
 
-| Quantized | Loss change | Same first choice |
-|---|---|---|
-| keys only | +1.10% | 95.5% |
-| values only | -0.01% | 99.8% |
-| both | +0.88% | 95.5% |
-| both, one scale per 32 values | +0.20% | 97.4% |
+*Change* (f16 cache, head size 128; the f32 cache and `MARIN_ATTENTION_SCALAR=1` take the old code): a half-warp of 16 lanes reads a 256-byte row with one 16-byte load per lane, eight positions per batch (`scores_f16_vec`); the values phase gives each of 8 half-warps every 8th position and adds the 8 partial sums in a fixed order (`values_f16_vec`). About 110 lines of CUDA and 25 of Rust.
 
-"Both" equals real q8, so the fake is faithful. Values alone cost nothing measurable. A scale per 32 values cut the loss 4.4 times but missed the agreement gate by 0.1 point, and q8 was not tuned further. These runs do not show why keys are more sensitive, because the spread of key and value numbers was not measured. Q4 was not tried.
+| Weights | Context | Decode tok/s old → new | Decode J/token | Peak GPU |
+|---|---|---|---|---|
+| bf16 | 2,047 | 50.9 → 57.4 (+13%) | | 4.89 → 4.89 GB |
+| bf16 | 4,095 | 39.0 → 52.4 (+34%) | 1.00 → 0.74 | 5.09 → 5.11 |
+| bf16 | 8,191 | 27.3 → 44.9 (+65%) | 1.43 → 0.87 | 5.53 → 5.56 |
+| bf16 | 16,383 | 18.0 → 35.0 (+95%) | 2.17 → 1.11 | 6.51 → 6.49 |
+| int8 | 4,095 | 51.8 → 80.5 (+55%) | 1.01 → 0.65 | 3.39 → 3.40 |
+| int8 | 16,383 | 20.1 → 46.2 (+130%) | 1.94 → 0.84 | 4.78 → 4.83 |
 
-**Verdict.**
+The attention stage now reads the cache at 119–155 GB/s (40–50% of the ceiling). Gates (all met): +10 / 20 / 35 / 50% decode at 2k / 4k / 8k / 16k; not slower at 127 tokens (+3%); kernel error 1.2e-7 (gate 1e-5); same first choice 100% on all six quality runs; 264 of 264 identical replies; 11 of 11 chat and long-document replies identical; strict `verify` unchanged. **Kept.** Next: attention is still 46–56% of a 16k step; a double-buffered `cp.async` pipeline could reach about 250 GB/s (+30% at 16k); the few-token kernel that checks guesses still uses 2-byte loads; int8 KV values should be re-measured on this kernel.
 
-| Format | Status |
-|---|---|
-| f32 | default; the reference |
-| f16 | optional: half the memory, twice the context, same or better speed, no measured quality loss |
-| bf16, q8 | removed |
+### 21. CPU inference (investigation, no code changed)
 
-f16 meets the written default criteria but stays optional until it is checked at contexts beyond 4096 tokens and on a second model, and until `marin` (the chat program) takes the flag.
+The CPU backend is what a machine without a usable NVIDIA GPU gets (`--backend auto` falls back to it). Measured on the Zen 4 laptop with Qwen3-0.6B and Qwen3-1.7B; every result is a ratio against a reference on the same hardware. The "older CPU" cases are builds without AVX-512, a proxy, not a real old CPU.
 
-### 13. Prefix snapshot (V6 phase 1)
+**Audit.** No threads (1 of 16 cores busy). The baseline x86-64 build (SSE2, no `target-cpu`, crates are `forbid(unsafe_code)`). The matmul converted each bf16 weight row to f32 and called one `dot` per token with no tiling. Attention is a scalar per-head loop; the KV cache is f32 with the whole window reserved; there is no CPU quantization; RMSNorm, SiLU and RoPE are scalar loops.
 
-**What was built.** One snapshot file holds the KV cache of the last finished reply and the token ids it stands for. `marin --snapshot FILE` saves it when the session ends and, on the first prompt of the next session, loads the part of it that the prompt shares; only the rest is read. GPU only, f32 and f16 KV, any weights. Nothing else in V6 was built: no shared pages, no prefix index, no eviction, no compression, no background saving. The attention kernels did not change.
+**Marin CPU at that point** (bf16 weights, f32 math, 1 thread):
+
+| Model | Prompt | First token | Prefill | Decode | Weight reads | Peak RAM |
+|---|---|---|---|---|---|---|
+| 0.6B | 127 / 511 / 1,023 | 4.8 / 21.4 / 49.2 s | 26.4 / 23.8 / 20.8 tok/s | 11.0 / 9.5 / 8.5 | 13.2 / 11.3 / 10.1 GB/s | 1.30 / 1.41 / 1.57 GB |
+| 1.7B | 127 / 511 | 16.5 / 67.4 s | 7.7 / 7.6 | 3.6 / 3.5 | 12.4 / 12.2 GB/s | 3.55 / 3.69 GB |
+
+Rebuilding unchanged with `-C target-cpu=x86-64-v3` gave only +24–27% prefill and +14–20% decode; `native` was no better.
+
+**Reference: llama.cpp** (BF16 GGUF of the same checkpoints; *native* = AVX-512 with bf16 dot products, *AVX2* = no AVX-512). Prefill / decode, tokens per second:
+
+| Model | 1 thread, native | 8 threads, native | 1 thread, AVX2 build |
+|---|---|---|---|
+| 0.6B | 210 / 18.8 | 1061 / 19.8 | 102 / 19.4 |
+| 1.7B | 76 / 6.8 | 373 / 7.0 | 33.9 / 6.8 |
+
+Findings: one thread of llama.cpp prefills 8–10x faster than Marin (4x with only AVX2). Decode is memory-bound at about 23 GB/s whatever the thread count, so Marin sat at 52–58% of the ceiling. Prefill scales about 5x to 8 threads; 16 threads is slower than 8 (SMT). Quantized llama.cpp decodes the 0.6B at 36.7 (Q8_0) and 56.9 (Q4_K_M) tok/s at 8 threads and the 1.7B at 13.0 and 21.4, with peak RSS 2.10 and 2.05 GB against 3.68 GB for BF16. Marin's 1.7B in bf16 is killed at a 3 GB memory limit and runs at 4 GB. Energy was not measurable (RAPL is root-only).
+
+**Top three bottlenecks:** (1) the matmul kernel; (2) no threads; (3) bf16-only weights on the CPU. Next in line: f32 whole-window KV (1.9 GB at 8k), scalar attention, scalar elementwise ops.
+
+**SIMD without `unsafe` outside `cuda`:** `std::simd` is nightly-only, and calling a `#[target_feature]` function without the feature needs `unsafe`, so run-time dispatch needs a maintained library, per-feature-level builds with a launcher, or `unsafe` in a second crate. Section 22 chose the first.
+
+**Staged plan** (each stage measured against the table above): 1 kernels (one thread); 2 threads on physical cores (≥70% scaling to 4 threads); 3 CPU quantization (decode ≥1.7x int8, ≥2.5x int4; quality gates of sections 4 and 16); 4 memory (growing f16/int8 KV, no second weight copy; 1.7B int4 with an 8k window under 3 GB); 5 the hardware planner chooses format, threads and window.
+
+### 22. CPU matmul kernels, stage 1 (one thread)
+
+*Scope.* Only `tensor::Matrix::matmul`, on one thread. No threads, no quantization, no change to attention or the elementwise ops. Gates were written before the code.
+
+**SIMD strategy (investigated first).** `std::simd` is nightly-only; plain loops compiled for the baseline get SSE2 only. Candidates on crates.io: `pulp` 0.22.3 (the dispatch layer under `faer` and `gemm`, about 13 small dependencies, run-time detection), `gemm` (finished GEMM, but no bf16 input), `archmage`, `fearless_simd` and `wide` (MSRV 1.89 or compile-time selection), `multiversion`. **Chosen: `pulp`**, because it selects AVX2+FMA (or AVX-512, or a scalar path) at run time and our crates keep `#![forbid(unsafe_code)]` (the `unsafe` lives in the dependency). The alternatives (a launcher with per-level builds, `unsafe` in a second crate) stay open.
 
 **Design.**
-- **Cache side:** `DeviceKv` can copy one page out to host memory and copy one in (`export_page`, `import_page`), and map the pages for an empty cache first (`reserve_empty`). The cache's length only advances after the last page is in, so a failed restore leaves a cache that reads as empty.
-- **File** (`marin-run restart` and the chat use the same code): header (80 bytes: magic, version, KV type, layers, kv heads, head size, page size, positions, weight bits and group, weights hash, config hash, token-id hash, hash of the header), the token ids, one block per 64-position page (`[layer][keys, values][row]`, then a hash of page number and bytes), and an end mark with the total length. A page cut short at the end of the snapshot holds only its real rows.
-- **Fingerprint:** 64-bit hashes of all weight files (contents and sizes), of `config.json` plus `tokenizer.json`, the weight quantization scheme, the KV type and the head layout. The hash catches changed or damaged files, not forgery; it is the standard library's, so another Rust release makes old snapshots look foreign, which only costs a re-read.
-- **The weight-hash cost:** hashing 3.44 GB takes 0.8 s, so it runs on its own thread while the weights load (about 2.1 s) and is waited for only when a snapshot is first used. The wait measured 2.0 to 2.2 ms. The price is about 0.1 s more model load (2.12 to 2.23 s) while both read the file.
-- **Restore rule:** the longest start of the file that the prompt shares; if that is shorter than the whole snapshot it is rounded down to whole pages (the rest is recomputed, at most 63 tokens), so a page is never copied in part. The record of token ids (`Retained`) is set only after the whole copy succeeded.
-- **Save rule:** after a reply that ended normally (a cancelled reply counts; an error does not), write a temporary file next to the target, fsync, rename over the target, fsync the folder. The cache must hold exactly the named tokens.
-- **Opt in:** nothing is written unless `--snapshot` is given, because the file contains the conversation.
+- **bf16 without conversion instructions:** two bf16 values live in one `u32` (element `2i` low, `2i+1` high). The high half read as f32 is `v & 0xFFFF0000`, the low half is `v << 16`. Activations are split into even and odd elements, so a dot is `low·even + high·odd`.
+- **Prefill (2+ tokens):** a register-blocked GEMM, 4 weight rows × 2 tokens per tile (4×3 and 6×2 spill registers and run at half the speed), weights and activations packed into panels (256 pairs along the shared dimension, 64 tokens per block).
+- **Decode (1 token):** a GEMV, one weight row at a time with a low-half and a high-half accumulator. Four rows at a time was slower: with 1,024 columns the rows sit 2 KiB apart and the streams interfere (16–19 GB/s against 24–28 GB/s for one row, cold, on a 311 MB matrix).
+- **Load:** `Matrix::new` packs from the last rows to the first and shrinks the 16-bit source as it goes, so a large tensor is never held twice. New files in `crates/tensor`: `kernel.rs`, `gemm.rs`, `gemv.rs`, `accuracy_tests.rs`.
 
-**End-to-end result.** Separate processes on Qwen3-1.7B-Base, 40 W cap, median of 3 (3 more with the file dropped from the page cache). "First token" is from the prompt call to the first token: saved start plus 16 new tokens, including the weight-hash wait, file read, checksums, page mapping and copy to the GPU. "Process" is the whole run from start, model load included (about 2.1 s). Energy is the GPU's mean power times that window.
+**Results** (one thread, same machine and method as section 21; old = section 21 figures, spot-checked today: 26.1 and 11.1 tok/s for the 0.6B at 127 tokens):
 
-| saved start | KV | file | re-read: first token / process / GPU energy | restore (file cached): first token / process / energy | restore (file cold): first token | save |
+| Model | Prompt | First token | Prefill | Decode | Weight reads | Peak RAM |
 |---|---|---|---|---|---|---|
-| 512 | f32 | 117 MB | 325 ms / 2.64 s / 3.8 J | 84 ms / 2.51 s / 0.9 J | 103 ms | 104 ms |
-| 512 | f16 | 59 MB | 316 ms / 2.62 s / 3.5 J | 65 ms / 2.48 s / 0.7 J | 76 ms | 40 ms |
-| 2048 | f32 | 470 MB | 2306 ms / 4.66 s / 66.6 J | 212 ms / 2.68 s / 2.5 J | 262 ms | 294 ms |
-| 2048 | f16 | 235 MB | 2149 ms / 4.42 s / 60.2 J | 130 ms / 2.54 s / 1.3 J | 157 ms | 138 ms |
-| 4096 | f32 | 940 MB | 7177 ms / 9.49 s / 257.8 J | 430 ms / 2.85 s / 4.9 J | 490 ms | 870 ms |
-| 4096 | f16 | 470 MB | 6517 ms / 8.82 s / 230.5 J | 224 ms / 2.62 s / 2.4 J | 277 ms | 285 ms |
-| 8192 | f32 | 1.88 GB | 39355 ms / 41.67 s / 1538 J | 974 ms / 3.41 s / 11.7 J | 940 ms | 929 ms |
-| 8192 | f16 | 940 MB | 22258 ms / 24.53 s / 861 J | 402 ms / 2.82 s / 4.8 J | 498 ms | 556 ms |
+| 0.6B | 127 | 4.8 → 1.34 s | 26.4 → 94.6 tok/s (**3.6x**) | 11.0 → 17.2 (**1.56x**) | 13.2 → 20.5 GB/s | 1.30 → 1.38 GB |
+| 0.6B | 511 | 21.4 → 7.0 s | 23.8 → 72.7 (**3.05x**) | 9.5 → 15.7 (**1.66x**) | 11.3 → 18.8 | 1.41 → 1.53 |
+| 0.6B | 1,023 | 49.2 → 20.1 s | 20.8 → 50.8 (2.44x) | 8.5 → 13.2 (**1.56x**) | 10.1 → 15.8 | 1.57 → 1.70 |
+| 1.7B | 127 | 16.5 → 3.85 s | 7.7 → 33.0 (**4.3x**) | 3.6 → 6.09 (**1.69x**) | 12.4 → 20.9 | 3.55 → 3.65 |
+| 1.7B | 511 | 67.4 → 16.9 s | 7.6 → 30.2 (**4.0x**) | 3.5 → 5.98 (**1.71x**) | 12.2 → 20.6 | 3.69 → 3.76 |
 
-Where a restore spends its time (4096 f16, file cached): read 41 ms, checksums 61 ms, copy to the GPU 43 ms, header 0; the rest of the 224 ms is reading the 16 new tokens. At 8192 f32: read 430, checksums 247, copy 163 ms.
+Against llama.cpp on one thread: decode is at 89–91% of its BF16 figure; prefill is at 93–97% of its AVX2-only build and 43–45% of its AVX-512 build. Matrix stages of a prompt pass run at 90–100 GFLOP/s (they ran at 20); decode reads weights at 21–23 GB/s, at the memory ceiling.
 
-- **Restart to first token:** 3.4x faster at 4096 f16 (2.62 against 8.82 s), 12x at 8192 f32 (3.41 against 41.67 s). The restore itself (read, checksums, copy) is 15 to 50 times shorter than reading the text.
-- **At 512 tokens it barely pays:** the first token is 4 to 5 times sooner, but the process takes 2.5 s either way because loading the model dominates, and the hash thread costs about 0.1 s of that. 512 is below where a snapshot is worth having.
-- **Checksums cost about a third of a restore** (about 7 GB/s). They stay: they are what makes a damaged file safe. A faster hash would cut the restore by a quarter at most.
-- **Energy:** a restore used 1 to 2% of the GPU energy of reading the text again at 2k and above (4096 f32 4.9 against 258 J). Disk and CPU energy were not measured.
-- **Save** is 0.3 to 0.9 s at 4k to 8k and is done once, when the session ends, not after each reply.
-- The file-cached and cold-file columns differ by 20 to 100 ms (none at 8192 f32). Both use the NVMe disk of this machine.
+**Correctness.** `marin-run verify` on Qwen3-1.7B-Base (CPU, against Hugging Face) passes with the unchanged tolerance: max logit diff 3.24e-5 / 3.43e-5 / 3.05e-5 (before: 3.05e-5 / 4.20e-5 / 3.05e-5), token choices match. Kernel accuracy is below 1e-5 relative to an f64 reference over 528 shapes (1–13 rows, 1–1,001 columns including odd, 1–129 tokens) on the dispatched and the scalar path. The full suite passes (65 programs, 560 tests).
 
-**Same output as the live cache.** On the real model, a greedy reply of 24 tokens after restoring was identical to the reply the saving process produced when it continued with the same prompt on its live cache, and identical to a cold read, in all 16 combinations of saved start (512, 2000, 2048, 4096 tokens), KV type (f32, f16) and weights (bf16, int8). The 2000-token case restores 1984 positions (31 whole pages) and reads the other 16. Tiny-model tests add sampled replies at temperature 1.2: a restored cache continues token for token like the live one.
+**Gates.**
 
-**Tests** (`crates/cli/tests/snapshot*.rs`, `crates/cuda/tests/kv_transfer.rs`, and format tests): restored against live replies for f32 and f16, bf16 and int8 weights, greedy and sampled; the page rule at 14 snapshot lengths from 30 to 700 positions around every 64 and 512 boundary, each with 9 different prompt cut points; truncation at 14 points and a flipped bit at 15 places (header, ids, pages, hashes, end mark), an extra byte, a missing file; snapshots refused for another KV type, weight quantization, changed `config.json`, changed `tokenizer.json`, changed weights (while an identical copy in another folder is accepted); a bad last page leaves the cache empty and the reply correct; saving never leaves a temporary file or touches the old snapshot when it fails, a stale temporary file is ignored, an untrusted cache is not saved; guessing ahead with rejected drafts (the test builds a prompt that makes guessing start at once) before the save changes nothing; the CPU never saves or restores; page export/import at slab boundaries, reversed page tables and bad requests.
+| Gate | Result |
+|---|---|
+| Correctness | met |
+| Prefill ≥3x | met at 127 and 511 tokens (0.6B) and for the 1.7B; **missed at 1,023 tokens (2.44x)**: scalar attention now takes a growing share |
+| Decode ≥1.4x | met everywhere (1.56–1.71x) |
+| Scalar fallback at most 5% slower | **missed:** forced to the scalar path (a CPU without AVX2+FMA), a 6144×2048 matrix takes 3.0x as long for one token and 1.24x for 128 tokens versus the old code, which the compiler vectorizes for SSE2 |
+| Peak RAM at most +50 MB | **missed:** +80 / +120 / +130 MB (0.6B) and +100 / +70 MB (1.7B). No second copy of the weights is kept; the extra is memory glibc keeps after freeing each tensor's 16-bit source (with `MALLOC_MMAP_THRESHOLD_=1048576` the 0.6B peaks at 1.28 GB) plus activation copies |
 
-**Failures found while building it.**
-1. Restoring only the first pages of a longer snapshot read the end mark from the wrong place and refused every such file. The page-boundary test found it; the end mark is now read from its known position.
-2. A new test of mine took the weight-hash handle that the session had already used, so it failed on its own and made every deliberate break look caught. Found by comparing results with an unbroken run; fixed and rerun.
-3. Deliberate breaks (12 effective, run against the final code): accepting a bad page hash, ignoring the file length, the end mark, the token-id hash, the KV type, the weights hash, the configuration hash, the weight quantization, restoring a partial page, a record longer than the cache, saving a cache that disagrees with the record, and a wrong page number in the saved hash are each caught by at least one test. Two weaknesses came out of the first rounds: clearing the cache after a failed restore was redundant, since the length only advances at the end, so that code was removed; and the "record agrees with the cache" check could not be reached through the public interface, so it moved into `save`, where it is tested.
+**What failed on the way.** The four-row GEMV (1.16x decode, 15 GB/s); 4×3 and 6×2 tiles (50 GFLOP/s against 91–101); a first packing that held both copies of a tensor (+120 MB); `pulp`'s array-backed `Scalar128b`/`Scalar256b` as a fallback (13–23x slower than the old code).
 
-**Limits.** GPU only (the CPU cache is not saved). One snapshot file; a new save replaces it. The file is restored on the first prompt of a session only, and only for the model it was started with (switching model in the chat starts without a snapshot). The hash is not cryptographic. Page-granular copies are used, not one large copy; a bulk copy would save a few percent. Only one machine and one disk were measured.
-
-**Did it earn its complexity?** Yes, from 2k tokens up: 2 to 40 seconds of waiting become 0.2 to 1 s, for about 1,000 lines of code (file format 244, restore 175, save 99, page copy 110, engine calls 90, the `restart` benchmark command 130, session hook and weight hash about 120) with no change to the kernels. Below about 1k tokens it saves nothing a user would notice.
-
-#### Why this design: what was measured first
-
-Before building, the pieces of a restore were timed alone (no model loaded; NVMe disk; GPU copies in milliseconds, median of 3).
-
-| tokens | KV | size | re-read | copy back from RAM | read cold from disk + copy | copy out + write + fsync |
-|---|---|---|---|---|---|---|
-| 512 | f32 | 117 MB | 323 | 8 | 39 | 137 |
-| 2048 | f32 | 470 MB | 2266 | 33 | 159 | 216 |
-| 2048 | f16 | 235 MB | 2132 | 16 | 84 | 84 |
-| 4096 | f32 | 940 MB | 7235 | 65 | 383 | 959 |
-| 4096 | f16 | 470 MB | 6689 | 32 | 153 | 159 |
-| 8192 | f32 | 1879 MB | 39718 | 130 | 666 | 737 |
-| 8192 | f16 | 940 MB | 22469 | 66 | 333 | 344 |
-
-- Re-reading grows faster than linearly (attention); restoring is linear in bytes, so it wins by 8x at 512 tokens and by 15 to 65x from 2k up.
-- Disk read about 3.5 to 4 GB/s; GPU copies 14 GB/s from page-locked memory and 2.6 to 5 GB/s from ordinary memory. The built version uses ordinary memory and is still fast enough.
-- Page-sized copies (128 KB) cost 37 ms against 32 ms for one piece of 470 MB.
-- Saving f32 at 4096 tokens takes about 1 s, so saving happens when the session ends, not after each reply.
-
-**Why a snapshot file and not shared pages.** Marin runs one chat at a time, so there is no second live sequence to share pages with. "New chat, same system prompt or repository context" is served just as well by restoring a saved copy. Shared pages with reference counts would only save memory when several sequences run together (V7). If they are built, no copy-on-write kernel is needed: share only whole 64-token pages, recompute the partial page at the end of the shared part (at most 63 tokens), and treat any write or rollback into a shared page as "drop the reference and take a fresh page".
-
-**Not built:** shared pages and reference counts, a prefix index, eviction, a size budget for many snapshots, compression, memory-mapped restore, background saving, cross-machine transfer. Each needs more than one snapshot or more than one live sequence to pay off.
+**Limits and next bottleneck.**
+- The fallback miss matters for the target: CPUs without AVX2 (older Celeron and Pentium parts) get slower decode and prefill than before. `pulp` has no SSE level. Options: keep the old loop as the fallback (a second implementation) or write an SSE2 path; neither is built.
+- Only this machine (the AVX2 path) was measured; `pulp`'s AVX-512 path (a feature) was not tried.
+- Single-thread decode is at the memory ceiling; more needs threads (stage 2) or smaller weights (stage 3).
+- Profile of the 0.6B at 127 tokens (prefill 1.32 s): MLP 52%, QKV and output projections 34% (about 60% of the AVX2 peak), scalar attention 7.5%, RoPE 3.9%. At 1,023 tokens attention is the largest non-matmul share.
 
 ## Tried and not adopted
 
-- **bf16 and q8 KV cache:** bf16 had no advantage over f16; q8 failed the quality gates (section 12). f16 fails strict `verify` by design and is judged by the section 12 gates instead.
-- **CUDA graphs:** +1.2% in a prototype, needs invasive state changes (section 3).
-- **More kernel fusion:** a few tenths of a percent each.
-- **4-bit output head:** hurts quality badly, so the head stays int8.
-- **Guessing after 1 to 5 matching tokens, or pausing after a wrong guess:** slowdowns outside edits (section 5).
-- **Chunk size for decode attention (32, 64, 128):** nothing on top of the shipped change.
-- **Warp-per-position prefill attention:** not bit-identical and no faster than the shipped change.
-- **Idle pauses between tokens:** raise engine speed but lower real speed (power cap section).
-- **Table lookup for every group of four value rows in prefill:** +9.1% TTFT at 2048 tokens (V4).
-- **One 14 MiB allocation per page, laid out `[page][layer][keys, values]`:** +12.9% TTFT at 4096 tokens, the clock down 11.6% at the same power (V4).
+- **bf16 head with int8 layers; int8 values in the KV cache:** ≤0.2 points of quality for 7–9% of speed; no decode gain and a slower first token (section 17).
+- **bf16 and q8 KV cache:** bf16 had no advantage over f16; q8 failed the quality gates (section 12).
+- **CUDA graphs:** +1.2% in a prototype, needs invasive state changes (section 3). More kernel fusion: a few tenths of a percent each.
+- **4-bit output head:** hurts quality badly.
+- **Guessing after 1–5 matching tokens, or pausing after a wrong guess:** slowdowns outside edits (section 5).
+- **Idle pauses between tokens:** raise engine speed but lower real speed (power cap).
+- **Table lookup per group of four value rows in prefill; one 14 MiB allocation per page:** +9.1% and +12.9% TTFT (section 11).
+- **Draft-model speculation; RAM parking of sessions; prefill matmul prototype:** see sections 15, 14 and 19.
 
 ## Repeating a measurement
 
@@ -711,117 +486,25 @@ marin-run probe
 marin-run pass-cost MODEL --text LONG_TEXT_FILE --contexts 128,1024,2048,4096 --sizes 1,2,4,7,8 --stages
 # prefill speed and attention share
 marin-run bench MODEL --backend cuda --prompt-tokens 2048 --tokens 2 --runs 3 --warmup 1 --profile --sample-gpu --ctx 4096
-# a real long prompt
-marin-run MODEL -p LONG_PROMPT --temp 0 --ctx 5120 --max-tokens 8 --metrics
 # chat turns on a kept cache vs read from scratch (add --quantize int8 for int8)
 marin-run turns MODEL --history 0,2048,4096 --reply-tokens 32 --rounds 3 --ctx 5120
-# the same with guessing ahead, asking for copied text so guessing fires
-marin-run turns MODEL --speculate --ask "Repeat your last answer exactly, word for word." --history 0,2048,4096 --reply-tokens 128 --rounds 2 --ctx 5120
-# KV memory held for a short live sequence in a large window (prompt 63 = 64 live positions; try 64, 511, 2047, 4095, 7999)
+# KV memory held for a short sequence in a large window
 marin-run bench MODEL --backend cuda --prompt-tokens 63 --tokens 2 --runs 1 --warmup 0 --ctx 8192
-# plain vs guessing on real replies (PROMPT_FOLDER holds one folder per scenario, one text file per prompt)
+# plain vs guessing on real replies
 marin-run spec-bench MODEL --sampling chat --max-tokens 120 --prompts PROMPT_FOLDER --rounds 1
-# KV cache format: quality against f32 KV, then the same command with --kv-type f16 and --against
+# KV cache format: quality against f32 KV
 marin-run quality MODEL --text TEXT_FILE --tokens 4096 --kv-type f32 --save f32.json
 marin-run quality MODEL --text TEXT_FILE --tokens 4096 --kv-type f16 --against f32.json
-
 # restart: save a prefix, then restore it and read the cold baseline in separate processes
 marin-run restart MODEL --mode save --tokens 4096 --file snap.bin --kv-type f16
 marin-run restart MODEL --mode restore --tokens 4096 --file snap.bin --kv-type f16
 marin-run restart MODEL --mode cold --tokens 4096 --file snap.bin --kv-type f16
-
 # accuracy of quantized weights
 marin-run quality MODEL --quantize int8 --text TEXT_FILE
-# output against Hugging Face
+# output against Hugging Face (GPU, or CPU with --backend cpu)
 marin-run verify MODEL --reference tests/reference/qwen3-1.7b-base.json --backend cuda
+# CPU speed, one thread
+marin-run bench MODEL --backend cpu --prompt-tokens 127 --tokens 32 --runs 2 --warmup 1 --profile
 ```
 
-Add `--quantize int8` to the first, third, fourth and sixth commands for int8 runs. The guessing replay tools are `marin-run guess`, `guess-report` and `pass-cost`. Every table lists its sample size next to it; most speed rows are 2 to 5 runs per side on one machine, so treat differences of a few percent as noise unless the ranges are clearly apart.
-
-## Appendix: the design study before paging
-
-The study done before building: how the cache worked, what it cost, and the plan. The measurements came from throwaway probes (the real `DeviceKv` and a standalone kernel harness) that are not in the repo.
-
-### How the cache worked
-
-- One key and one value buffer per layer, `[position][kv_head][head_dim]` in f32, all reserved at load (56 buffers plus 2 scratch): 229,376 B (224 KiB) per token for Qwen3-1.7B (2 x 28 x 8 x 128 x 4). The window (`--ctx`) was fixed for the cache's life; going past it was an error.
-- A pass wrote its new keys and values at `[len, len + n)` (one copy per layer for keys and one for values) and committed them with `advance`. Rollback only set the length; nothing moved.
-- Everything that assumed "physical row = logical position" was one expression, `position * kv_stride + kv_head * head_dim`, in the three attention kernels and in the cache write.
-- `EngineCache` (the CPU `KvCache` or `Box<GpuCache>`) lives in the CLI `Session`; the `SequenceCache` trait (`used`, `capacity`, `clear`, `truncate`) is all `generate` sees. The CPU cache hands out one slice per layer, so it stays contiguous.
-
-### What it cost
-
-`DeviceKv` created directly, 4 repeated runs (identical each time). The driver reports free memory in 32 MiB steps, so "measured" rounds up to the next 32 MiB:
-
-| context | formula (KV) | + scratch | measured | create + zero-fill | used by a 64-token prompt | reserved but unused |
-|---|---|---|---|---|---|---|
-| 128 | 28.0 MiB | 28.1 MiB | 32 MiB | 3.8 ms | 14 MiB | 50.0% |
-| 1024 | 224 MiB | 225.0 MiB | 256 MiB | 1.0 ms | 14 MiB | 93.8% |
-| 4096 | 896 MiB | 900.1 MiB | 928 MiB | 3.6 ms | 14 MiB | 98.4% |
-| 8192 | 1792 MiB | 1800.1 MiB | 1824 MiB | 9.9 ms | 14 MiB | 99.2% |
-| 16384 | 3584 MiB | 3600.2 MiB | 3616 MiB | 14.8 ms | 14 MiB | 99.6% |
-| 32768 | 7168 MiB | | out of memory | | | |
-
-- The formula holds. Engine-level growth matches it too: bf16 from 1024 to 4096 grew 0.71 GB (predicted 0.705), 4096 to 8192 grew 0.94 GB (0.94); int8 8192 to 16384 grew 1.88 GB (1.88).
-- Decode and rollback make **0** allocations and **0** growth copies (2,000 token writes: 0 allocations; growing past capacity is refused with no allocation).
-- Rollback (`truncate` plus `advance`) takes **1.7 ns**, with 0 launches and 0 bytes moved. In real guessing runs the whole rollback is under 0.02 microseconds per token.
-- Writing one decode token's cache entry takes 123 microseconds (56 copies, 229,376 B): the 0.15 ms "kv cache write" stage of the decode profile.
-
-Peak GPU memory (`bench`, a 64-token prompt, whole device including about 1.5 GB of desktop programs):
-
-| context | KV reserved | bf16 grew / peak | int8 grew / peak |
-|---|---|---|---|
-| 128 | 29 MB | 3.49 / 5.13 GB | 1.81 / 3.49 GB |
-| 1024 | 235 MB | 3.69 / 5.34 GB | 2.01 / 3.69 GB |
-| 4096 | 940 MB | 4.40 / 6.04 GB | 2.75 / 4.40 GB |
-| 8192 | 1.88 GB | 5.34 / 7.01 GB | 3.69 / 5.34 GB |
-| 16384 | 3.76 GB | not tried (weights 3.44 GB + cache 3.76 GB = 7.2 GB before the desktop's 1.5 GB) | 5.57 / 7.22 GB |
-
-Largest context that fits comfortably on this 8 GB card: **8192 for bf16** (peak 7.0 GB, 86% of the card) and **16384 for int8** (7.2 GB, 89%). The cache is the whole difference, and it is reserved in full at the start whatever the prompt length: a typical default chat (4096, 940 MB reserved) holding 1,000 tokens uses 229 MB, about a quarter of it.
-
-### Does the layout slow decoding down?
-
-A standalone copy of the shipped decode kernel where only the address of a key or value row changes (28 layers, 4096 tokens of context, 7 paired rounds against the real kernel; every layout gives bit-identical output):
-
-| layout | time vs today |
-|---|---|
-| templated copy of today's layout (control) | 1.01x |
-| head-major, `[head][position][dim]`, contiguous | **1.00x** |
-| paged, shuffled physical pages, every row looks its page up | 1.04x to 1.06x (any page size, either layout inside the page) |
-| paged, 256-token pages, page read once per block | 1.01x |
-| paged, 64-token pages, block = page (chunk 64), page read once | 1.03x (its own contiguous chunk-64 control is also 1.02x) |
-| paged, 64-token pages, 256-token block reading its 4 page ids into a small array | 1.09x (the array spills to local memory) |
-
-- The order of data in memory is not a lever: head-major is no faster, so there is no reason to change the layout for speed.
-- Scattered pages cost almost nothing by themselves. The 4 to 6% comes from looking the table up for every row. With one lookup per block the cost is about 1% of the attention kernel: about 0.1 ms of a 28 ms step (0.4%) at 4096 tokens.
-- A block's positions must all lie in one page for the single lookup to be valid (a 256-token page with the 103-token blocks of a 1024-token context straddles pages and gave a wrong answer, which the harness flags). Block size is a separate knob: at 1024 tokens the paged chunk-64 variant was 5% faster than the shipped chunk-103 kernel, and at 4096 the contiguous chunk-64 control was 2% slower than chunk 256. Neither was tuned further.
-
-### Four options
-
-| | A. keep contiguous | B. paged, page table | C. hybrid | D. contiguous virtual range, physical memory mapped on demand |
-|---|---|---|---|---|
-| Idea | today | fixed-size pages in a pool, a table maps position to page | contiguous when small, paged when large | reserve a big virtual range, map physical chunks as the sequence grows (CUDA virtual memory) |
-| Complexity | none | moderate | highest: two layouts, two kernel variants, a switch | moderate, CUDA-only (needs `unsafe` driver calls in the `cuda` crate) |
-| Memory overhead | whole capacity up front | table (1 KiB per 16K tokens) plus at most 63 wasted tokens (14 MiB) per sequence | both | physical memory rounded to 2 MiB chunks per layer buffer (512 tokens of keys) |
-| Runtime overhead | none | about 1% of attention with one lookup per block (4 to 6% if naive) | the paged cost beyond the switch | none: kernels unchanged |
-| CUDA changes | none | 3 attention kernels read the table, the write is split per page | all of B, twice | none in kernels; new allocator in `cuda` |
-| Unlocks | prefix reuse for one sequence (done, section 10) | sharing pages between sequences, page-sized tiering, batching without N x capacity | nothing B lacks | lazy growth and mapping a chunk into two sequences, but no page-sized tiering or eviction |
-
-Supported here: the check program shows virtual memory management available, a 2 MiB minimum granularity, and two separate physical chunks mapped into one contiguous range.
-
-### The plan: B, in small steps, with 64-token pages
-
-Not C (more code than B for nothing B lacks). Not D alone (solves growth but not sharing or eviction, and ties the cache to one backend). A is right until V5 starts.
-
-Where the build differed: pages are allocated in slabs of 8 and laid out per layer (not one allocation per page, which cost +13% at 4k); there is no identity-table stage on the GPU, because equality with the contiguous build was shown by byte-identical replies and a bookkeeping model instead; the pool grows on demand rather than starting as large as `--ctx`; and the prefill kernel does one lookup per page of rows, not a table staged in shared memory.
-
-- **Page.** 64 tokens, all layers: 64 x 229,376 B = **14 MiB** (512 KiB per layer for keys plus values). It matches the shared-read kernel's 64-position block. Inside a page, positions stay in today's order, `[page][64][kv_head][head_dim]`, so writing a run of tokens is still a plain copy per page run.
-- **Pool.** Per layer, one key slab and one value slab of `pool_pages x 64 x stride` floats (the same 56 allocations). A page id means the same slot in every layer, so one table serves all layers. At first the pool is as large as `--ctx` allows, so peak memory does not change.
-- **Sequence.** A page table (`Vec<u32>` of page ids plus a length) owned by the cache. A device copy (4 B per page: 256 entries at 16K tokens) is refreshed when a page is added, once per 64 decoded tokens.
-- **Allocate and free.** A free list of page ids. A page is taken when the length crosses a multiple of 64 and returned when `truncate` drops below it. Every page carries a reference count (always 1 for now) so sharing is possible later without redesign.
-- **Rollback** stays O(1) in the common case (set the length, give back whole pages beyond it: at most one page for an 8-token pass). **Growth** appends a page id and never copies data. Running out of pages is the same `ContextFull` error.
-- **Kernels.** One lookup per block. Decode: block = page (chunk 64). Shared-read: already 64. Prefill (thread per position): stage the page ids in shared memory once per block. The prefill kernel's lookup cost is **not measured yet** and must be before it ships.
-- **Prefill write.** A 512-token chunk becomes 8 or 9 copies per layer for keys and for values instead of 1 (about 500 small copies per chunk, an estimated few ms against a 0.3 to 0.5 s chunk). A scatter kernel can replace them if it matters.
-- **CPU** is unchanged. `SequenceCache` is the seam: the paged cache implements it for the GPU and the contiguous `KvCache` stays for the CPU fallback.
-- **Order of work.** (1) Introduce `PagePool` and `PageTable` behind `SequenceCache` with an identity table, so nothing changes in the kernels and the exactness tests prove it. (2) Make the kernels read the table; test with shuffled pages that results are bit-identical to the contiguous cache. (3) Free pages on rollback and reuse them. (4) Optionally back the pool with mapped virtual memory so it grows with the sequence.
-- **Risks to measure first:** the prefill kernel's lookup cost; chunk 64 against the current chunk at long contexts; the table upload size relative to a decode step.
+Add `--quantize int8` to the first, third and fourth commands for int8 runs. The guessing replay tools are `marin-run guess`, `guess-report` and `pass-cost`. Every table lists its sample size next to it; most speed rows are 2–5 runs per side on one machine, so treat differences of a few percent as noise unless the ranges are clearly apart.
