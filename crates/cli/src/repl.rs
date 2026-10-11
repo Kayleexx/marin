@@ -10,11 +10,17 @@ use crate::units;
 
 pub fn banner(s: &Session) -> String {
     let cfg = s.loaded.model.config();
+    let weights = s
+        .loaded
+        .model
+        .quantization()
+        .map_or_else(|| "bf16 weights".to_string(), |q| q.label());
     let title = format!(
-        "{}  {}   {} · bf16 weights · f32 math · ctx {}",
+        "{}  {}   {} · {} · f32 math · ctx {}",
         s.style.bold("marin"),
         s.style.cyan(&s.loaded.name),
         s.loaded.model.backend_name(),
+        weights,
         units::count(s.ctx as u64)
     );
     let note = if is_base_model(&s.loaded.name) {

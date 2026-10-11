@@ -183,11 +183,16 @@ pub fn profile_section(p: &Profile) -> String {
 }
 
 pub fn text(r: &Record) -> String {
+    let precision = if r.quantization == "none" {
+        r.precision.to_string()
+    } else {
+        format!("{}, f32 math", r.quantization)
+    };
     let mut out = format!(
         "{}  ·  {}  ·  {}\n  prompt {} tokens, output {} tokens, context {}, batch {}, {} runs after {} warmup\n  {} · {} cores · {} RAM · {}\n",
         r.model,
         r.hardware.backend,
-        r.precision,
+        precision,
         r.prompt_tokens,
         r.output_tokens,
         r.context_length,

@@ -1,5 +1,5 @@
 //! A quantized engine on the tiny fixture: close to the bf16 one with 8 bits, finite and usable with 4, deterministic
-//! across prompt and one-token passes, and refused on the CPU.
+//! across prompt and one-token passes, and INT4 refused on the CPU.
 
 use std::error::Error;
 use std::path::Path;
@@ -118,11 +118,11 @@ fn a_quantized_decode_step_allocates_nothing() -> Result<()> {
 }
 
 #[test]
-fn the_cpu_backend_refuses_quantized_weights() -> Result<()> {
+fn the_cpu_backend_refuses_int4_weights() -> Result<()> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-chat");
     let dir = ModelDir::open(&path)?;
     let scheme = QuantScheme {
-        bits: QuantBits::Int8,
+        bits: QuantBits::Int4,
         group: 32,
     };
     let Err(error) = Engine::load(&dir, Backend::Cpu, Some(scheme), |_, _| {}) else {

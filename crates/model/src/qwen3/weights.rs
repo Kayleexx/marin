@@ -30,14 +30,17 @@ pub(crate) trait Store {
     fn vector(&mut self, values: Vec<f32>) -> Result<Self::Vector, ModelError>;
 }
 
-pub(crate) struct CpuStore;
+pub(crate) struct CpuStore(pub Option<QuantScheme>);
 
 impl Store for CpuStore {
     type Matrix = Matrix;
     type Vector = Vec<f32>;
 
     fn matrix(&mut self, rows: usize, cols: usize, bits: Vec<u16>) -> Result<Matrix, ModelError> {
-        Ok(Matrix::new(rows, cols, bits)?)
+        Ok(match self.0 {
+            Some(scheme) => Matrix::quantized(rows, cols, bits, scheme)?,
+            None => Matrix::new(rows, cols, bits)?,
+        })
     }
 
     fn vector(&mut self, values: Vec<f32>) -> Result<Vec<f32>, ModelError> {

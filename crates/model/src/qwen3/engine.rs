@@ -102,7 +102,7 @@ pub enum EngineCache {
 }
 
 impl Engine {
-    /// Loads the weights onto `backend`, quantizing the layer projections with `quant` if given (GPU only).
+    /// Loads the weights onto `backend`, quantizing the layer projections with `quant` if given (INT8 on CPU).
     pub fn load(
         dir: &ModelDir,
         backend: Backend,
@@ -110,12 +110,7 @@ impl Engine {
         progress: impl FnMut(u64, u64),
     ) -> Result<Self, ModelError> {
         Ok(match backend {
-            Backend::Cpu if quant.is_some() => {
-                return Err(ModelError::Unsupported(
-                    "quantized weights need the GPU backend".into(),
-                ));
-            }
-            Backend::Cpu => Self::Cpu(Box::new(Qwen3::load(dir, progress)?)),
+            Backend::Cpu => Self::Cpu(Box::new(Qwen3::load_quantized(dir, quant, progress)?)),
             Backend::Cuda(gpu) => Self::Cuda(Box::new(Qwen3Gpu::load(dir, *gpu, quant, progress)?)),
         })
     }
@@ -142,7 +137,7 @@ impl Engine {
     /// The scheme the layer projections were quantized with; `None` for bf16 weights.
     pub fn quantization(&self) -> Option<QuantScheme> {
         match self {
-            Self::Cpu(_) => None,
+            Self::Cpu(m) => m.quantization(),
             Self::Cuda(m) => m.quantization(),
         }
     }

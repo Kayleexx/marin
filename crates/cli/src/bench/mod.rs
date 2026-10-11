@@ -42,7 +42,7 @@ pub struct Options {
     /// tokens does to the GPU.
     pub token_pause_ms: f64,
     pub json: Option<PathBuf>,
-    /// Store the layer weights quantized (GPU only).
+    /// Store weights quantized (INT8 on CPU, INT8/INT4 on GPU).
     pub precision: Precision,
 }
 

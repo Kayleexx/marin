@@ -215,3 +215,12 @@ fn the_report_says_how_the_machine_was_powered_and_what_energy_a_token_cost() {
             && !unknown.contains("battery")
     );
 }
+
+#[test]
+fn quantized_header_names_the_stored_weights() {
+    let mut record = sample_record();
+    record.quantization = "int8 weights, groups of 128".into();
+    let header = text(&record);
+    assert!(header.contains("int8 weights, groups of 128, f32 math"));
+    assert!(!header.contains("bf16"));
+}

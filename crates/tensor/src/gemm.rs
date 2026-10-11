@@ -7,16 +7,16 @@ use crate::kernel::{Operands, halves, split_pairs, step};
 /// Weight rows and tokens in one register tile: 8 accumulators plus the 4 weight rows and 2 activation pairs
 /// stay in the 16 vector registers (4x3 and 6x2 spill and run at half the speed).
 pub(crate) const MR: usize = 4;
-const NR: usize = 2;
+pub(crate) const NR: usize = 2;
 /// Pairs along the shared dimension per pass, and tokens per block: sized so the packed activations stay in L2.
 const KC: usize = 256;
-const TB: usize = 64;
+pub(crate) const TB: usize = 64;
 
 /// Many tokens against every weight row. Weights and activations are packed into panels laid out in the order
 /// the micro-kernel reads them, then multiplied tile by tile.
 pub(crate) struct Gemm<'a, 'b>(pub Operands<'a, 'b>);
 
-type Tile<S> = [[<S as Simd>::f32s; NR]; MR];
+pub(crate) type Tile<S> = [[<S as Simd>::f32s; NR]; MR];
 
 impl WithSimd for Gemm<'_, '_> {
     type Output = ();
@@ -147,7 +147,7 @@ fn multiply<S: Simd>(simd: S, weights: &[S::u32s], tokens: &[S::f32s]) -> Tile<S
 
 /// Adds the tile's horizontal sums to the outputs of up to `NR` tokens; the first k block overwrites them.
 #[inline(always)]
-fn store<S: Simd>(
+pub(crate) fn store<S: Simd>(
     simd: S,
     tile: &Tile<S>,
     tokens_out: &mut [&mut [f32]],

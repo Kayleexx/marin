@@ -2,7 +2,7 @@ use kv::KvCache;
 use loader::ModelDir;
 use metrics::{Probe, Stage};
 use runtime::CausalLm;
-use tensor::{Matrix, ensure_finite, rms_norm_rows};
+use tensor::{Matrix, QuantBits, QuantScheme, ensure_finite, rms_norm_rows};
 
 use super::Observer;
 use super::config::Qwen3Config;
@@ -12,15 +12,37 @@ use crate::ModelError;
 
 pub struct Qwen3 {
     config: Qwen3Config,
+    quant: Option<QuantScheme>,
     weights: Qwen3Weights<Matrix, Vec<f32>>,
 }
 
 impl Qwen3 {
     /// `progress(loaded_bytes, total_bytes)` is called after each tensor is read.
     pub fn load(dir: &ModelDir, progress: impl FnMut(u64, u64)) -> Result<Self, ModelError> {
+        Self::load_quantized(dir, None, progress)
+    }
+
+    pub fn load_quantized(
+        dir: &ModelDir,
+        quant: Option<QuantScheme>,
+        progress: impl FnMut(u64, u64),
+    ) -> Result<Self, ModelError> {
+        if quant.is_some_and(|q| q.bits != QuantBits::Int8) {
+            return Err(ModelError::Unsupported(
+                "CPU weights support int8 only; int4 needs the GPU".into(),
+            ));
+        }
         let config = Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref())?;
-        let weights = Qwen3Weights::load(&dir.weights, &config, &mut CpuStore, progress)?;
-        Ok(Self { config, weights })
+        let weights = Qwen3Weights::load(&dir.weights, &config, &mut CpuStore(quant), progress)?;
+        Ok(Self {
+            config,
+            quant,
+            weights,
+        })
+    }
+
+    pub fn quantization(&self) -> Option<QuantScheme> {
+        self.quant
     }
 
     pub fn config(&self) -> &Qwen3Config {

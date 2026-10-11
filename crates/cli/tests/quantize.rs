@@ -1,4 +1,4 @@
-//! The quantization options and `marin-run quality`, on the tiny test model (quantized weights need a GPU, so what
+//! The quantization options and `marin-run quality`, on the tiny test model (INT4 weights need a GPU, so what
 //! is checked here is what happens before any weights load, and the scoring on the CPU).
 
 mod common;
@@ -28,10 +28,10 @@ fn sample_text(sandbox: &Sandbox, name: &str, sentence: &str) -> io::Result<Stri
 #[test]
 fn bad_quantization_options_are_refused_before_anything_loads() -> io::Result<()> {
     let model = tiny();
-    let cpu = run(&["bench", &model, "--backend", "cpu", "--quantize", "int8"])?;
+    let cpu = run(&["bench", &model, "--backend", "cpu", "--quantize", "int4"])?;
     assert_eq!(cpu.status.code(), Some(1));
     assert!(
-        text(&cpu.stderr).contains("--quantize needs the GPU"),
+        text(&cpu.stderr).contains("int4 needs the GPU"),
         "{}",
         text(&cpu.stderr)
     );
@@ -194,5 +194,71 @@ fn scoring_refuses_missing_short_or_unreadable_input() -> Result<(), Box<dyn std
         "{}",
         text(&folder.stderr)
     );
+    Ok(())
+}
+
+#[test]
+fn int8_cpu_selection_and_auto_fallback_are_recorded() -> Result<(), Box<dyn std::error::Error>> {
+    let sandbox = Sandbox::new("int8-cpu")?;
+    for backend in ["cpu", "auto"] {
+        let path = sandbox.0.join(format!("{backend}.json"));
+        let out = Command::new(env!("CARGO_BIN_EXE_marin-run"))
+            .env("CUDA_VISIBLE_DEVICES", "-1")
+            .args([
+                "bench",
+                &tiny(),
+                "--backend",
+                backend,
+                "--quantize",
+                "int8",
+                "--quant-group",
+                "32",
+                "--threads",
+                "8",
+                "--prompt-tokens",
+                "7",
+                "--tokens",
+                "4",
+                "--runs",
+                "1",
+                "--warmup",
+                "0",
+                "--json",
+            ])
+            .arg(&path)
+            .output()?;
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let record: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+        assert_eq!(record["quantization"], "int8 weights, groups of 32");
+        assert_eq!(record["hardware"]["backend"], "cpu");
+        assert!(text(&out.stdout).contains("int8 weights, groups of 32, f32 math"));
+    }
+    Ok(())
+}
+
+#[test]
+fn int8_repl_names_its_weight_format() -> io::Result<()> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_marin-run"))
+        .args([
+            &tiny(),
+            "--backend",
+            "cpu",
+            "--quantize",
+            "int8",
+            "--quant-group",
+            "32",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    if let Some(mut input) = child.stdin.take() {
+        use std::io::Write;
+        input.write_all(b"/backend\n/quit\n")?;
+    }
+    let out = child.wait_with_output()?;
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("int8 weights, groups of 32"));
+    assert!(text(&out.stdout).contains("int8 weights, groups of 32"));
     Ok(())
 }

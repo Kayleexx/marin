@@ -79,8 +79,8 @@ pub struct Options {
     /// context, and rounding can change a reply slightly; f32 is exact (the only choice on the CPU)
     #[arg(long, value_enum, global = true)]
     pub kv_type: Option<KvTypeArg>,
-    /// Keep the layer weights as 8-bit numbers on the GPU: much less memory to read per token, so replies come faster,
-    /// at a small cost in accuracy (the GPU only)
+    /// Keep weights as 8-bit numbers on CPU or GPU: much less memory to read per token, so replies come faster,
+    /// at a small cost in accuracy
     #[arg(long, value_enum, default_value_t = ChatQuantArg::None, global = true)]
     pub quantize: ChatQuantArg,
     /// Weights that share one scale when quantizing, a multiple of 32: smaller is more accurate and takes more memory

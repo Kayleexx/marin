@@ -123,6 +123,7 @@ pub fn quantize(
     cols: usize,
     scheme: QuantScheme,
 ) -> Result<Quantized, TensorError> {
+    let scheme = QuantScheme::new(scheme.bits, scheme.group)?;
     if rows.checked_mul(cols) != Some(bits.len()) || bits.is_empty() {
         return Err(TensorError::Shape {
             what: "matrix to quantize",
@@ -144,32 +145,29 @@ pub fn quantize(
             .min(rows)
     };
     let rows_each = rows.div_ceil(workers);
-    let parts = std::thread::scope(|scope| {
+    let row_bytes = scheme.row_bytes(cols);
+    let groups = cols.checked_div(scheme.group).unwrap_or(1);
+    let mut codes = vec![0; rows.saturating_mul(row_bytes)];
+    let mut scales = vec![0.0; rows.saturating_mul(groups)];
+    std::thread::scope(|scope| {
         let handles: Vec<_> = bits
             .chunks(rows_each.saturating_mul(cols))
+            .zip(codes.chunks_mut(rows_each.saturating_mul(row_bytes)))
+            .zip(scales.chunks_mut(rows_each.saturating_mul(groups)))
             .enumerate()
-            .map(|(index, chunk)| {
+            .map(|(index, ((chunk, codes), scales))| {
                 let first_row = index.saturating_mul(rows_each);
-                scope.spawn(move || quantize_rows(chunk, cols, scheme, first_row))
+                scope.spawn(move || quantize_rows(chunk, cols, scheme, first_row, codes, scales))
             })
             .collect();
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle.join().unwrap_or_else(|_| {
-                    Err(TensorError::Quantization(
-                        "a quantizing thread failed".into(),
-                    ))
-                })
+        handles.into_iter().try_for_each(|handle| {
+            handle.join().unwrap_or_else(|_| {
+                Err(TensorError::Quantization(
+                    "a quantizing thread failed".into(),
+                ))
             })
-            .collect::<Result<Vec<_>, _>>()
+        })
     })?;
-    let mut codes = Vec::with_capacity(rows.saturating_mul(scheme.row_bytes(cols)));
-    let mut scales = Vec::new();
-    for (part_codes, part_scales) in parts {
-        codes.extend(part_codes);
-        scales.extend(part_scales);
-    }
     Ok(Quantized {
         rows,
         cols,
@@ -185,12 +183,21 @@ fn quantize_rows(
     cols: usize,
     scheme: QuantScheme,
     first_row: usize,
-) -> Result<(Vec<u8>, Vec<f32>), TensorError> {
+    codes: &mut [u8],
+    scales: &mut [f32],
+) -> Result<(), TensorError> {
     let max = scheme.bits.max_code();
-    let mut codes = Vec::with_capacity(bits.len());
-    let mut scales = Vec::new();
-    for (offset, row) in bits.chunks_exact(cols).enumerate() {
-        for group in row.chunks_exact(scheme.group) {
+    let groups = cols.checked_div(scheme.group).unwrap_or(1);
+    let rows = bits
+        .chunks_exact(cols)
+        .zip(codes.chunks_exact_mut(scheme.row_bytes(cols)))
+        .zip(scales.chunks_exact_mut(groups));
+    for (offset, ((row, codes), scales)) in rows.enumerate() {
+        let groups = row
+            .chunks_exact(scheme.group)
+            .zip(codes.chunks_exact_mut(scheme.row_bytes(scheme.group)))
+            .zip(scales.iter_mut());
+        for ((group, codes), stored_scale) in groups {
             let mut largest = 0.0_f32;
             for value in group.iter().map(|b| bf16_to_f32(*b)) {
                 if !value.is_finite() {
@@ -199,7 +206,7 @@ fn quantize_rows(
                 largest = largest.max(value.abs());
             }
             let scale = largest / max as f32;
-            scales.push(scale);
+            *stored_scale = scale;
             let code = |b: &u16| -> i32 {
                 if scale > 0.0 {
                     ((bf16_to_f32(*b) / scale).round() as i32).clamp(max.saturating_neg(), max)
@@ -208,15 +215,22 @@ fn quantize_rows(
                 }
             };
             match scheme.bits {
-                QuantBits::Int8 => codes.extend(group.iter().map(|b| code(b) as i8 as u8)),
-                QuantBits::Int4 => codes.extend(group.chunks_exact(2).map(|pair| match pair {
-                    [low, high] => nibble(code(low)) | nibble(code(high)).wrapping_shl(4),
-                    _ => 0,
-                })),
+                QuantBits::Int8 => {
+                    for (slot, b) in codes.iter_mut().zip(group) {
+                        *slot = code(b) as i8 as u8;
+                    }
+                }
+                QuantBits::Int4 => {
+                    for (slot, pair) in codes.iter_mut().zip(group.chunks_exact(2)) {
+                        if let [low, high] = pair {
+                            *slot = nibble(code(low)) | nibble(code(high)).wrapping_shl(4);
+                        }
+                    }
+                }
             }
         }
     }
-    Ok((codes, scales))
+    Ok(())
 }
 
 impl Quantized {

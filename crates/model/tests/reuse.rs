@@ -264,7 +264,15 @@ fn int8_turns_on_a_kept_cache_equal_fresh_reads() {
 
 #[test]
 fn cpu_turns_on_a_kept_cache_equal_fresh_reads() {
-    every_case(&fixture(Backend::Cpu, None, KvFormat::F32).unwrap(), false).unwrap();
+    for quant in [
+        None,
+        Some(QuantScheme {
+            bits: QuantBits::Int8,
+            group: 32,
+        }),
+    ] {
+        every_case(&fixture(Backend::Cpu, quant, KvFormat::F32).unwrap(), false).unwrap();
+    }
 }
 
 /// Rounding a key or value to fewer bits turns the tiny differences between a prefill pass and a decode pass into

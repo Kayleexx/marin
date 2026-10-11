@@ -140,9 +140,12 @@ fn open(request: Request<'_>) -> Result<Loaded, CliError> {
         kv_follows_backend,
     } = request;
     if backend == BackendChoice::Cpu {
-        if precision.weights.is_some() {
+        if precision
+            .weights
+            .is_some_and(|q| q.bits != model::QuantBits::Int8)
+        {
             return Err(CliError::BadOption(
-                "--quantize needs the GPU, but --backend cpu was given".into(),
+                "CPU weights support int8 only; int4 needs the GPU".into(),
             ));
         }
         if precision.kv != KvFormat::default() && !kv_follows_backend {

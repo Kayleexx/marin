@@ -111,7 +111,7 @@ fn an_f16_cache_runs_on_the_gpu_and_a_snapshot_is_only_used_by_its_own_type() {
 }
 
 #[test]
-fn quantize_takes_none_or_int8_and_needs_the_gpu() {
+fn quantize_takes_none_or_int8_on_the_cpu() {
     let sandbox = Sandbox::new("quantize").unwrap();
     let mut bad = cpu_command(&sandbox, &fixtures());
     bad.args(["run", "hi", "--quantize", "int4"]);
@@ -131,14 +131,21 @@ fn quantize_takes_none_or_int8_and_needs_the_gpu() {
     );
 
     let mut cpu = cpu_command(&sandbox, &fixtures());
-    cpu.args(["run", "hi", "--quantize", "int8", "--quant-group", "32"]);
+    cpu.args([
+        "run",
+        "hi",
+        "--quantize",
+        "int8",
+        "--quant-group",
+        "32",
+        "--max-tokens",
+        "4",
+        "--temp",
+        "0",
+    ]);
     let out = run(cpu, "").unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    assert!(
-        text(&out.stderr).contains("--quantize"),
-        "{}",
-        text(&out.stderr)
-    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!out.stdout.is_empty());
 
     let mut plain = cpu_command(&sandbox, &fixtures());
     plain.args(["run", "the cat", "--temp", "0", "--max-tokens", "4"]);

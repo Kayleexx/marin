@@ -34,7 +34,7 @@ Marin uses the GPU when CUDA works and the model fits, and the CPU otherwise; `-
 
 | Option | What it does |
 |---|---|
-| `--quantize int8` | smaller weights (`marin-run` also takes `int4`). On the GPU: decode 33–63% faster, about 1.7 GB less memory, same first-token time. It rounds the weights, so wording often differs from bf16; bf16 stays the default. [Details](BENCHMARKS.md#16-int8-weights-in-chat) |
+| `--quantize int8` | smaller weights on CPU and GPU (`marin-run` also takes GPU `int4`). CPU INT8 uses grouped signed bytes with f32 scales and fused SIMD computation; `--quant-group` defaults to 128. On the GPU: decode 33–63% faster, about 1.7 GB less memory, same first-token time. Rounding can change wording; bf16 stays the default. [CPU gates and results](BENCHMARKS.md#25-cpu-int8-weights-stage-3), [GPU results](BENCHMARKS.md#16-int8-weights-in-chat) |
 | `--kv-type f32\|f16` | KV cache precision. `marin` uses f16 on the GPU (half the memory, twice the context, about half the first-token time at 8k–16k) and f32 on the CPU. `marin-run` and `verify` stay on f32. [Details](BENCHMARKS.md#12-kv-cache-precision-f16) |
 | `--snapshot FILE` | save the conversation's cache when the session ends and reuse the shared start next time. GPU only; nothing is saved unless you ask. [Details](BENCHMARKS.md#13-prefix-snapshot) |
 | `--threads N` | CPU threads for prompt passes (default: one per physical core; `1` is the single-thread path). Decode stays on one thread: memory bandwidth, not arithmetic, limits it. Output is bit-identical for any thread count. [Details](BENCHMARKS.md#24-cpu-threads-for-prompts-stage-2) |
@@ -84,7 +84,7 @@ Reading the prompt is **prefill** (big passes, limited by arithmetic and, for lo
   marin-run MODEL --speculate -p "..."
   ```
 
-- **CPU kernels and threads.** On the CPU, weights are packed as bf16 pairs and multiplied with run-time-dispatched SIMD (AVX2 + FMA when present): a register-blocked GEMM for prompts and a streaming GEMV for decode, plus vector attention for prompts and decode. Prompt passes also use threads (one per physical core by default): Qwen3-0.6B reads a 1,023-token prompt 5.4x faster on 8 threads than on one, and more than 20x faster than the original scalar code. Decode reaches the memory ceiling on one thread. CPUs without AVX2 keep the original loops (the matmul still threads). CPU quantization is not built yet. [Matmul](BENCHMARKS.md#22-cpu-matmul-kernels-stage-1-one-thread), [attention](BENCHMARKS.md#23-cpu-attention-and-rope-one-thread), [threads](BENCHMARKS.md#24-cpu-threads-for-prompts-stage-2)
+- **CPU kernels and threads.** CPU weights use bf16 pairs by default, or opt-in grouped INT8, with run-time-dispatched AVX2 + FMA kernels: a register-blocked GEMM for prompts and a streaming GEMV for decode, plus vector attention. INT8 decode fuses dequantization; prefill expands only small panels per worker. Prompt passes use threads (one per physical core by default); decode stays on one thread. CPUs without AVX2 retain scalar computation and threaded prefill. Both `marin` and `marin-run` accept `--backend cpu --quantize int8`; CPU INT4 is refused. [Matmul](BENCHMARKS.md#22-cpu-matmul-kernels-stage-1-one-thread), [attention](BENCHMARKS.md#23-cpu-attention-and-rope-one-thread), [threads](BENCHMARKS.md#24-cpu-threads-for-prompts-stage-2), [INT8](BENCHMARKS.md#25-cpu-int8-weights-stage-3)
 
 ## Speed
 
@@ -101,6 +101,10 @@ Qwen3-1.7B on a laptop GPU held to about 40 W (the power limit decides a lot, so
 | Restart after 4,000 tokens, `--snapshot` | first token 0.2–0.4 s instead of 6.5–7 s |
 
 On the CPU (Ryzen 7 260, 8 cores), Qwen3-0.6B: on **one thread** a 127-token prompt reads at 109 tok/s (was 26) and decode runs at 19 tok/s (was 11); on **8 threads** prompts read at 400–600 tok/s (a 1,023-token prompt: first token 2.1 s, was 49 s). Qwen3-1.7B: prefill 7.7 → 34 tok/s on one thread, 155 on 8; decode 3.6 → 6.7. On one thread llama.cpp reaches 210 / 18.8 (0.6B, AVX-512) and 102 / 19.4 (AVX2-only build); on 8 threads 1,061 / 19.8.
+
+CPU INT8 (group 128, three measured rounds after a warm-up) raises one-thread decode at 127 tokens from **18.5 to 34.5 tok/s on 0.6B** and **6.1 to 11.4 on 1.7B**. Peak RAM falls **1.30 to 0.73 GB** / **3.56 to 1.90 GB**. The 1/8-thread, 127/2,047-token matrix passes its speed and RAM gates; weights are 51.6% of BF16. Conversion happens at load time from the existing HF BF16 files; disk storage is unchanged. Relative quality gates pass on prose/code (97.559–98.730% top-1 agreement), with no new semantic regression in eight fixed prompts per model.
+
+CPU INT8 remains experimental: strict 0.6B HF parity and CUDA runtime regression checks are open, so full Stage 3 acceptance and INT4 are **no-go**. BF16 stays the default. [Full Stage 3 gates and measurements](BENCHMARKS.md#25-cpu-int8-weights-stage-3).
 
 Methods, tables and commands to repeat each number are in [BENCHMARKS.md](BENCHMARKS.md).
 

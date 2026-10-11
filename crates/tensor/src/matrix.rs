@@ -23,6 +23,7 @@ pub struct Matrix {
 enum Storage {
     Bits(Vec<u16>),
     Pairs(Vec<u32>),
+    Int8(crate::q8::Q8),
 }
 
 const PACK_BLOCK_BYTES: usize = 8 << 20;
@@ -54,6 +55,20 @@ impl Matrix {
         Ok(Self { rows, cols, data })
     }
 
+    pub fn quantized(
+        rows: usize,
+        cols: usize,
+        data: Vec<u16>,
+        scheme: crate::QuantScheme,
+    ) -> Result<Self, TensorError> {
+        let data = crate::q8::Q8::new(rows, cols, &data, scheme)?;
+        Ok(Self {
+            rows,
+            cols,
+            data: Storage::Int8(data),
+        })
+    }
+
     pub fn rows(&self) -> usize {
         self.rows
     }
@@ -69,6 +84,7 @@ impl Matrix {
     fn words(&self) -> Result<&[u32], TensorError> {
         match &self.data {
             Storage::Pairs(words) => Ok(words),
+            Storage::Int8(_) => Err(TensorError::Quantization("INT8 has no bf16 words".into())),
             Storage::Bits(bits) => bytemuck::try_cast_slice(bits).map_err(|_| TensorError::Shape {
                 what: "matrix alignment",
                 expected: size_of::<u32>(),
@@ -84,6 +100,9 @@ impl Matrix {
                 expected: self.cols,
                 actual: out.len(),
             });
+        }
+        if let Storage::Int8(q) = &self.data {
+            return q.row_f32(row, out);
         }
         let source = self
             .words()?
@@ -108,6 +127,9 @@ impl Matrix {
         if self.rows == 0 || tokens == 0 || self.cols == 0 {
             out.fill(0.0);
             return Ok(());
+        }
+        if let Storage::Int8(q) = &self.data {
+            return q.matmul(x, out);
         }
         let (words, pairs) = (self.words()?, self.pairs());
         let work = tokens.saturating_mul(self.rows).saturating_mul(self.cols);

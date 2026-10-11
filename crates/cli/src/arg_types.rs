@@ -52,7 +52,7 @@ impl ChatQuantArg {
 
 #[derive(Args, Debug, Clone, Copy)]
 pub struct QuantArgs {
-    /// Keep the layer weights as 8-bit (int8) or 4-bit (int4) numbers on the GPU: less memory to read per token, a
+    /// Keep weights as int8 on CPU or GPU (int4 is GPU only): less memory to read per token, a
     /// little accuracy lost (the embedding table and output head become int8 too)
     #[arg(long, value_enum)]
     pub quantize: Option<QuantBitsArg>,

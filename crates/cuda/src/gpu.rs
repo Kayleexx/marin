@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use cudarc::driver::sys::CUdevice_attribute;
+use cudarc::driver::sys::{CUdevice_attribute, cudaError_enum};
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchArgs, LaunchConfig,
 };
@@ -131,7 +131,13 @@ fn per_format(module: &Arc<CudaModule>, name: &str) -> Result<Vec<CudaFunction>,
 impl Gpu {
     pub fn new() -> Result<Self, CudaError> {
         libraries_present()?;
-        let ctx = CudaContext::new(0)?;
+        let ctx = CudaContext::new(0).map_err(|error| {
+            if error.0 == cudaError_enum::CUDA_ERROR_NO_DEVICE {
+                CudaError::Unavailable("no CUDA-capable device is visible".into())
+            } else {
+                CudaError::Driver(error)
+            }
+        })?;
         let stream = ctx.default_stream();
         // bf16 tensor-core instructions need at least compute_80; the driver compiles the PTX for the actual GPU.
         let options = CompileOptions {

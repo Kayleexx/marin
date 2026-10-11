@@ -40,7 +40,10 @@ pub fn run(session: &mut Session, line: &str) -> Result<Next, CliError> {
         "/backend" => println!(
             "{} ({})",
             session.loaded.model.backend_name(),
-            model::PRECISION
+            session.loaded.model.quantization().map_or_else(
+                || model::PRECISION.to_string(),
+                |q| format!("{}, f32 math", q.label())
+            )
         ),
         "/metrics" => metrics(session),
         "/profile" => profile(session)?,
