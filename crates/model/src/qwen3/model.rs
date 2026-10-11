@@ -6,6 +6,7 @@ use tensor::{Matrix, ensure_finite, rms_norm_rows};
 
 use super::Observer;
 use super::config::Qwen3Config;
+use super::layer::Buffers;
 use super::weights::{CpuStore, Qwen3Weights};
 use crate::ModelError;
 
@@ -62,9 +63,10 @@ impl Qwen3 {
         let start = kv.len();
         let mut hidden = probe.time(Stage::Embedding, || self.embed(tokens))?;
         notify(&mut observe, 0, last_row(&hidden, cfg.hidden_size));
+        let mut buffers = Buffers::default();
         for (index, layer) in self.weights.layers.iter().enumerate() {
             probe.layer(Some(index));
-            layer.forward(cfg, index, &mut hidden, start, kv, probe)?;
+            layer.forward(cfg, index, &mut hidden, start, (kv, &mut buffers), probe)?;
             notify(
                 &mut observe,
                 index.saturating_add(1),

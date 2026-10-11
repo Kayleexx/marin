@@ -54,7 +54,8 @@ fn matmul_matches_an_f64_reference_on_every_path() {
                 let mut dispatched = vec![f32::NAN; tokens * rows];
                 matrix.matmul(&x, &mut dispatched).unwrap();
                 let mut fallback = vec![f32::NAN; tokens * rows];
-                matrix.matmul_scalar(&x, &mut fallback).unwrap();
+                let mut slices: Vec<&mut [f32]> = fallback.chunks_mut(matrix.rows()).collect();
+                multiply_scalar(matrix.words().unwrap(), &x, &mut slices, matrix.cols());
                 for (name, out) in [("dispatch", &dispatched), ("scalar", &fallback)] {
                     let error = worst_error(&matrix, &bits, &x, out);
                     assert!(
@@ -112,4 +113,33 @@ fn even_rows_keep_the_loaders_buffer_and_odd_rows_are_repacked() {
     assert!(matches!(even.data, Storage::Bits(_)));
     let odd = Matrix::new(2, 3, vec![0; 6]).unwrap();
     assert!(matches!(odd.data, Storage::Pairs(_)));
+}
+
+#[test]
+fn matmul_is_identical_for_every_thread_count() {
+    let mut rng = Lcg(21);
+    for rows in [1, 3, 4, 5, 7, 13, 64, 100] {
+        for cols in [1, 2, 3, 33, 257] {
+            let bits: Vec<u16> = (0..rows * cols).map(|_| bf16_bits(rng.next())).collect();
+            let matrix = Matrix::new(rows, cols, bits).unwrap();
+            for tokens in [2, 3, 5, 66] {
+                let x: Vec<f32> = (0..tokens * cols).map(|_| rng.next()).collect();
+                let run = |threads| {
+                    crate::set_threads(threads);
+                    let mut out = vec![f32::NAN; tokens * rows];
+                    matrix.matmul(&x, &mut out).unwrap();
+                    out
+                };
+                let single = run(1);
+                for threads in [2, 3, 4, 8, 16] {
+                    assert_eq!(
+                        run(threads),
+                        single,
+                        "{rows}x{cols}, {tokens} tokens, {threads} threads"
+                    );
+                }
+                crate::set_threads(0);
+            }
+        }
+    }
 }

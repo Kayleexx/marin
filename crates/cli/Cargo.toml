@@ -30,5 +30,6 @@ runtime = { version = "0.0.0", path = "../runtime" }
 sampler = { version = "0.0.0", path = "../sampler" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+tensor = { version = "0.0.0", path = "../tensor" }
 thiserror = "2.0.21"
 unicode-width = "0.2.2"

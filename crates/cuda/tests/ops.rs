@@ -204,11 +204,7 @@ fn rope_matches_the_cpu() {
     let (heads, head_dim, tokens, start) = (3, 16, 4, 5);
     let x = values(tokens * heads * head_dim, 5);
     let mut expected = x.clone();
-    for (t, token) in expected.chunks_exact_mut(heads * head_dim).enumerate() {
-        for head in token.chunks_exact_mut(head_dim) {
-            tensor::rope(head, start + t, 10_000.0).unwrap();
-        }
-    }
+    tensor::rope_tokens(&mut expected, heads * head_dim, head_dim, start, 10_000.0).unwrap();
     let mut device = gpu.upload(&x).unwrap();
     gpu.rope(&mut device, heads, head_dim, start, 10_000.0)
         .unwrap();

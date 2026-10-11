@@ -18,6 +18,7 @@ use cli::{bench, guess, inspect, load, probe, quality, repl, report, telemetry, 
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    tensor::set_threads(cli.threads.unwrap_or(0));
     let style = Style::detect(cli.no_color);
     match run(cli, &style) {
         Ok(code) => code,

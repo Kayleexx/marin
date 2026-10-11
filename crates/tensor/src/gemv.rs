@@ -5,9 +5,9 @@ use crate::kernel::{Operands, halves, split_pairs};
 /// One token against every weight row, one row at a time with a low-half and a high-half accumulator. Reading
 /// several rows at once was slower: with 1024 columns the rows sit 2 KiB apart and the streams interfere
 /// (16 to 19 GB/s against 24 to 28 for one row).
-pub(crate) struct Gemv<'a>(pub Operands<'a>);
+pub(crate) struct Gemv<'a, 'b>(pub Operands<'a, 'b>);
 
-impl WithSimd for Gemv<'_> {
+impl WithSimd for Gemv<'_, '_> {
     type Output = ();
 
     #[inline(always)]
@@ -18,8 +18,8 @@ impl WithSimd for Gemv<'_> {
             out,
             cols,
             pairs,
-            ..
         } = self.0;
+        let Some(out) = out.first_mut() else { return };
         let (mut even, mut odd) = (Vec::new(), Vec::new());
         split_pairs(x, cols, &mut even, &mut odd);
         let (even_head, even_tail) = S::as_simd_f32s(&even);

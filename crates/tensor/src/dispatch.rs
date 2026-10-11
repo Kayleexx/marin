@@ -29,3 +29,14 @@ fn forced_scalar() -> bool {
         std::env::var("MARIN_MATMUL_SCALAR").is_ok_and(|v| !v.is_empty() && v != "0")
     })
 }
+
+/// Whether `accelerated` will run anything.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn available() -> bool {
+    matches!(pulp::Arch::new(), pulp::Arch::V3(_)) && !forced_scalar()
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub(crate) fn available() -> bool {
+    false
+}

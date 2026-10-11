@@ -58,6 +58,8 @@ What Marin measures on a laptop, what each optimization changed, and how to repe
 | 20 | Decode attention with 16-byte loads | decode +13 / +34 / +65 / +95% (bf16) at 2k / 4k / 8k / 16k tokens |
 | 21 | CPU inference (investigation) | Marin CPU: 1 core, prefill 26 and decode 11 tok/s vs llama.cpp 1,061 and 19.8 (8 threads) |
 | 22 | CPU matmul kernels, stage 1 (one thread) | prefill 3.5x at 127 tokens (0.6B), 4.4x / 3.9x (1.7B at 127 / 511), 2.8x / 2.7x at 511 / 1,023 tokens (0.6B; scalar attention is now half the pass); decode 1.5–1.8x at the memory ceiling; `verify` unchanged; peak RAM unchanged; scalar fallback at parity |
+| 23 | CPU attention and RoPE (one thread) | vector attention for prompts (8 query rows per vector, packed keys and values) and for decode (one streaming pass), RoPE angles computed once per token | 0.6B prefill 4.4x / 4.6x the section 21 rate at 511 / 1,023 tokens (first token 4.9 s / 10.8 s), 2.4x at 2,047; attention stage 4–7x faster; decode at 2,047 tokens 2.2x; `verify` unchanged; peak RAM unchanged |
+| 24 | CPU threads for prompts (stage 2) | row-split matmul and kv-head-split attention on scoped std threads (no new dependency), vector SiLU and RMSNorm, buffers reused across layers, `--threads N` | 0.6B prefill 5.0x / 5.4x at 8 threads for 511 / 1,023 tokens (first token 1.06 s / 2.06 s), 1.7B 5.0x; decode unchanged (memory-bound); results bit-identical for any thread count; `verify` unchanged; peak RAM +10 to +20 MB |
 
 Rows 7 and 9 did not simply get faster; the cause is the power cap, explained next.
 
@@ -475,7 +477,116 @@ Attention did not change and is now half the pass. It runs at about 14 GFLOP/s (
 - `pulp` (and `bytemuck` with it) is a new dependency; the AVX-512 path was not tried.
 - The in-place view relies on a 4-byte-aligned loader buffer (checked at run time, with the repack fallback).
 - Single-thread decode is at the memory ceiling (21–23 GB/s); more needs threads (stage 2) or smaller weights (stage 3).
-- **Recommendation: close stage 1.** The one miss, 0.6B prefill at 511 and 1,023 tokens, comes from unchanged scalar attention, not from the matmul work. Vectorizing attention is the natural first item of the next CPU step, since it also limits what threads can give at long prompts.
+- **Stage 1 is closed with one gate open:** the one miss, 0.6B prefill at 511 and 1,023 tokens, comes from unchanged scalar attention, not from the matmul work. Vectorizing attention is the natural first item of the next CPU step, since it also limits what threads can give at long prompts.
+
+### 23. CPU attention and RoPE (one thread)
+
+*Problem.* After section 22 the 0.6B at 1,023 tokens spent 8.8 s of an 18.2 s prefill in attention, running at about 14 GFLOP/s against 90–100 for the matrix stages. Scope: CPU attention, RoPE and the elementwise stages, one thread, existing safe Rust and `pulp` dispatch; the scalar fallback and strict `verify` stay.
+
+**Profile before the change** (0.6B, one profiled run per size):
+
+| Prompt | prefill | attention | RoPE | norms | decode step | decode attention |
+|---|---|---|---|---|---|---|
+| 127 | 1.30 s | 103 ms (8%) | 50 ms (3.8%) | 13 ms | 55 ms | 4.1 ms (7%) |
+| 511 | 6.9 s | 2.17 s (31%) | 201 ms (2.9%) | 52 ms | 65 ms | 13.9 ms (22%) |
+| 1,023 | 17.9 s | 8.59 s (48%) | 406 ms (2.3%) | 103 ms | 77 ms | 27.3 ms (36%) |
+| 2,047 | 72.5 s | 53.96 s (74%) | 838 ms (1.2%) | 207 ms | 155 ms | 102.6 ms (66%) |
+
+Attention grew faster than the square of the context while everything else is linear. **Diagnosis** (a stand-alone copy of the loop, one layer): dot products 56% of the time (18.6 ns per query-key pair), weighted sum of values 34%, softmax 10% (scalar `exp`). Causes: (1) the baseline build gives 4-wide SSE2 without FMA and every 128-wide dot ended in a serial horizontal sum; (2) each (token, head) swept its kv head's whole slice again, more than the L2 at 2,047 positions, and the two query heads sharing a kv head swept it separately; (3) scalar `exp`. Allocations were not a factor. RoPE recomputed `powf` and `sin_cos` for every head of every layer (24 times more than needed). Norms and other elementwise stages were 0.2–1% and were left alone.
+
+**Gates (written before the code).**
+
+| Area | Gate |
+|---|---|
+| Correctness | within 1e-5 of an f64 reference on 1–66 tokens, 0–130 earlier positions, six head layouts; `verify` unchanged; greedy output byte-identical to the previous build and on the scalar path |
+| RoPE | bit-identical |
+| Peak RAM | at most +20 MB |
+| Speed (0.6B) | prefill at least 3x the section 21 rate at 511 and 1,023 tokens (first token at most 7.2 s and 16.4 s); attention at 1,023 tokens at least 2.5x faster |
+| No regression | prefill at 127 tokens, decode and the 1.7B within 2% or better; scalar fallback within 5% |
+
+**Change** (`crates/tensor`: `attention.rs`, `attention_simd.rs`, `attention_one.rs`; the model calls `tensor::attention`):
+- **Prompts (2+ tokens):** one (token, head) row per vector lane: the 8 rows are the heads of one kv head group over 4 tokens, so a score is a multiply-add of a broadcast key element with a transposed query vector and needs no horizontal sum. Keys and values are packed once per kv head (`[position][head_dim]`, and `[tile of 64][column chunk of 8][position][8]`) so the loops stream from L1. Softmax runs across lanes with a vector `exp` (Cephes polynomial); the causal mask touches only the last few positions.
+- **Decode (1 token):** keys then values streamed once, row by row, all 16 query heads scored as each row passes (four independent accumulators), vector softmax.
+- **RoPE:** `rope_tokens` computes the frequencies once and one `sin_cos` per pair per token, shared by all heads.
+- **Fallback:** the original per-head loop, used when AVX2+FMA is absent, the head size is not a multiple of 8, or `MARIN_MATMUL_SCALAR=1`.
+
+**Results** (one thread, current build = the commit before this change, interleaved runs; a browser was running):
+
+| Model | Prompt | First token | Prefill | Decode | Peak RAM |
+|---|---|---|---|---|---|
+| 0.6B | 127 | 1.30 → 1.17 s | 97 → 109 tok/s | 17.6 → 19.4 | 1.30 GB both |
+| 0.6B | 511 | 6.69 → 4.87 s | 76 → 105 (**4.4x** the section 21 rate) | 16.0 → 18.3 | 1.42 both |
+| 0.6B | 1,023 | 17.5 → 10.8 s | 59 → 95 (**4.6x**) | 13.4 → 17.0 | 1.58 both |
+| 0.6B | 2,047 | 62.3 → 25.4 s | 33 → 80 (2.4x) | 6.6 → 14.5 (**2.2x**) | 1.88 both |
+| 1.7B | 511 | 16.4 → 15.0 s | 31 → 34 | 6.4 → 6.6 | 3.69 both |
+| 1.7B | 1,023 | 39.0 → 31.2 s | 26 → 33 | 5.9 → 6.3 | 3.87 both |
+
+Stage times (0.6B, before → after): prefill attention 103 → 39 ms (127), 2.17 → 0.53 s (511), 8.59 → 2.03 s (1,023, 4.2x), 53.96 → 7.97 s (2,047, 6.8x, now about 60 GFLOP/s); RoPE 406 → 21 ms at 1,023; attention per decoded token 4.1 → 1.4 ms (127), 27.3 → 10.5 ms (1,023), 102.6 → 19.0 ms (2,047, 5.4x, about 24 GB/s of cache: the memory ceiling).
+
+**Gates:** all met. `verify` (Qwen3-1.7B-Base, CPU) passes with max logit diff 3.05e-5 for all three cases; the scalar path is identical to before; greedy 0.6B-Base output is byte-identical across the old build, the new build and the scalar path; the new attention is within 1e-5 of the reference on both paths; RoPE equals the per-head formula bit for bit; scalar fallback 28.2 vs 27.5 tok/s prefill; peak RAM identical; the 1.7B is not slower.
+
+**What failed on the way.**
+- The first prefill kernel (no packing, a slice taken per position and column chunk) was only 2.7–3.5x faster than the old loop; per-position slicing dominated. Packing values once per kv head reached 4.1–5.0x.
+- Packing the last value tile at its real length misaligned the chunks of blocks using fewer positions (errors up to 2.0); tests caught it, tiles are now padded to 64 positions.
+- The first decode kernel never ran: the guard still rejected one-token calls, and unit tests could not tell, since the scalar loop gives the same answers. An ablation that changed nothing in the timings exposed it; fixed, decode attention was 5x faster.
+
+**Left over.** At 2,047 tokens the 0.6B prefill (25 s) is MLP 41%, attention 31%, projections 17%; prefill attention runs at about 60 GFLOP/s, below the roughly 110 the instruction mix allows (the weighted-sum loop is the larger part). Decode attention is at the cache-read ceiling, so only a smaller cache (stage 4) or threads help. Both kernels need AVX2+FMA and a head size that is a multiple of 8. The vector `exp` differs from `f32::exp` by a few ulps, inside every tolerance above. Next CPU step: threads (section 24).
+
+### 24. CPU threads for prompts (stage 2)
+
+*Why.* Prefill is compute-bound and the machine has 8 cores (16 threads); llama.cpp reaches 5x at 8 threads (section 21). Scope: threads for the matmul, attention and elementwise stages of a prompt pass. No quantization.
+
+**Measured before designing** (stand-alone programs, Ryzen 7 260: 8 cores / 16 threads, 1 MiB L2 per core, 16 MiB L3):
+- *Memory bandwidth does not scale with threads.* Streaming a 1 GiB buffer: 25.8 GB/s with 1 thread, 26.2 with 8, 26.3 with 16. One thread already reads at 85–90% of what the chip can (Marin decode reads weights at 21–23 GB/s), so **decode cannot gain more than about 15% from threads here**; llama.cpp's flat decode curve (18.8 tok/s at 1 thread, 19.8 at 8) agrees.
+- *Compute scales, until SMT.* A pure AVX2 multiply-add loop gives 155 GFLOP/s per thread for 1 to 8 threads (8.0x) and 99 per thread at 12 threads: the 16 logical threads are 8 cores, and more than one thread per core only hurts.
+- *Thread start-up is not free:* a scoped spawn and join costs 28 us for 2 threads, 47 us for 4 and 85 us for 8. A prompt pass has about 8 parallel regions per layer.
+- *Under 8 threads of GEMM* the clock falls from 5.0 to 4.7 GHz, and each of 8 concurrent jobs runs about 25% slower than one alone (3.8 to 4.9 ms for the same share of a matrix).
+
+**Design.**
+- Threads for prompt passes only; decode stays on one thread (nothing to gain, and a spawn per region would cost 15–40% of a decode step).
+- `std::thread::scope` per parallel region: no dependency, no `unsafe`. A region runs on the caller plus helpers pulling jobs from a shared queue, and only when it has at least about 16 million multiply-adds per thread, so short prompts run as before. A persistent pool (`rayon` 1.12, about four small crates) was measured for the same 8 jobs and was no faster (4.9 ms against 5.0 ms), so it was not added.
+- Matmul: weight rows split into ranges aligned to the 4-row tile; each thread packs only its own rows and writes its own columns of every token's output (`split_at_mut`, no copies). Attention: split by kv head (8 here). Every output element is computed by the same instructions as on one thread, so **results are bit-identical for any thread count** (tested for 1, 2, 3, 4, 8 and 16 threads on shapes with remainders).
+- Thread count: `--threads N` on `marin` and `marin-run`; default one per physical core, read from `/sys/devices/system/cpu/cpu*/topology/thread_siblings_list`. `--threads 1` is the old single-thread path with no spawn.
+- Serial work that mattered once the matrices were fast: SiLU (a scalar `exp` loop, 8 ms per layer at 511 tokens) and RMSNorm now run as vector kernels; the even/odd split of the activations (done by every thread) became a loop the compiler vectorizes (fixed cost per job 0.52 ms to 0.13 ms); and the CPU forward pass now allocates its intermediate buffers once per pass instead of about 35 MB per layer.
+
+**Gates (written before the code) and results.**
+
+| Area | Gate | Result |
+|---|---|---|
+| Correctness | outputs bit-identical for 1–16 threads; scalar path correct with threads; existing tests unchanged; `verify` at the unchanged tolerance with 1 and 8 threads; greedy output identical | **met:** `verify` max logit diff 2.10e-5 / 2.67e-5 / 1.72e-5 at both 1 and 8 threads (was 3.05e-5 / 3.43e-5 / 3.05e-5); greedy 0.6B-Base output (3 prompts, 48 tokens) byte-identical for 1 thread, 8 threads, 8 threads on the scalar path, and the previous build |
+| 0.6B scaling | at 511 and 1,023 tokens at least 2.8x at 4 threads and 4.5x at 8; 3x at 8 threads for 127 tokens; first token at most 1.2 s at 511 and 3 s at 1,023 tokens | **met:** 4 threads 3.3x / 3.4x; 8 threads **5.0x at 511 and 5.4x at 1,023 tokens**, 4.1x at 127; first token 1.06 s and 2.06 s (best runs 0.85 s and 1.75 s) |
+| 1.7B | at 511 tokens at least 4x faster than one thread | **met:** 5.0x at 8 threads (16.7 s to 3.3 s) |
+| One thread | no slowdown, no thread started | met (`--threads 1` is the old path; the vector SiLU and norm make it a little faster) |
+| Decode | unchanged, never starts a thread | met (within noise: 0.6B 15.8 against 15.6 tok/s at 1,023 tokens of context) |
+| Short prompts | 16 tokens or fewer not slower | met: 8 tokens 164–173 ms against 160–169 (no thread starts), 16 tokens 234 to 169 ms, 32 tokens 370 to 155 ms |
+| Peak RAM | at most +24 MB at 8 threads and 2,047 tokens | met: 1.87 to 1.89 GB (+10 to +20 MB) |
+| CPU cost | extra CPU over one thread below 30% at 8 threads | met: a 1,023-token run takes 11.6 s of CPU on 1 thread and 13.9 s on 8 (+20%) |
+
+**Results, 0.6B prefill** (tokens per second, speedup against 1 thread; first token in brackets; this session's machine ran about 10% slower than the best runs of section 23):
+
+| Prompt | 1 thread | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| 127 | 98.3 (1.29 s) | 160.8 (1.6x) | 262.9 (2.7x) | **402.8 (4.1x; 0.32 s)** | 343.9 |
+| 511 | 96.8 (5.28 s) | 173.6 (1.8x) | 320.6 (3.3x) | **481.8 (5.0x; 1.06 s)** | 388.1 |
+| 1,023 | 91.5 (11.2 s) | 175.5 (1.9x) | 314.6 (3.4x) | **496.7 (5.4x; 2.06 s)** | 430.0 |
+
+The best 8-thread runs reached 473 / 603 / 583 tok/s (first token 0.27 s, 0.85 s, 1.75 s). 16 threads is slower than 8 at every size. **1.7B** at 8 threads: 138.8 / 153.1 / 155.0 tok/s at 127 / 511 / 1,023 tokens (4.4x / 5.0x / 5.0x). A 2,047-token prompt on the 0.6B: 24.8 s on 1 thread, 4.6 s on 8 (5.3x). The scalar fallback also threads: 24.1 tok/s on 1 thread, 95.6 on 8 (4.0x) at 511 tokens; scalar attention stays serial.
+
+**What the stage profile showed.** At 8 threads and 511 tokens the first version reached only 3.8x. The matrix stages scaled 4.0x and about 14% of the pass was serial: RMSNorm 57 ms, scalar SiLU inside the MLP stage (about 8 ms per layer), 70 ms of untimed copies and allocations, RoPE, residual adds, the cache write and the LM head (14 ms, one token). Each fix was measured:
+- vector SiLU: 1.9 to 0.31 ns per element (the first version was 10x slower, see below); vector RMSNorm: 57 to 12 ms per pass; vectorized activation split: 8-thread prefill +8%.
+- buffers reused across layers: 8-thread wall time −12% on a 1,023-token run and system time 2.8 s to 0.5 s. The process had been allocating and page-faulting about 1 GB per prompt, and page faults from 8 threads contend; CPU cost over one thread went from +45% to +20–23%.
+
+**What failed or did not help.**
+- A vector SiLU written with a closure inside the SIMD function ran 10x slower than the scalar loop (18.5 against 1.9 ns per element): the closure was not compiled with the AVX2 target features. As a plain `#[inline(always)]` function it is 6x faster than scalar.
+- Splitting the matmul into 2 jobs per thread (so early finishers take more): 444 and 436 tok/s against 467 and 449, no gain.
+- A shared pool of scratch buffers for the matmul and attention kernels: first token within noise with and without it (511 tokens: 1055, 1064, 1078 ms with; 1048, 1017, 1061 without), so it was removed.
+- `rayon`'s persistent pool against scoped threads: 4.9 against 5.0 ms for 8 jobs; allocator settings (`MALLOC_MMAP_THRESHOLD_`, `MALLOC_TRIM_THRESHOLD_`) cut system time but only as a diagnosis, since safe code cannot set them.
+
+**Trade-offs and what is left.**
+- Decode is single-threaded by design: memory bandwidth is the limit here. A machine where one core cannot saturate memory (many DDR4 desktops) might gain from 2–4 decode threads; that needs a persistent pool and a measurement on such a machine, neither of which exists yet.
+- About 10% of an 8-thread prompt pass is still serial (untimed copies of the hidden state, RoPE, residual adds, cache write, the one-token LM head). 16 threads is never better than 8; the default (one per physical core) is the best setting measured. No thread pinning (safe Rust cannot set it), so a busy machine can place two threads on one core.
+- Scalar attention (CPUs without AVX2) is serial; the scalar matmul threads.
+- **Recommendation: close stage 2.** Next CPU step: stage 3 (CPU quantization), since decode now sits at the memory ceiling and the 1.7B at 4 GB needs smaller weights anyway.
 
 ## Tried and not adopted
 

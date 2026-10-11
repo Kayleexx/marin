@@ -20,40 +20,6 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     acc.iter().sum::<f32>() + tail
 }
 
-/// RMSNorm over each `weight.len()`-sized row of `x`, in place.
-pub fn rms_norm_rows(x: &mut [f32], weight: &[f32], eps: f32) -> Result<(), TensorError> {
-    if weight.is_empty() || x.len().checked_rem(weight.len()) != Some(0) {
-        return Err(TensorError::Shape {
-            what: "rms_norm input",
-            expected: weight.len(),
-            actual: x.len(),
-        });
-    }
-    for row in x.chunks_exact_mut(weight.len()) {
-        let mean_sq = row.iter().map(|v| v * v).sum::<f32>() / row.len() as f32;
-        let scale = 1.0 / (mean_sq + eps).sqrt();
-        for (v, w) in row.iter_mut().zip(weight) {
-            *v = *v * scale * w;
-        }
-    }
-    Ok(())
-}
-
-/// `gate = silu(gate) * up`.
-pub fn silu_mul(gate: &mut [f32], up: &[f32]) -> Result<(), TensorError> {
-    if gate.len() != up.len() {
-        return Err(TensorError::Shape {
-            what: "silu_mul operands",
-            expected: gate.len(),
-            actual: up.len(),
-        });
-    }
-    for (g, u) in gate.iter_mut().zip(up) {
-        *g = *g / (1.0 + (-*g).exp()) * u;
-    }
-    Ok(())
-}
-
 pub fn softmax(x: &mut [f32]) {
     let max = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut sum = 0.0_f32;
@@ -80,20 +46,50 @@ pub fn add_in_place(a: &mut [f32], b: &[f32]) -> Result<(), TensorError> {
     Ok(())
 }
 
-/// Rotary embedding on one head vector, pairing element `i` with `i + size/2`.
-pub fn rope(head: &mut [f32], position: usize, theta: f32) -> Result<(), TensorError> {
-    let size = head.len();
-    if size == 0 || size.checked_rem(2) != Some(0) {
-        return Err(TensorError::OddHeadSize { what: "rope", size });
+/// Rotary embedding of every head of every `token_dim`-long token row of `x`; token `t` sits at position
+/// `start + t`. Element `i` of a head pairs with `i + size / 2`. The angles are computed once per token and
+/// shared by all its heads.
+pub fn rope_tokens(
+    x: &mut [f32],
+    token_dim: usize,
+    head_size: usize,
+    start: usize,
+    theta: f32,
+) -> Result<(), TensorError> {
+    if head_size == 0 || head_size.checked_rem(2) != Some(0) {
+        return Err(TensorError::OddHeadSize {
+            what: "rope",
+            size: head_size,
+        });
     }
-    let (first, second) = head.split_at_mut(size.checked_div(2).unwrap_or(0));
-    for (i, (a, b)) in first.iter_mut().zip(second.iter_mut()).enumerate() {
-        let exponent = i as f32 * 2.0 / size as f32;
-        let angle = position as f32 * theta.powf(-exponent);
-        let (sin, cos) = angle.sin_cos();
-        let (x, y) = (*a, *b);
-        *a = x * cos - y * sin;
-        *b = y * cos + x * sin;
+    if token_dim.checked_rem(head_size) != Some(0)
+        || x.len().checked_rem(token_dim.max(1)) != Some(0)
+    {
+        return Err(TensorError::Shape {
+            what: "rope input",
+            expected: token_dim,
+            actual: x.len(),
+        });
+    }
+    let half = head_size.checked_div(2).unwrap_or(0);
+    let frequencies: Vec<f32> = (0..half)
+        .map(|i| theta.powf(-(i as f32 * 2.0 / head_size as f32)))
+        .collect();
+    let mut angles = vec![(0.0_f32, 0.0_f32); half];
+    for (t, token) in x.chunks_exact_mut(token_dim.max(1)).enumerate() {
+        let position = start.saturating_add(t) as f32;
+        for (angle, frequency) in angles.iter_mut().zip(&frequencies) {
+            let (sin, cos) = (position * frequency).sin_cos();
+            *angle = (cos, sin);
+        }
+        for head in token.chunks_exact_mut(head_size) {
+            let (first, second) = head.split_at_mut(half);
+            for ((a, b), (cos, sin)) in first.iter_mut().zip(second.iter_mut()).zip(&angles) {
+                let (x, y) = (*a, *b);
+                *a = x * cos - y * sin;
+                *b = y * cos + x * sin;
+            }
+        }
     }
     Ok(())
 }
@@ -124,33 +120,6 @@ mod tests {
     }
 
     #[test]
-    fn rms_norm_matches_hand_computation() {
-        let mut x = [3.0, 4.0];
-        rms_norm_rows(&mut x, &[1.0, 1.0], 0.0).unwrap();
-        assert_close(&x, &[0.848_528_1, 1.131_370_9]);
-    }
-
-    #[test]
-    fn rms_norm_normalizes_every_row() {
-        let mut x = [3.0, 4.0, 6.0, 8.0];
-        rms_norm_rows(&mut x, &[1.0, 1.0], 0.0).unwrap();
-        assert_close(&x, &[0.848_528_1, 1.131_370_9, 0.848_528_1, 1.131_370_9]);
-    }
-
-    #[test]
-    fn rms_norm_rejects_ragged_input() {
-        let mut x = [1.0, 2.0, 3.0];
-        assert!(rms_norm_rows(&mut x, &[1.0, 1.0], 1e-6).is_err());
-    }
-
-    #[test]
-    fn silu_mul_matches_hand_computation() {
-        let mut gate = [0.0, 1.0];
-        silu_mul(&mut gate, &[2.0, 2.0]).unwrap();
-        assert_close(&gate, &[0.0, 1.462_117_2]);
-    }
-
-    #[test]
     fn softmax_matches_hand_computation() {
         let mut x = [1.0, 2.0, 3.0];
         softmax(&mut x);
@@ -167,20 +136,42 @@ mod tests {
     #[test]
     fn rope_position_zero_is_identity() {
         let mut head = [1.0, 2.0, 3.0, 4.0];
-        rope(&mut head, 0, 10_000.0).unwrap();
+        rope_tokens(&mut head, 4, 4, 0, 10_000.0).unwrap();
         assert_close(&head, &[1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]
     fn rope_rotates_the_pair_by_the_position_angle() {
         let mut head = [1.0, 0.0];
-        rope(&mut head, 1, 10_000.0).unwrap();
+        rope_tokens(&mut head, 2, 2, 1, 10_000.0).unwrap();
         assert_close(&head, &[0.540_302_3, 0.841_470_98]);
     }
 
     #[test]
+    fn rope_tokens_equals_the_per_head_formula_bit_for_bit() {
+        let (heads, size, theta) = (3, 8, 10_000.0_f32);
+        let input: Vec<f32> = (0..4 * heads * size)
+            .map(|i| (i as f32 * 0.37).sin())
+            .collect();
+        let mut actual = input.clone();
+        rope_tokens(&mut actual, heads * size, size, 5, theta).unwrap();
+        let mut expected = input;
+        for (t, token) in expected.chunks_exact_mut(heads * size).enumerate() {
+            for head in token.chunks_exact_mut(size) {
+                let (first, second) = head.split_at_mut(size / 2);
+                for (i, (a, b)) in first.iter_mut().zip(second.iter_mut()).enumerate() {
+                    let exponent = i as f32 * 2.0 / size as f32;
+                    let (sin, cos) = ((5 + t) as f32 * theta.powf(-exponent)).sin_cos();
+                    (*a, *b) = (*a * cos - *b * sin, *b * cos + *a * sin);
+                }
+            }
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn rope_rejects_odd_head() {
-        assert!(rope(&mut [1.0, 2.0, 3.0], 1, 10_000.0).is_err());
+        assert!(rope_tokens(&mut [1.0, 2.0, 3.0], 3, 3, 1, 10_000.0).is_err());
     }
 
     #[test]

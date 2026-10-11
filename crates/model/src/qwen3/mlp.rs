@@ -2,26 +2,36 @@ use tensor::{Matrix, silu_mul};
 
 use crate::ModelError;
 
-/// `down(silu(gate(x)) * up(x))` for `tokens` rows of `x`.
+/// The MLP's intermediate results, reused by every layer of a pass.
+#[derive(Default)]
+pub(crate) struct MlpBuffers {
+    gated: Vec<f32>,
+    upped: Vec<f32>,
+    pub(crate) out: Vec<f32>,
+}
+
+fn sized(buffer: &mut Vec<f32>, tokens: usize, width: usize) -> Result<(), ModelError> {
+    let size = tokens
+        .checked_mul(width)
+        .ok_or_else(|| ModelError::InvalidConfig("mlp size overflows".into()))?;
+    buffer.resize(size, 0.0);
+    Ok(())
+}
+
+/// `down(silu(gate(x)) * up(x))` for `tokens` rows of `x`, left in `buffers.out`.
 pub(crate) fn mlp(
     x: &[f32],
     tokens: usize,
-    gate: &Matrix,
-    up: &Matrix,
-    down: &Matrix,
-) -> Result<Vec<f32>, ModelError> {
-    let inner = tokens
-        .checked_mul(gate.rows())
-        .ok_or_else(|| ModelError::InvalidConfig("mlp size overflows".into()))?;
-    let outer = tokens
-        .checked_mul(down.rows())
-        .ok_or_else(|| ModelError::InvalidConfig("mlp size overflows".into()))?;
-    let mut gated = vec![0.0; inner];
-    let mut upped = vec![0.0; inner];
-    gate.matmul(x, &mut gated)?;
-    up.matmul(x, &mut upped)?;
-    silu_mul(&mut gated, &upped)?;
-    let mut out = vec![0.0; outer];
-    down.matmul(&gated, &mut out)?;
-    Ok(out)
+    (gate, up, down): (&Matrix, &Matrix, &Matrix),
+    buffers: &mut MlpBuffers,
+) -> Result<(), ModelError> {
+    let MlpBuffers { gated, upped, out } = buffers;
+    sized(gated, tokens, gate.rows())?;
+    sized(upped, tokens, gate.rows())?;
+    sized(out, tokens, down.rows())?;
+    gate.matmul(x, gated)?;
+    up.matmul(x, upped)?;
+    silu_mul(gated, upped)?;
+    down.matmul(gated, out)?;
+    Ok(())
 }

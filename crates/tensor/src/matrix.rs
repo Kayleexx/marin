@@ -1,10 +1,13 @@
+use std::ops::Range;
+
 use pulp::bytemuck;
 
 use crate::TensorError;
 use crate::dispatch::accelerated;
-use crate::gemm::Gemm;
+use crate::gemm::{Gemm, MR};
 use crate::gemv::Gemv;
 use crate::kernel::Operands;
+use crate::threads;
 
 /// Row-major weight matrix of bf16 values, `rows` outputs by `cols` inputs. The kernels read two bf16 as one `u32`
 /// (see `kernel`), so a row is `cols.div_ceil(2)` such pairs. The loader's `Vec<u16>` is viewed that way in place
@@ -96,7 +99,8 @@ impl Matrix {
     }
 
     /// `out[t][r] = dot(self[r], x[t])` for every token row `t` of `x`: a GEMV for one token and a
-    /// register-blocked GEMM for more on AVX2 with FMA, the plain row-by-row loop elsewhere.
+    /// register-blocked GEMM for more on AVX2 with FMA, the plain row-by-row loop elsewhere. Prompts big enough
+    /// to pay for it split the weight rows over threads; the result does not depend on the thread count.
     pub fn matmul(&self, x: &[f32], out: &mut [f32]) -> Result<(), TensorError> {
         let tokens = x.len().checked_div(self.cols).unwrap_or(0);
         check_len("matmul input", tokens.checked_mul(self.cols), x.len())?;
@@ -105,39 +109,59 @@ impl Matrix {
             out.fill(0.0);
             return Ok(());
         }
-        let operands = Operands {
-            weights: self.words()?,
-            x,
-            out,
-            rows: self.rows,
-            cols: self.cols,
-            pairs: self.pairs(),
-        };
-        let unused = if tokens == 1 {
-            accelerated(Gemv(operands)).map_err(|op| op.0)
+        let (words, pairs) = (self.words()?, self.pairs());
+        let work = tokens.saturating_mul(self.rows).saturating_mul(self.cols);
+        let workers = if tokens > 1 {
+            threads::workers(work, self.rows)
         } else {
-            accelerated(Gemm(operands)).map_err(|op| op.0)
+            1
         };
-        match unused {
-            Ok(()) => Ok(()),
-            Err(operands) => self.matmul_scalar(operands.x, operands.out),
-        }
+        let ranges = threads::ranges(self.rows, workers, MR);
+        let lens: Vec<usize> = ranges.iter().map(Range::len).collect();
+        let parts = threads::split_columns(out, self.rows, &lens);
+        threads::run_jobs(
+            ranges.into_iter().zip(parts).collect(),
+            |(range, mut outs)| {
+                let from = range.start.saturating_mul(pairs);
+                let weights = words
+                    .get(from..range.end.saturating_mul(pairs))
+                    .unwrap_or_default();
+                multiply(weights, x, &mut outs, self.cols);
+            },
+        );
+        Ok(())
     }
+}
 
-    /// Each weight row is converted to f32 once and reused across all tokens.
-    fn matmul_scalar(&self, x: &[f32], out: &mut [f32]) -> Result<(), TensorError> {
-        let mut scratch = vec![0.0_f32; self.cols];
-        for (r, weights) in self.words()?.chunks_exact(self.pairs().max(1)).enumerate() {
-            convert_row(weights, &mut scratch);
-            let inputs = x.chunks_exact(self.cols);
-            let outputs = out.chunks_exact_mut(self.rows);
-            for (input, output) in inputs.zip(outputs) {
-                if let Some(slot) = output.get_mut(r) {
-                    *slot = crate::dot(&scratch, input);
-                }
+/// `weights` (some whole rows) times every token of `x`, into one output slice per token.
+fn multiply(weights: &[u32], x: &[f32], out: &mut [&mut [f32]], cols: usize) {
+    let operands = Operands {
+        weights,
+        x,
+        out,
+        cols,
+        pairs: cols.div_ceil(2),
+    };
+    let unused = if x.len() == cols {
+        accelerated(Gemv(operands)).map_err(|op| op.0)
+    } else {
+        accelerated(Gemm(operands)).map_err(|op| op.0)
+    };
+    if let Err(operands) = unused {
+        multiply_scalar(operands.weights, operands.x, operands.out, cols);
+    }
+}
+
+/// Each weight row is converted to f32 once and reused across all tokens.
+fn multiply_scalar(weights: &[u32], x: &[f32], out: &mut [&mut [f32]], cols: usize) {
+    let mut scratch = vec![0.0_f32; cols];
+    for (r, row) in weights.chunks_exact(cols.div_ceil(2).max(1)).enumerate() {
+        convert_row(row, &mut scratch);
+        for (input, output) in x.chunks_exact(cols.max(1)).zip(out.iter_mut()) {
+            if let Some(slot) = output.get_mut(r) {
+                *slot = crate::dot(&scratch, input);
             }
         }
-        Ok(())
     }
 }
 

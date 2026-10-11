@@ -6,7 +6,7 @@ use crate::kernel::{Operands, halves, split_pairs, step};
 
 /// Weight rows and tokens in one register tile: 8 accumulators plus the 4 weight rows and 2 activation pairs
 /// stay in the 16 vector registers (4x3 and 6x2 spill and run at half the speed).
-const MR: usize = 4;
+pub(crate) const MR: usize = 4;
 const NR: usize = 2;
 /// Pairs along the shared dimension per pass, and tokens per block: sized so the packed activations stay in L2.
 const KC: usize = 256;
@@ -14,11 +14,11 @@ const TB: usize = 64;
 
 /// Many tokens against every weight row. Weights and activations are packed into panels laid out in the order
 /// the micro-kernel reads them, then multiplied tile by tile.
-pub(crate) struct Gemm<'a>(pub Operands<'a>);
+pub(crate) struct Gemm<'a, 'b>(pub Operands<'a, 'b>);
 
 type Tile<S> = [[<S as Simd>::f32s; NR]; MR];
 
-impl WithSimd for Gemm<'_> {
+impl WithSimd for Gemm<'_, '_> {
     type Output = ();
 
     #[inline(always)]
@@ -27,7 +27,6 @@ impl WithSimd for Gemm<'_> {
             weights,
             x,
             out,
-            rows,
             cols,
             pairs,
         } = self.0;
@@ -40,9 +39,7 @@ impl WithSimd for Gemm<'_> {
         let panel_len = kvecs.saturating_mul(2 * NR);
         let mut token_panels = vec![simd.splat_f32s(0.0); panel_len.saturating_mul(TB / NR)];
         let (mut even, mut odd) = (Vec::new(), Vec::new());
-        let blocks = x
-            .chunks(TB.saturating_mul(cols))
-            .zip(out.chunks_mut(TB.saturating_mul(rows)));
+        let blocks = x.chunks(TB.saturating_mul(cols)).zip(out.chunks_mut(TB));
         for (block_x, block_out) in blocks {
             split_pairs(block_x, cols, &mut even, &mut odd);
             for k0 in (0..pairs).step_by(KC) {
@@ -56,12 +53,12 @@ impl WithSimd for Gemm<'_> {
                 for (g, rows_group) in weights.chunks(MR.saturating_mul(pairs)).enumerate() {
                     pack_weights(simd, &mut weight_panel, rows_group, pairs, &k);
                     let packed_w = weight_panel.get(..vecs.saturating_mul(MR)).unwrap_or(&[]);
-                    let outs = block_out.chunks_mut(NR.saturating_mul(rows));
+                    let outs = block_out.chunks_mut(NR);
                     for (panel, tokens_out) in token_panels.chunks_exact(panel_len).zip(outs) {
                         let packed_x = panel.get(..vecs.saturating_mul(2 * NR)).unwrap_or(&[]);
                         let tile = multiply::<S>(simd, packed_w, packed_x);
                         let first_row = g.saturating_mul(MR);
-                        store(simd, &tile, tokens_out, rows, first_row, k.start == 0);
+                        store(simd, &tile, tokens_out, first_row, k.start == 0);
                     }
                 }
             }
@@ -153,12 +150,11 @@ fn multiply<S: Simd>(simd: S, weights: &[S::u32s], tokens: &[S::f32s]) -> Tile<S
 fn store<S: Simd>(
     simd: S,
     tile: &Tile<S>,
-    tokens_out: &mut [f32],
-    rows: usize,
+    tokens_out: &mut [&mut [f32]],
     first_row: usize,
     overwrite: bool,
 ) {
-    for (t, token_out) in tokens_out.chunks_mut(rows).enumerate() {
+    for (t, token_out) in tokens_out.iter_mut().enumerate() {
         let slots = token_out.get_mut(first_row..).unwrap_or_default();
         for (slot, sums) in slots.iter_mut().zip(tile) {
             let Some(sum) = sums.get(t) else { continue };

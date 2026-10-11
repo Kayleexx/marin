@@ -32,6 +32,7 @@ const CHAT_CTX: usize = 4096;
 
 fn main() -> ExitCode {
     let cli = MarinCli::parse();
+    tensor::set_threads(cli.options.threads.unwrap_or(0));
     let style = Style::detect(cli.options.no_color);
     match run(cli, style) {
         Ok(code) => code,
