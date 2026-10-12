@@ -71,8 +71,7 @@ pub fn load(
     })
 }
 
-/// Like `load`, and also hashes the weight files on another thread while they load, which a snapshot needs to prove it
-/// belongs to these weights.
+/// Like `load`, and hashes the weight files while they load when the selected GPU backend supports snapshots.
 pub fn load_for_snapshot(
     path: &Path,
     ctx: Option<usize>,
@@ -197,7 +196,8 @@ fn open(request: Request<'_>) -> Result<Loaded, CliError> {
             .and_then(|info| u64::try_from(info.free_bytes).ok()),
         Backend::Cpu => None,
     };
-    let weights_hash = hash_weights.then(|| dir.weights.spawn_content_hash());
+    let weights_hash = (hash_weights && matches!(&selected.backend, Backend::Cuda(_)))
+        .then(|| dir.weights.spawn_content_hash());
     let mut progress = Progress::new(*style, chrome);
     let model = Engine::load(&dir, selected.backend, precision.weights, |done, total| {
         progress.update(done, total)

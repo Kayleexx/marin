@@ -59,7 +59,6 @@ impl Packed {
     fn fill(&mut self, operands: &Attend<'_, '_>, kv_head: usize, positions: usize) {
         let shape = &operands.shape;
         self.keys.clear();
-        // Avoid repeated reallocations as bounded prefill visits longer prefixes.
         self.keys
             .reserve_exact(positions.saturating_mul(shape.head_dim));
         for key in kv_rows(operands.keys, shape, kv_head, positions) {

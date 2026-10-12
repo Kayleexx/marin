@@ -60,7 +60,7 @@ What Marin measures on a laptop, what each optimization changed, and how to repe
 | 22 | CPU matmul kernels, stage 1 (one thread) | prefill 3.5x at 127 tokens (0.6B), 4.4x / 3.9x (1.7B at 127 / 511), 2.8x / 2.7x at 511 / 1,023 tokens (0.6B; scalar attention is now half the pass); decode 1.5–1.8x at the memory ceiling; `verify` unchanged; peak RAM unchanged; scalar fallback at parity |
 | 23 | CPU attention and RoPE (one thread) | vector attention for prompts (8 query rows per vector, packed keys and values) and for decode (one streaming pass), RoPE angles computed once per token | 0.6B prefill 4.4x / 4.6x the section 21 rate at 511 / 1,023 tokens (first token 4.9 s / 10.8 s), 2.4x at 2,047; attention stage 4–7x faster; decode at 2,047 tokens 2.2x; `verify` unchanged; peak RAM unchanged |
 | 24 | CPU threads for prompts (stage 2) | row-split matmul and kv-head-split attention on scoped std threads (no new dependency), vector SiLU and RMSNorm, buffers reused across layers, `--threads N` | 0.6B prefill 5.0x / 5.4x at 8 threads for 511 / 1,023 tokens (first token 1.06 s / 2.06 s), 1.7B 5.0x; decode unchanged (memory-bound); results bit-identical for any thread count; `verify` unchanged; peak RAM +10 to +20 MB |
-| 25 | CPU INT8 weights (stage 3, opt-in) | decode 1.48–1.87x, weights 51.6% of BF16, RAM −0.56–0.58 / −1.63–1.67 GB; relative quality gates pass; strict 0.6B HF and CUDA runtime checks open; no-go to INT4 |
+| 25 | CPU INT8 weights (stage 3, opt-in) | decode 1.48–1.87x, weights 51.6% of BF16, RAM −0.56–0.58 / −1.63–1.67 GB; accepted after strict 0.6B HF and RTX 5050 CUDA/snapshot closure checks below; CPU INT4 remains no-go |
 
 Rows 7 and 9 did not simply get faster; the cause is the power cap, explained next.
 
@@ -2110,3 +2110,1084 @@ limit/reclaim events are preserved in its raw record and are not hidden as
 unused headroom. `final-service.log` retains the controller completion accounting.
 All Marin Stage 4 benchmark/validation services are now inactive; no further
 benchmark or background investigation is scheduled.
+
+
+### 28. Stage 4 closure and Stage 5 CPU INT4 feasibility (2026-10-12)
+
+**Scope and gates fixed before pilot code.** Growable FP32 KV is independently
+GO; bounded prefill is NO-GO and removed. The final +10.4772% TTFT (1.7B INT8,
+eight threads, short prompt) and -3.2801% decode (0.6B INT8, eight threads,
+2k) remain unresolved failures. The 10% / 3% gates in sections 26–27 do not
+change. Stage 4 is closed as a partial result, not accepted in full. The user
+explicitly authorizes this separate INT4 feasibility study despite that
+partial result; it does not authorize reconstructing bounded prefill or V9.
+
+Study cap: 45 minutes overall, 20 minutes of serial benchmark execution;
+stop after a representative pilot. No production/native INT4 implementation,
+new dependency, unsafe Rust, FP16 KV, planner, commit, push or stash mutation.
+Use the current frozen Marin libraries and pinned existing AVX2 llama.cpp
+libraries. Both models, canonical identical HF token IDs, FP32 KV, CPU-only,
+127/2047 prompt positions and 32 subsequent evaluations; short 1/8 threads,
+long eight threads only. One warm-up plus two measured rounds is a pilot,
+not the three-round full acceptance matrix. Separate conversion/load, model
+prefill-to-logits and one-token forward evaluation; no fake generated-output
+TTFT from random-token llama-bench results. Explicitly report library-level
+versus real CLI sampling timing. Quality uses two fixed 128-position prose/
+code pilot segments after a 64-token prefix, BF16 cross-engine logits,
+same top-1 and target log-probabilities; calibration/evaluation separation
+and a broad task suite are required for eventual acceptance.
+
+| Native CPU INT4 acceptance area | Gate before future implementation |
+|---|---|
+| Kernel / safety | Independent decoded-f64 GEMV/GEMM within 1e-5*max(1,sum(abs(w*x))); zero/extreme/odd/remainder/malformed cases, scalar and AVX2, checked metadata/size limits; no unsafe Marin code or whole-model BF16/f32 expansion |
+| Reference / defaults / compatibility | Unchanged strict BF16 HF verification on both models; INT8 gates/defaults untouched, BF16 default, INT4 opt-in; scalar, 1/8-thread prefill, KV reuse/rollback and existing CUDA/snapshots pass |
+| Quantized relative quality | At least 1024 held-out scored positions each prose/code/conversation per model: top-1 agreement >=95%, mean loss increase <=0.03 nats/token AND perplexity increase <=3%; eight fixed greedy tasks with no new critical semantic failures. These are new INT4 gates, not changes to INT8 or HF gates |
+| Decode / prefill | Both models, 1/8 configured threads, 127/2047 depths: >=1.25x INT8 short decode and >=1.10x long; TTFT <=10% worse than INT8; warm-up plus >=3 measured rounds. Published/external Q4 performance does not pass a native kernel gate |
+| Memory | Native stored weights <=70% INT8 and <=40% BF16; peak RSS saving >=20% INT8 weight bytes at matched populated context; panels bounded per worker, no second model/KV mirror; effective 4/8 GiB limits and zero OOM kills or graceful refusal |
+| Startup | Fresh cold/warm conversion penalty over INT8 <=2s (0.6B)/4s (1.7B), disk reads and process-to-first-output reported separately; preconverted GGUF startup must not be called a native HF-to-INT4 conversion measurement |
+| Decision | A pilot can justify a scoped prototype or reject a design; it cannot close full native INT4 acceptance. Unmeasured mandatory gates remain open |
+
+Implementation complexity and candidate storage/kernel design will be estimated
+before any native code is authorized. Only ignored measurement harnesses are
+used here. Raw commands, fingerprints, IDs and results go under
+`bench-results/cpu-stage5/`; all pre-existing work is preserved.
+
+
+**Stage 4 memory audit — no production change.** Current CPU CLI admission is
+`reported_weights + KV(context) + activation(context) + logits + 256 MiB`.
+For both models FP32 KV is 229376 bytes/position. Named activation buffers
+are 65536/106496 bytes per input position (0.6B/1.7B), plus 607744 bytes of
+last-token logits. These are checked capacity estimates, not measured RSS.
+At eight threads Q8 prefill panels remain bounded: four rows x 512 columns,
+64-token packed inputs and 512-float scratch per worker, rather than a full
+weight reconstruction. Attention packing is separately guarded. Weights and
+activation precision are independent; growable KV changes allocation timing,
+not bytes per populated position.
+
+| Model / weights | Reported weights (MiB) | KV at 8k (MiB) | Full 8k activations + logits (MiB) | Margin (MiB) | 2k / 4k / 8k admission (GiB) |
+|---|---:|---:|---:|---:|---:|
+| 0.6B / bf16 | 1136.875 | 1792.000 | 512.580 | 256 | 1.923 / 2.486 / 3.611 |
+| 0.6B / int8 | 586.262 | 1792.000 | 512.580 | 256 | 1.386 / 1.948 / 3.073 |
+| 1.7B / bf16 | 3281.736 | 1792.000 | 832.580 | 256 | 4.096 / 4.737 / 6.018 |
+| 1.7B / int8 | 1692.260 | 1792.000 | 832.580 | 256 | 2.544 / 3.184 / 4.466 |
+
+CPU norms actually retain FP32: reported weights undercount payload by
+131072/247808 bytes, independently of BF16/INT8. Actual payloads are
+1192230912/614871040 and 3441397760/1774710784 bytes. Vector/struct metadata
+and allocator retention are also outside weight payload. The existing margin
+covers these small differences; this audit does not silently fix counters
+or relabel estimated weights as exact RSS. Inference admission cannot prove
+future safety against other applications suddenly consuming RAM.
+
+The before-growth guard rechecks effective host/cgroup-v2 ancestor availability:
+actual input workspace, net newly initialized KV through the pass end,
+largest temporary old-vector growth copy, conservative rounded attention
+packing and 64 MiB headroom. At 8k the packing allowance is 64 MiB. Loading
+also checks every source tensor with `2*raw_tensor_bytes + 64 MiB`; this is a
+conservative conversion allowance, not another model kept resident. Clean
+reclaimable filesystem cache is credited; shared/dirty/locked pages are not.
+Failures preserve committed KV prefixes. Non-Linux is host-policy unavailable;
+cgroup v1 has only host accounting. These compatibility limits remain open.
+
+**Simplest safe policy: keep current explicit format selection, full-window
+admission and per-request growth checks; shrink only an omitted default
+context, never a user's explicit context or BF16 default.** Report weights,
+actual held KV, full-request activations and margin separately. Refuse a
+non-fitting request before allocation with a smaller-context/INT8 hint.
+Do not tune allocators, rebuild chunks, silently switch formats, or add a V9
+planner. 1.7B INT8's full 8k estimate is 4794969600 bytes before metadata, so
+4 GiB rejection is legitimate; BF16 needs 6461656576 bytes and cannot promise
+an 8k whole-prefill under a 6 GiB OS-reserve budget. The original focused
+timing failures remain NO-GO; independent growable storage remains GO.
+
+**Smallest native candidates, estimated before implementation.** Keep row-major
+packed unsigned nibbles, two per byte; affine groups decode as `scale*q+min`.
+Store only packed codes and per-group metadata in an exclusive Matrix storage
+variant. Reuse existing Pulp AVX2/FMA dispatch, scoped prefill threads,
+4x2/512-column/64-token panel loop and one-row scalar fallback. Decode should
+unpack into registers, accumulate FP32 and apply scale/minimum; prefill expands
+only bounded panels. Embedding/tied head initially stay INT8. No whole-model
+BF16/f32 expansion. Existing symmetric max/7 CUDA INT4 is not the chosen
+quantizer. Weighted affine fitting requires a separately recorded activation
+calibration corpus and a held-out quality check; it is not implied by storage.
+
+| Model | Affine group | Storage estimate (MB) | Fraction of INT8 payload | Fraction of BF16 payload |
+|---|---:|---:|---:|---:|
+| 0.6B | 32 | 491.008 | 0.7986 | 0.4118 |
+| 0.6B | 64 | 435.958 | 0.7090 | 0.3657 |
+| 0.6B | 128 | 408.433 | 0.6643 | 0.3426 |
+| 1.7B | 32 | 1378.349 | 0.7767 | 0.4005 |
+| 1.7B | 64 | 1202.188 | 0.6774 | 0.3493 |
+| 1.7B | 128 | 1114.108 | 0.6278 | 0.3237 |
+
+These include two FP32 metadata values per group and INT8 tables. Group 32
+already fails the fixed <=40% BF16 and <=70% INT8 storage gates. Group 64
+fails the INT8 storage gate on 0.6B (70.90%); group 128 passes storage on both
+but its quality is unmeasured and its coarse groups must not be accepted from
+Q4_K_M results. The alternative is a Q4_K-style 256-value superblock with
+32-value local scales/minima and compressed metadata; keeping FP32 rather
+than FP16 super-scales takes 148 instead of 144 bytes (4.625 versus 4.5 bpw).
+It needs weighted fitting and a measured sensitive-tensor policy. IQ4_XS
+adds nonlinear codebook/scales and a different fitting problem; defer it as
+a first native format.
+
+Estimated engineering effort, not measured implementation: 4–6 engineer-days
+for a scalar affine quantizer/independent f64 oracle and sample quality study;
+another 4–6 for fused AVX2 decode, reused-panel GEMM, both CLI/storage/load
+callers and compatibility tests. A Q4_K-style compressed scale fitter and
+calibration/mixed-tensor policy would likely take 2–4 weeks total. Touches:
+tensor Matrix/storage/quantizer/dispatch/panels; model CpuStore and byte
+accounting; CLI format validation/reporting; kernel, HF, quality, memory,
+scalar/thread and CUDA compatibility tests. No dependency or native code is
+introduced during this study. The first future implementation checkpoint is
+quality of decoded packed weights, before performance kernel work.
+
+
+**Format/kernel research.** Pinned measured llama.cpp is
+`e94acad853c0d11a3b47974e3167ec12f263d86a`; current official upstream layouts,
+quantizers and x86 sources were also checked. Q4_K encodes 256 values in
+144 bytes: eight 32-value groups, packed nibbles, six-bit local scales/minima,
+and two FP16 super-scales (4.5 bpw). Q4_K_M is a tensor-selection policy,
+not a uniform four-bit block: selected value/down projections and tables
+can use higher precision. IQ4_XS stores 256 values in 136 bytes (4.25 bpw),
+using a fixed nonlinear 16-value codebook, signed six-bit local scales and
+an FP16 super-scale. It is not Marin's linear symmetric max/7 format.
+[Official block layouts](https://github.com/ggml-org/llama.cpp/blob/e94acad853c0d11a3b47974e3167ec12f263d86a/ggml/src/ggml-common.h).
+
+Q4_K AVX2 dots mask/shift nibbles, use byte/integer multiply-adds against
+Q8_K activation blocks, and apply minimum corrections using activation sums.
+IQ4_XS uses byte shuffles to look up nonlinear codes before integer dots.
+The CPU backend also repacks Q4_K into eight-row interleaved layouts for
+GEMV/GEMM. This reduces decode traffic but adds activation quantization and
+can retain a second quantized layout; it does not reconstruct BF16 weights.
+[Quantized x86 kernels](https://github.com/ggml-org/llama.cpp/blob/e94acad853c0d11a3b47974e3167ec12f263d86a/ggml/src/ggml-cpu/arch/x86/quants.c),
+[repacking/GEMM](https://github.com/ggml-org/llama.cpp/blob/e94acad853c0d11a3b47974e3167ec12f263d86a/ggml/src/ggml-cpu/repack.cpp).
+
+Importance collection accumulates squared input activations per channel;
+weighted fitting then minimizes reconstruction error using those statistics.
+Q4_K fitting searches group scale/minimum combinations rather than just
+rounding by a maximum. IQ4_XS similarly accepts optional fitting weights;
+its name does not mean calibration is mandatory for every quantization.
+[Quantizer](https://github.com/ggml-org/llama.cpp/blob/e94acad853c0d11a3b47974e3167ec12f263d86a/ggml/src/ggml-quants.c),
+[importance-matrix guidance](https://github.com/ggml-org/llama.cpp/blob/e94acad853c0d11a3b47974e3167ec12f263d86a/tools/imatrix/README.md).
+AWQ uses activation-aware channel scaling; GPTQ uses second-order error
+compensation. Their published results are on their own models/hardware,
+not Marin quality evidence. A 2026 unified llama.cpp study evaluates
+Llama-3.1-8B, not these Qwen3 checkpoints; no published speed or accuracy
+number is transplanted into the local pilot.
+[AWQ](https://arxiv.org/abs/2306.00978), [GPTQ](https://arxiv.org/abs/2210.17323),
+[2026 quantization study](https://arxiv.org/abs/2601.14277).
+
+**Local provenance and measurement scope.** The local Q4_K_M files report
+Unsloth importance-matrix metadata (688/685 chunks, 196 entries), but the
+calibration datasets themselves are unavailable. Both have 168 Q4_K,
+29 Q6_K and 113 FP32 tensors. Payload is 390753280/1101457408 bytes;
+file size is 396705472/1107409472 bytes. Every norm vector matches the local
+HF BF16 source after FP32 promotion; four 256-value blocks from every one
+of the 197 quantized matrices give sampled relative weight RMSE
+6.9855%/7.0096%. All tensor shapes and the 758 used token IDs match. This
+is sample provenance, not complete checkpoint identity or a calibration audit.
+No whole tensor/model was expanded during this check: only 256-value blocks.
+IQ4_XS has no local artifact and was researched, not benchmarked.
+
+Ryzen 7 260, 8 cores/16 logical threads, Linux 7.2.4, Rust 1.96.1,
+powersave/balance_performance; machine policy and desktop applications were
+not changed. llama.cpp is the existing AVX2/FMA, no-AVX512/no-BLAS/no-CUDA
+build; no GPU layers, flash attention off, FP32 K/V, batch/ubatch 2048.
+Marin decode stays single-threaded; llama.cpp decode follows configured threads.
+Both public-API harnesses read canonical HF IDs without adding BOS/chat tokens.
+They evaluate the same prompt and 31 identical subsequent IDs, giving 32
+logit evaluations. They measure inference-to-logits, not sampling or real
+CLI generated-output TTFT. One warm-up and two measured rounds; medians
+below are pilot estimates, not complete native acceptance.
+
+An initial request of context 160/2080 was rounded by llama.cpp to 256/2304.
+Those initial Marin comparisons are retained only as diagnostics. Only the
+12 affected Marin cases were rerun at the actual matching 256/2304 windows;
+llama.cpp samples are unchanged. Total initial plus corrected benchmark span
+was 936.9 seconds, within the original 20-minute cap. No 8k or one-thread
+2k matrix, new quantization implementation, or repeated acceptance sweep.
+All inference processes were serial under 8 GiB cgroup-v2 limits with swap
+disabled. Zero OOM/kill events; the first controller hit its limit through
+reclaimable file cache (`max` events 35702), explicitly retained in records.
+
+| Model | Engine / weights | Threads | Prompt | Actual window | Prefill-to-logits (ms) | Prefill (tok/s) | Decode evaluations/s | Peak RSS (GB) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 0.6B | marin / bf16 | 1 | 127 | 256 | 1171.517 | 108.41 | 19.432 | 1.2992 |
+| 0.6B | marin / int8 | 1 | 127 | 256 | 1183.368 | 107.32 | 35.309 | 0.7345 |
+| 0.6B | llama / BF16 | 1 | 127 | 256 | 1355.334 | 93.70 | 18.603 | 1.3232 |
+| 0.6B | llama / Q4_K_M | 1 | 127 | 256 | 991.429 | 128.10 | 49.191 | 0.7356 |
+| 0.6B | marin / bf16 | 8 | 127 | 256 | 313.178 | 405.52 | 19.463 | 1.3059 |
+| 0.6B | marin / int8 | 8 | 127 | 256 | 270.048 | 470.29 | 35.095 | 0.7353 |
+| 0.6B | llama / BF16 | 8 | 127 | 256 | 217.395 | 584.19 | 19.560 | 1.3233 |
+| 0.6B | llama / Q4_K_M | 8 | 127 | 256 | 163.396 | 777.25 | 50.819 | 0.7391 |
+| 0.6B | marin / bf16 | 8 | 2047 | 2304 | 4453.790 | 459.61 | 14.174 | 1.9311 |
+| 0.6B | marin / int8 | 8 | 2047 | 2304 | 4395.672 | 465.69 | 21.394 | 1.3704 |
+| 0.6B | llama / BF16 | 8 | 2047 | 2304 | 6548.668 | 312.58 | 14.064 | 2.1572 |
+| 0.6B | llama / Q4_K_M | 8 | 2047 | 2304 | 6024.518 | 339.78 | 25.501 | 1.5648 |
+| 1.7B | marin / bf16 | 1 | 127 | 256 | 3711.381 | 34.22 | 6.784 | 3.5557 |
+| 1.7B | marin / int8 | 1 | 127 | 256 | 3719.091 | 34.15 | 12.327 | 1.9059 |
+| 1.7B | llama / BF16 | 1 | 127 | 256 | 3860.007 | 32.90 | 6.786 | 3.5772 |
+| 1.7B | llama / Q4_K_M | 1 | 127 | 256 | 2765.901 | 45.92 | 20.361 | 1.9069 |
+| 1.7B | marin / bf16 | 8 | 127 | 256 | 800.143 | 158.72 | 6.803 | 3.5678 |
+| 1.7B | marin / int8 | 8 | 127 | 256 | 690.632 | 183.89 | 11.998 | 1.9074 |
+| 1.7B | llama / BF16 | 8 | 127 | 256 | 626.339 | 202.77 | 7.032 | 3.5820 |
+| 1.7B | llama / Q4_K_M | 8 | 127 | 256 | 477.206 | 266.13 | 20.200 | 1.9098 |
+| 1.7B | marin / bf16 | 8 | 2047 | 2304 | 12474.412 | 164.10 | 5.988 | 4.2626 |
+| 1.7B | marin / int8 | 8 | 2047 | 2304 | 10432.615 | 196.21 | 9.759 | 2.6342 |
+| 1.7B | llama / BF16 | 8 | 2047 | 2304 | 12448.715 | 164.43 | 6.223 | 4.4275 |
+| 1.7B | llama / Q4_K_M | 8 | 2047 | 2304 | 10168.055 | 201.32 | 14.791 | 2.7495 |
+
+Compared with Marin INT8, external Q4_K_M short decode gains are 1.39–1.68x;
+2k gains are 1.19x/1.52x. At 2k, 0.6B Q4 prefill is **37.06% slower**,
+and peak RSS is **194.38 MB higher**; 1.7B prefill is 2.54% faster but
+RSS is **115.34 MB higher**. Short Q4 RSS is also approximately equal to
+INT8 (1–4 MB higher), despite much smaller weight files. Thus the external
+pilot does not establish the native RAM or TTFT gates. Local load logs show
+0.6B Q4 retains 370.96 MiB mapped weights plus 204.75 MiB CPU_REPACK;
+FP32 KV at 2304 is 504 MiB and reserved compute buffer is 1269.06 MiB.
+Reserved compute bytes are not all resident RSS. Native panel reuse could
+avoid some of this overhead, but that is an unmeasured design opportunity.
+
+**Cold/warm pilot startup.** Cold requests use per-file DONTNEED; warm requests
+pre-read files. Physical I/O below is whole-process `ru_inblock*512`, not a
+pure loader counter. mmap can defer weight faults into the first prefill;
+loader time alone therefore overstates Q4 startup gains. First-logits time
+starts at model loading, includes context creation and the cold/warm-up
+prefill, and excludes Marin ModelDir/tokenizer setup before its model timer.
+It is not process-to-visible-output latency. One fresh process per condition;
+no fully cold boot or three-sample startup gate pass is claimed.
+
+| Model | Engine / weights | Requested cache | Model load (s) | Load-start to first logits (s) | Process physical block reads (MB) |
+|---|---|---|---:|---:|---:|
+| 0.6B | marin / bf16 | cold | 3.2440 | 4.5027 | 1928.724 |
+| 0.6B | marin / int8 | cold | 1.5470 | 2.7482 | 981.430 |
+| 0.6B | llama / BF16 | cold:BF16 | 0.5959 | 2.0014 | 1051.050 |
+| 0.6B | llama / Q4_K_M | cold:Q4_K_M | 0.3041 | 1.3057 | 392.897 |
+| 0.6B | marin / bf16 | warm | 0.7457 | 1.1092 | 0.000 |
+| 0.6B | marin / int8 | warm | 1.0495 | 1.3084 | 0.000 |
+| 0.6B | llama / BF16 | warm:BF16 | 0.2029 | 0.4433 | 0.000 |
+| 0.6B | llama / Q4_K_M | warm:Q4_K_M | 0.2296 | 0.4209 | 0.000 |
+| 1.7B | marin / bf16 | cold | 3.4764 | 7.2487 | 3184.767 |
+| 1.7B | marin / int8 | cold | 3.5315 | 7.2839 | 3071.926 |
+| 1.7B | llama / BF16 | cold:BF16 | 1.5403 | 5.5792 | 3279.614 |
+| 1.7B | llama / Q4_K_M | cold:Q4_K_M | 1.0764 | 3.8830 | 1106.051 |
+| 1.7B | marin / bf16 | warm | 2.5748 | 3.3954 | 1078.510 |
+| 1.7B | marin / int8 | warm | 2.5810 | 3.2137 | 0.020 |
+| 1.7B | llama / BF16 | warm:BF16 | 0.2887 | 0.9154 | 0.033 |
+| 1.7B | llama / Q4_K_M | warm:Q4_K_M | 0.4792 | 0.9494 | 0.000 |
+
+**Quality pilot.** Each prose/code segment scores 128 positions after 64
+prefix tokens. Comparison uses identical teacher-forced IDs and the same
+151669 usable vocabulary entries, excluding padding. Results are relative
+to Marin BF16 weights/FP32 math. This is a narrow pilot, not 1024-position
+acceptance, a held-out calibration guarantee or an eight-task semantic suite.
+
+| Model | Corpus | Precision / engine | Same top-1 /128 | Mean loss | Loss change (nats) | Perplexity change | Eight-step continuation exact? |
+|---|---|---|---:|---:|---:|---:|---|
+| 0.6B | prose | marin / int8 | 123 | 2.722597 | +0.001689 | +0.1690% | yes |
+| 0.6B | prose | llama / BF16 | 128 | 2.721215 | +0.000306 | +0.0306% | yes |
+| 0.6B | prose | llama / Q4_K_M | 108 | 2.720822 | -0.000087 | -0.0087% | no |
+| 0.6B | code | marin / int8 | 125 | 2.439954 | +0.007463 | +0.7491% | no |
+| 0.6B | code | llama / BF16 | 128 | 2.433623 | +0.001132 | +0.1133% | yes |
+| 0.6B | code | llama / Q4_K_M | 112 | 2.464047 | +0.031556 | +3.2059% | no |
+| 1.7B | prose | marin / int8 | 124 | 2.650019 | +0.000738 | +0.0738% | yes |
+| 1.7B | prose | llama / BF16 | 128 | 2.650321 | +0.001040 | +0.1041% | yes |
+| 1.7B | prose | llama / Q4_K_M | 115 | 2.611521 | -0.037760 | -3.7056% | no |
+| 1.7B | code | marin / int8 | 127 | 2.116909 | -0.003081 | -0.3076% | yes |
+| 1.7B | code | llama / BF16 | 128 | 2.117654 | -0.002336 | -0.2333% | no |
+| 1.7B | code | llama / Q4_K_M | 116 | 2.077427 | -0.042563 | -4.1670% | no |
+
+Q4 top-1 is 84.375%/87.5% on 0.6B and 89.84375%/90.625% on 1.7B:
+**all four miss the fixed 95% gate**. 0.6B code also misses loss (+0.031556)
+and perplexity (+3.20594%). The same-engine llama.cpp BF16 comparison gives
+identical Q4 top-1 counts and +0.030424 nats on 0.6B code, so that miss is
+not explained away by changing the comparator. Lower loss on 1.7B is a
+rounding/evaluation outcome, not a general quality improvement. Greedy
+continuations differ in all four Q4 cases; wording equality alone is not
+semantic correctness. No claim that Q4 universally fails on larger models.
+The short INT8 pilot's 0.6B prose top-1 (123/128) does not replace its
+passing original 1024-position Stage 3 quality gate.
+
+Fresh strict Marin HF verification passes both models, eight threads,
+without changed tolerances. llama.cpp BF16 also rounds matrix activations
+into BF16, whereas Marin keeps them FP32; Q4 dots use Q8_K activations.
+The first 64-token BF16 cross-engine maximum logit gaps are 0.047–0.068,
+so llama.cpp BF16 is **not** relabelled as strict FP32 HF numerical parity,
+even though pilot top-1 agrees 128/128 in all four cases. Q4 comparisons
+include runtime/activation precision effects, not weight error alone.
+[CPU type traits](https://github.com/ggml-org/llama.cpp/blob/e94acad853c0d11a3b47974e3167ec12f263d86a/ggml/src/ggml-cpu/ggml-cpu.c).
+
+**Bandwidth.** A safe-Rust AVX2-build streaming checksum reads a 1 GiB buffer,
+one unmeasured and five measured rounds. Median read throughput is
+21.130 GB/s (one thread, range 20.479–23.571) and 24.221 GB/s (eight,
+24.170–24.767). It is a fresh stream calibration, not an inference hardware
+counter. Inference estimates in `timing-summary.json` multiply decode rate
+by one logical weight payload plus FP32 KV at mean decode depth; they omit
+extra packing/copies and may include cache hits. `perf` is unavailable;
+no memory-controller bandwidth counter is claimed. Package energy reads
+return permission denied, so no joules/token result.
+
+| Decision / gate | Status | Evidence / limit |
+|---|---|---|
+| Stage 4 growable FP32 KV | **GO independently** | Storage unchanged; original accepted A matrix and latest correctness evidence retained |
+| Stage 4 bounded prefill / full acceptance | **NO-GO; bounded component removed** | +10.48% TTFT / -3.28% decode failures unchanged; this different comparison does not close them |
+| Native CPU INT4 implementation now | **NO-GO** | External pilot fails all four top-1 checks and 0.6B loss/2k TTFT; no native quality proof or measured kernel exists |
+| External Q4 decode potential | **Promising pilot only** | 1.39–1.68x short, 1.19–1.52x 2k versus current INT8; two samples, one AVX2 laptop |
+| External Q4 low-RAM inference | **Not demonstrated versus INT8** | Smaller files/payload, but short RSS equal and 2k RSS higher due to layouts/workspaces |
+| IQ4_XS / older PCs / native scalar and AVX2 kernels / full native gates | **UNMEASURED** | Source/design audit only; no local IQ4 artifact, real old CPU or implemented native format |
+
+**Next steps toward 3B–7B and adaptation.** First a separate, small quantizer
+quality experiment: weighted affine/Q4_K-style groups with explicit INT8
+head protection, independently calibrated and held-out corpora. Evaluate
+packed scalar rows/panels directly; never expand a model into BF16. Require
+the quality/storage gates before fused SIMD work. The 0.6B storage budget
+also limits how many sensitive tensors can remain INT8. Do not adopt the
+old symmetric CUDA INT4 as a shortcut or start with IQ4_XS/GPTQ machinery.
+
+Then validate one supported dense model around 3B–4B, using its actual
+config, tied/untied head and byte counts, before a 7B–8B model. Weight-only
+estimates: 3B needs 6 GB BF16 / 3.094 GB grouped INT8; 7B needs 14 GB /
+7.219 GB. A realistic 5–5.5 bpw mixed Q4 budget is 1.875–2.063 GB and
+4.375–4.813 GB respectively, **before KV, activations and margin**. These
+are estimates, not loaded-model measurements. KV must come from each
+model's actual layers/heads/head size; do not transplant the two small
+models' 224 KiB/position. Whole-prefill workspace remains material.
+
+Keep the simple admission policy for measured Linux/cgroup-v2 environments;
+report unknown budgets on non-Linux/v1 rather than advertising portable
+OOM guarantees. Next adaptive step is an inspectable estimate of weights,
+held/planned KV, input workspace, margin, usable RAM and SIMD availability.
+Use measured physical-core prefill settings and existing single-thread
+decode; keep formats explicit until quality is proven. Profile larger-model
+TTFT and decode before changing threads, reintroducing chunks, lowering KV
+precision or building a planner. No V9 implementation is warranted now.
+
+**Verification and stop.** No production Rust, dependency, configuration,
+unsafe code, default or CUDA path changed. Fresh fmt, workspace check,
+all-feature clippy `-D warnings`, line-limit and unsafe checks pass; both
+fresh strict HF runs pass. The unchanged source hashes match the earlier
+594-test CUDA-required validation; that full suite was not redundantly
+rerun for this documentation/measurement-only study. Harnesses assert
+stable prefill outputs, valid IDs, finite scored logits and correct stream
+checksums; every subprocess succeeded and zero OOM/kill events were recorded.
+All three stashes and HEAD remain unchanged. No commit or push. Full native
+quality/speed/RAM/startup gates, older hardware and IQ4_XS remain unverified.
+Raw evidence is in ignored `bench-results/cpu-stage5/` (initial fingerprints,
+canonical IDs, provenance samples, commands, contexts, every attempt,
+quality/logit arrays, source/library audit, bandwidth, HF and check logs).
+**Stop after this pilot: retain CPU INT8; native CPU INT4 is NO-GO until a
+quality-preserving quantizer is established.**
+
+## 29. Offline scalar 4-bit accuracy and 4B memory feasibility (2026-10-12)
+
+This study has a 45-minute wall-clock cap, beginning 12:26:55 UTC. It does
+not authorize a production INT4 path or SIMD kernels. Section 28's gates
+remain unchanged: at least 95% top-1 agreement with Marin BF16, no more
+than 0.03 nats loss increase and 3% perplexity increase, and the original
+storage, resident-memory, startup and speed gates. A 128-position pilot
+is a screening result, never full acceptance. Executable generated code
+must be checked separately from token agreement; unrun checks are blocked.
+
+The experiment uses a private copy of the existing model/tensor crates,
+packed unsigned nibbles and per-group FP32 affine parameters. It decodes
+one weight row at a time, retaining packed storage throughout inference.
+No production source or CLI changes are planned. Controls reuse identical
+HF checkpoints, canonical IDs, vocabulary limits and teacher-forced
+scoring from section 28; llama.cpp's different activation arithmetic and
+incompletely audited Q4 calibration provenance remain limitations.
+
+### Offline method, controls and causal limits
+
+The representative pilot uses an ignored, private workspace in
+`bench-results/cpu-q4-quality/`, copied from the unchanged production sources.
+The existing CPU loader, attention, FP32 KV, threading and INT8 table kernels
+are reused. Only private matrix storage/dispatch and named loading are extended;
+there is no production INT4 option or new SIMD kernel. Packed layer matrices
+remain packed during inference. The scalar decoder expands one FP32 row,
+then uses the existing dot implementation. It never retains a whole decoded
+matrix/model. This is a quality tool, not a candidate performance engine.
+
+The affine quantizer stores two unsigned nibbles per byte, FP32 scale/offset
+per group and a checked 16-byte header. Group size is 64; signed INT8 tables
+retain the existing group-128 format and norms retain FP32. It tries min/max
+and 95%-range initialization with four weighted least-squares/reassignment
+steps, accepting only lower local weighted error. Calibration weights are
+per-input-channel mean squared activations from two disjoint 256-token
+texts (README and hand-written prose/code), collected with the installed
+HF BF16 model. Evaluation remains the frozen Vim prose and Marin code IDs,
+64-token prefix, vocabulary 151669, FP32 KV and identical teacher forcing.
+The 0.6B main comparison scores 128 positions per corpus; 1.7B and the final
+selective probe score 32. Small samples can reject candidates but cannot
+establish the original >=1024-position/corpus quality gate.
+
+The selective probe uses group-32 Q4 for remaining projections, retaining
+**all value and down projections in INT8**, plus the INT8 tied table.
+Its protected tensors are a hypothesis, not a measured optimal selection.
+The pilot uses diagonal activation importance; it does not implement AWQ's
+channel rescaling or GPTQ's Hessian error compensation. Research distinction:
+[AWQ](https://arxiv.org/abs/2306.00978) motivates activation-selected channel
+scaling; [GPTQ](https://arxiv.org/abs/2210.17323) uses approximate second-order
+information. Their published accuracy does not establish Marin's 95% gate.
+
+The original llama Q4 artifacts already contained imatrix metadata and
+Q6 protection, but their exact calibration data/input provenance was unknown.
+This run additionally checks **every used BF16 GGUF tensor/value** against the
+HF checkpoint, then freshly quantizes that exact BF16 GGUF with the pinned
+llama.cpp library's Q4_K_M recipe, without an imatrix. Both 310-tensor inputs
+match exactly (596,049,920 / 1,720,574,976 values). Fresh artifacts remove the
+checkpoint-identity ambiguity; they do not substitute for a well-calibrated
+Q4 recipe. Existing original-artifact results are retained separately.
+llama.cpp still uses Q8_K activation dots for Q4 versus Marin FP32 activations,
+so its comparison is an end-to-end backend comparison, not a weight-only
+causal experiment. The private BF16/INT8 controls are checked against the
+frozen production probe's entire first-logit bytes, 32 teacher-forced scores
+and greedy IDs on both models.
+
+### Measured quality (BF16 is the reference)
+
+| Model | Format | Corpus | Scored | Top-1 | PPL | Loss delta, nats | PPL change |
+|---|---|---|---:|---:|---:|---:|---:|
+| 0.6B | bf16 | prose | 128 | 128/128 (100.00%) | 15.1941 | +0.000000 | +0.000% |
+| 0.6B | int8 | prose | 128 | 123/128 (96.09%) | 15.2198 | +0.001689 | +0.169% |
+| 0.6B | llama original Q4_K_M | prose | 128 | 108/128 (84.38%) | 15.1928 | -0.000087 | -0.009% |
+| 0.6B | uniform64 | prose | 128 | 99/128 (77.34%) | 18.7377 | +0.209631 | +23.322% |
+| 0.6B | weighted64 | prose | 128 | 103/128 (80.47%) | 15.9155 | +0.046384 | +4.748% |
+| 0.6B | bf16 | code | 128 | 128/128 (100.00%) | 11.3872 | +0.000000 | +0.000% |
+| 0.6B | int8 | code | 128 | 125/128 (97.66%) | 11.4725 | +0.007463 | +0.749% |
+| 0.6B | llama original Q4_K_M | code | 128 | 112/128 (87.50%) | 11.7523 | +0.031556 | +3.206% |
+| 0.6B | uniform64 | code | 128 | 107/128 (83.59%) | 15.9090 | +0.334395 | +39.710% |
+| 0.6B | weighted64 | code | 128 | 106/128 (82.81%) | 12.6315 | +0.103699 | +10.927% |
+| 1.7B | bf16 | prose | 32 | 32/32 (100.00%) | 15.3620 | +0.000000 | +0.000% |
+| 1.7B | int8 | prose | 32 | 30/32 (93.75%) | 15.4550 | +0.006032 | +0.605% |
+| 1.7B | llama original Q4_K_M | prose | 32 | 27/32 (84.38%) | 14.4787 | -0.059222 | -5.750% |
+| 1.7B | weighted64 | prose | 32 | 27/32 (84.38%) | 16.4101 | +0.065995 | +6.822% |
+| 1.7B | bf16 | code | 32 | 32/32 (100.00%) | 14.3365 | +0.000000 | +0.000% |
+| 1.7B | int8 | code | 32 | 32/32 (100.00%) | 13.8796 | -0.032394 | -3.187% |
+| 1.7B | llama original Q4_K_M | code | 32 | 27/32 (84.38%) | 13.4895 | -0.060900 | -5.908% |
+| 1.7B | weighted64 | code | 32 | 29/32 (90.62%) | 14.5511 | +0.014858 | +1.497% |
+| 0.6B | INT8 matched 32 | prose | 32 | 31/32 (96.88%) | 18.6019 | +0.011888 | +1.196% |
+| 0.6B | llama fresh Q4_K_M | prose | 32 | 25/32 (78.12%) | 16.5796 | -0.103199 | -9.805% |
+| 0.6B | weighted64 matched 32 | prose | 32 | 23/32 (71.88%) | 17.4319 | -0.053070 | -5.169% |
+| 0.6B | selective32 | prose | 32 | 26/32 (81.25%) | 18.8830 | +0.026888 | +2.725% |
+| 0.6B | INT8 matched 32 | code | 32 | 31/32 (96.88%) | 16.6836 | +0.002065 | +0.207% |
+| 0.6B | llama fresh Q4_K_M | code | 32 | 26/32 (81.25%) | 21.3525 | +0.248809 | +28.250% |
+| 0.6B | weighted64 matched 32 | code | 32 | 25/32 (78.12%) | 19.8870 | +0.177710 | +19.448% |
+| 0.6B | selective32 | code | 32 | 28/32 (87.50%) | 19.0542 | +0.134931 | +14.446% |
+| 1.7B | INT8 matched 32 | prose | 32 | 30/32 (93.75%) | 15.4550 | +0.006032 | +0.605% |
+| 1.7B | llama fresh Q4_K_M | prose | 32 | 25/32 (78.12%) | 15.4842 | +0.007921 | +0.795% |
+| 1.7B | weighted64 matched 32 | prose | 32 | 27/32 (84.38%) | 16.4101 | +0.065995 | +6.822% |
+| 1.7B | INT8 matched 32 | code | 32 | 32/32 (100.00%) | 13.8796 | -0.032394 | -3.187% |
+| 1.7B | llama fresh Q4_K_M | code | 32 | 27/32 (84.38%) | 18.5411 | +0.257180 | +29.328% |
+| 1.7B | weighted64 matched 32 | code | 32 | 29/32 (90.62%) | 14.5511 | +0.014858 | +1.497% |
+
+Calibration improves the unweighted 0.6B candidate's loss, but the main
+candidate still fails top-1 on both models. Lower perplexity on a short
+segment is insufficient when token agreement fails. The 95% threshold is
+unchanged. Q4_K_M's original misses cannot be attributed solely to missing
+calibration: it was already importance-aware and mixed Q4/Q6. Error
+accumulation, activation arithmetic, calibration coverage and sensitive
+matrices remain distinct hypotheses. No universal claim that four-bit
+accuracy is impossible follows from this small study.
+
+### Executable code, rather than token similarity
+
+One identical no-thinking ChatML prompt asks for a pure Python `clamp`.
+Generation is greedy, limited to 128 tokens, and uses the same canonical
+prompt IDs. AST validation excludes imports, attribute access and arbitrary
+calls; min/max and Boolean comparisons are allowed. The generated function
+runs in an isolated process with CPU/address-space limits. Six cases cover
+below/inside/above range, equal bounds, negative values and floats. The
+initial harness rejected a valid Boolean expression from llama Q4; that
+harness error was corrected, existing output reevaluated, and the original
+record retained. This is one task, not acceptance of the original eight-task
+gate.
+
+| Model | Format | Executed assertions | Task |
+|---|---|---:|---|
+| 0.6B | bf16 | 6/6 | PASS |
+| 0.6B | int8 | 6/6 | PASS |
+| 0.6B | weighted64 | 1/6 | FAIL |
+| 0.6B | llama-Q4_K_M | 6/6 | PASS |
+| 0.6B | llama-fresh-Q4_K_M | 6/6 | PASS |
+| 1.7B | bf16 | 6/6 | PASS |
+| 1.7B | int8 | 6/6 | PASS |
+| 1.7B | weighted64 | 6/6 | PASS |
+| 1.7B | llama-Q4_K_M | 6/6 | PASS |
+| 1.7B | llama-fresh-Q4_K_M | 6/6 | PASS |
+
+The calibrated 0.6B candidate generated
+`return min(x, low) if x < low else max(x, high)` and passed only 1/6:
+a genuine semantic failure, not a formatting or tokenizer mismatch.
+
+### Format overhead and startup
+
+Q4_K blocks use 144 bytes/256 weights (4.5 bits/weight); IQ4_XS uses
+136/256 (4.25 bits), with nonlinear codebook values and compact group scales.
+The local affine group-64 design is **5 bits/weight**, including 25% metadata
+over the nibble bytes. Group-32 is 6 bits/weight, 50% metadata. Compact
+metadata is therefore part of the design problem, not a minor header cost.
+Pinned definitions and tensor-selection rules are in llama.cpp
+`ggml/src/ggml-common.h`, `ggml/src/ggml-quants.c` and `src/llama-quant.cpp`
+at e94acad853c0d11a3b47974e3167ec12f263d86a. Q4_K_M protects selected
+value/down matrices and the output/tied table; IQ4_XS is not simply uniform
+linear INT4. No IQ4_XS quality claim is made.
+
+| Model | Candidate | Whole payload incl. headers | / INT8 | / BF16 | Original storage gate |
+|---|---|---:|---:|---:|---|
+| 0.6B | weighted64 | 435,960,896 B | 70.903% | 36.567% | FAIL |
+| 0.6B | selective32-estimate | 524,040,384 B | 85.228% | 43.955% | FAIL (estimate) |
+| 1.7B | weighted64 | 1,202,191,424 B | 67.740% | 34.933% | PASS |
+| 1.7B | selective32-estimate | 1,493,956,800 B | 84.180% | 43.411% | FAIL (estimate) |
+
+The selective candidate's better precision cannot qualify by hiding its
+extra INT8 tensors: it exceeds both original storage ratios on both models.
+The original external Q4 RAM miss also persists as an implementation issue:
+0.6B had 370.96 MiB mapped weights **plus 204.75 MiB repack**, with KV and
+compute buffers additional. At matched 2k context its RSS was 194.38 MB
+above Marin INT8; 1.7B was 115.34 MB above. Compact GGUF file size alone
+was never evidence of an inference RSS win (section 28).
+
+Cold-requested load-only measurements below use DONTNEED on every source
+and packed tensor, then a fresh process; block reads document actual I/O.
+These are one-shot observations, not a cold boot or a statistical startup
+gate. The offline path deliberately still reads one BF16 source tensor
+before loading its packed counterpart, keeping existing validation and
+memory guards. Its additional file I/O is avoidable in a future direct
+packed loader; it is not the cost of a production implementation.
+
+| Model | Format | Weight-load s | Whole startup s | Peak RSS, MiB | Actual block reads, MB |
+|---|---|---:|---:|---:|---:|
+| 0.6B | bf16 | 1.376 | 1.610 | 1202.46 | 982.94 |
+| 0.6B | int8 | 1.639 | 1.848 | 667.02 | 977.69 |
+| 0.6B | weighted64 | 1.529 | 1.755 | 529.53 | 1255.06 |
+| 1.7B | bf16 | 3.388 | 3.606 | 3349.24 | 3132.59 |
+| 1.7B | int8 | 3.558 | 3.788 | 1804.73 | 3079.91 |
+| 1.7B | weighted64 | 3.296 | 3.507 | 1289.27 | 3962.54 |
+
+Scalar teacher-forced runtimes are approximately 150–154 seconds for
+0.6B/128 positions and 149–152 seconds for 1.7B/32, including repeated
+prefill/greedy checks. They are not native INT4 decode speed estimates.
+No speed acceptance is claimed from this deliberately scalar experiment.
+
+### Actual 4B configurations and conservative memory budgets
+
+[Qwen3-4B config](https://huggingface.co/Qwen/Qwen3-4B/raw/main/config.json)
+and [Qwen3-4B-Instruct-2507 config](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/raw/main/config.json)
+both imply **4,022,468,096 parameters**, hidden 2560, FFN 9728,
+36 layers, 32 query heads, 8 KV heads, head dimension 128 and one tied
+151936×2560 table. Their RoPE/context limits differ (40960/1e6 versus
+262144/5e6). Marin's current config parser accepts both and reports the
+same exact parameter/workspace counts without loading their weights.
+Importantly, query width is 4096, not hidden width 2560; the existing
+non-square projection/attention dimensions already account for that.
+There is no fabricated official Qwen3-3B result here: 3B-class conclusions
+are interpolation estimates, not a measured checkpoint.
+
+4B weight payloads: BF16 **8,045,328,384 B**; current group-128 INT8
+**4,148,752,384 B**; proposed affine Q4/G64 + INT8 table
+**2,672,717,824 B**; source-recipe Q4_K_M estimate **2,491,323,904 B**.
+The Q4_K_M value is computed from current selection rules and compact block
+sizes, not a downloaded or measured 4B GGUF. Native headers/allocator costs
+would be additional. Q4/G64 has not passed quality.
+
+FP32 KV is **288 KiB/token**: 576/1152/2304 MiB at 2k/4k/8k.
+Named full-prefill activation workspace is **156 KiB/token**, plus
+607744-byte last-token logits: 312/624/1248 MiB at those contexts.
+Attention packing adds 16/32/64 MiB. Budget totals also include a separate
+**128 MiB unmeasured runtime allowance**, **256 MiB safety margin**, and
+**64 MiB growth headroom**. They conservatively charge full attention
+packing and a full cache during prefill. Existing populated-cache growth
+may additionally need the largest old vector transiently (up to 32/64/128
+MiB at 2k/4k/8k); near-boundary fits must include it before admitting work.
+Fresh full-prefill starts without old-vector copies.
+OS allowances are 1 GiB on a 4 GiB machine and 2 GiB on an 8 GiB machine,
+leaving 3/6 GiB for Marin. These are stated planning assumptions, not
+measurements. Decimal 4GB/8GB hardware provides less than 4/8 GiB.
+
+| Format | Context | Total estimated GiB | Fits 4 GiB / 1 GiB OS | Fits 8 GiB / 2 GiB OS |
+|---|---:|---:|---|---|
+| BF16 | 256 | 8.041 | no | no |
+| BF16 | 2048 | 8.814 | no | no |
+| BF16 | 4096 | 9.696 | no | no |
+| BF16 | 8192 | 11.462 | no | no |
+| INT8 | 256 | 4.412 | no | yes, estimate |
+| INT8 | 2048 | 5.185 | no | yes, estimate |
+| INT8 | 4096 | 6.068 | no | no |
+| INT8 | 8192 | 7.833 | no | no |
+| affine-Q4-G64/INT8-table | 256 | 3.038 | no | yes, estimate |
+| affine-Q4-G64/INT8-table | 2048 | 3.810 | no | yes, estimate |
+| affine-Q4-G64/INT8-table | 4096 | 4.693 | no | yes, estimate |
+| affine-Q4-G64/INT8-table | 8192 | 6.458 | no | no |
+| Q4_K_M-recipe-estimate | 256 | 2.869 | yes, estimate | yes, estimate |
+| Q4_K_M-recipe-estimate | 2048 | 3.641 | no | yes, estimate |
+| Q4_K_M-recipe-estimate | 4096 | 4.524 | no | yes, estimate |
+| Q4_K_M-recipe-estimate | 8192 | 6.290 | no | no |
+
+**Practical conclusion:** current 4B INT8 is an 8 GiB / roughly 2k-context
+candidate, not a 4 GiB solution. BF16 4B does not fit either budget. Compact
+Q4 could allow 8 GiB / 4k, but 8k with FP32 KV/full prefill exceeds the
+6 GiB process budget. On 4 GiB, only the compact Q4 recipe's very short
+256-token estimate fits, narrowly; it is not quality accepted and repacking,
+OS variation or a decimal-GB machine can erase that fit. No safe general
+4GB/4B support promise follows. For a hypothetical 3B with these same
+36-layer KV/activation dimensions, subtracting about 1.022B matrix weights
+would lower the 2k INT8 total to about 4.20 GiB and compact Q4 total by
+roughly 0.54 GiB; even that 3B Q4/2k estimate remains near/above a 3 GiB
+process allowance. Real 3B architectures require their own configs.
+
+The previously measured 1/8-thread streaming medians are 21.13/24.22 GB/s
+on this Ryzen, not on a low-end DDR4 PC. At 4B/2k, streaming-only ideal
+ceilings are approximately **4.45 tok/s for INT8** and **6.83 tok/s for
+compact Q4_K_M** using the single-thread bandwidth. At 8k they fall to
+3.22/4.31. These divide measured bandwidth by estimated weights+live FP32
+KV traffic; compute, nonlinear ops, table access and dequantization can
+only reduce them. Eight-thread STREAM bandwidth does not make current
+single-thread decode eight-threaded. At 10 GB/s (illustrative older-PC
+bandwidth, unmeasured), 2k ceilings are about 2.10/3.23 tok/s.
+4B linear/attention work is roughly 2.57× the measured 1.7B setup;
+projecting its 10.433-second INT8 2k/8-thread prefill gives approximately
+27 seconds, **an estimate**, not an actual 4B TTFT. Large models on small
+PCs can be memory feasible and still feel slow.
+
+### Acceptance and next milestone
+
+| Gate / question | Decision | Evidence |
+|---|---|---|
+| Packed decoded computation correctness | PASS for pilot | Independent f64 products, constant/nibble round trips, malformed headers, dimensions, lengths and nonfinite metadata |
+| Original >=95% top-1 | FAIL | Calibrated primary candidate misses on both models; tables above |
+| Original loss/PPL gates | FAIL | 0.6B both corpora and 1.7B prose fail; larger acceptance corpora unrun |
+| Executable code correctness | FAIL for primary candidate | 0.6B clamp passes 1/6 versus BF16/INT8 6/6 |
+| Original storage ratios | FAIL for family | G64 0.6B 70.903% of INT8; selective design 84–85% |
+| Full native speed / startup / RSS acceptance | BLOCKED | No production/native compute path; scalar/cold-requested observations do not qualify it |
+| General 4GB / 3B–4B support | NO-GO promise | Short-context compact-Q4 estimate is narrow and quality unaccepted |
+| 8 GiB / 4B INT8 around 2k | Feasible estimate, unverified | Conservative total 5.185 GiB; actual load/quality/TTFT still required |
+| Native CPU INT4 implementation now | **NO-GO** | Mandatory quality/storage failures; thresholds unchanged |
+
+Next architecture milestone: **direct, versioned loading of already packed
+INT8 weights with explicit peak-memory admission**, followed by one 4B
+INT8/2k pilot on an 8 GiB budget. Preserve strict checkpoint identity and
+fallback semantics. Avoid BF16 source rereads/requantization every start;
+count tables, per-tensor load transients, initialized KV, full workspace,
+attention packing, runtime and copy headroom separately. Use one conservative
+memory policy with current guards; do not revive chunked prefill or the V9
+planner. SIMD dispatch, arbitrary valid Qwen dimensions, INT8 arithmetic,
+threaded full prefill and growable FP32 KV already generalize. Direct packed
+checkpoint loading, a quality-preserving compact quantizer and later KV
+memory reduction need new, separately gated work. No such feature is
+implemented here. Before native INT4, test a narrowly scoped AWQ/channel
+scaling or GPTQ calibration export with compact metadata and measured tensor
+selection on held-out prose/code/conversation; stop immediately if 95% or
+storage fails. Do not invest in a packed kernel before that.
+
+### Verification and preservation
+
+The isolated workspace passed `cargo fmt`, all-target workspace check,
+all-feature/all-target clippy with `-D warnings`, and **596 tests, zero
+failures/ignores**. A later wider independent f64 test was added and the
+full tensor suite rerun: 40 unit + 2 accuracy + 11 quantization tests pass.
+All copied Rust files were checked against 425 lines; introduced Rust is
+safe. Root fmt/line-limit/unsafe checks pass. Production Rust source hashes
+remain identical to section 28. All previous BENCHMARKS content is retained,
+README is untouched this task, all three stashes and HEAD are unchanged.
+Raw sources, commands, full logits/scores, generated code/assertion outcomes,
+calibration metadata, manifests, provenance, memory estimates and check logs
+remain in ignored `bench-results/cpu-q4-quality/`. No commit or push.
+
+
+
+## 30. Bounded L2/INT8 packing audit (2026-10-12)
+
+Added to the section 29 timebox at the user's request; no production kernel
+changes. Inspection covers `matrix.rs`, `kernel.rs`, `gemm.rs`, `gemv.rs`,
+`q8.rs`, `q8_gemm.rs`, `q8_gemv.rs`, dispatch and row threading.
+
+BF16 storage is row-major packed pairs, usually a checked zero-copy view of
+loader u16s; only incompatible alignment/odd columns require load-time
+repacking. BF16 GEMV splits the current activation vector into even/odd
+planes, then streams rows without repacking weights. BF16 GEMM uses
+MR=4, NR=2, KC=256 pairs (512 values), TB=64 tokens, repacking small weight
+and activation panels for each token/K block. Its per-worker even/odd
+activation copies cover the current 64-token block.
+
+**INT8 weights are already quantized/packed once at load:** immutable
+row-major signed byte codes and separate FP32 group scales. No per-call
+requantization or whole-weight repack occurs. Existing tests confirm code
+and scale contents/pointers remain unchanged after GEMM/GEMV calls. INT8
+GEMV forms four planes of the *activation vector*, then extracts signed
+bytes directly from checked u32 views; it does not make a decoded weight
+copy. INT8 GEMM has MR=4, NR=2, KC=512 values, TB=64. It decodes/packs one
+4×512 FP32 weight panel repeatedly, once per token block/K/row group,
+reusing it across 64 tokens. Activations are packed once per token block/K
+**per row worker**; eight workers duplicate that packing. These are bounded
+scratch conversions, not repeated packing of the persistent INT8 format.
+
+On this host sysfs reports 1 MiB private L2 and 16 MiB L3; `perf` is absent,
+`perf_event_paranoid=2`. L2 misses, cycles, actual DRAM bytes, and exclusive
+packing-time counters are **unmeasured**. Analytical traffic is not a
+hardware counter. Baseline INT8 activation panels are 128 KiB/worker;
+TB=128 makes them 256 KiB. Weight panels remain 8 KiB plus 2 KiB decode
+scratch. Logical weight decoding scales as ceil(tokens/TB), while activation
+packing volume is roughly tokens×cols×4 per worker. Doubling TB reduces
+repeated weight conversion but enlarges cache working sets; it need not
+improve overall locality. Keeping all decoded FP32 panels at load would
+cost about four bytes per layer weight instead of one, defeating low-RAM
+INT8. A one-time interleaved *byte* layout might avoid panel rearrangement,
+but still needs dequantization and a verified GEMV/scalar access strategy;
+no evidence here justifies its kernel/layout complexity.
+
+The isolated pilot changes **only INT8 TB from 64 to 128**, preserving KC,
+MR/NR, arithmetic and all production sources. It loads the real layer-0
+gate projection from each exact HF checkpoint: 3072×1024 and 6144×2048.
+Each subprocess quantizes once, warms once and records five matmul calls
+at 128/1024 tokens and 1/8 threads. Execution order is baseline A1,
+candidate B, baseline A2, serially after the quantization/code/reference
+jobs. No CPU benchmarks overlap. Every entire output buffer is byte-identical
+between A1/B/A2; this is a projection microbenchmark, not model TTFT.
+The 0.6B short/eight-thread baseline drifts 25%; its tiny timings are noisy.
+The longer 1.7B result has under 1% baseline drift.
+
+| Model | Tokens | Threads | A1 median ms | A2 median ms | TB128 median ms | Change vs mean baseline | Baseline drift |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 0.6B | 128 | 1 | 8.128 | 8.252 | 8.020 | -2.08% | +1.53% |
+| 0.6B | 1024 | 1 | 58.859 | 59.733 | 59.555 | +0.44% | +1.48% |
+| 0.6B | 128 | 8 | 1.407 | 1.759 | 1.986 | +25.45% | +24.97% |
+| 0.6B | 1024 | 8 | 9.846 | 10.371 | 12.903 | +27.64% | +5.33% |
+| 1.7B | 128 | 1 | 34.749 | 34.990 | 33.553 | -3.77% | +0.70% |
+| 1.7B | 1024 | 1 | 278.978 | 279.517 | 258.423 | -7.46% | +0.19% |
+| 1.7B | 128 | 8 | 6.949 | 7.163 | 7.633 | +8.18% | +3.08% |
+| 1.7B | 1024 | 8 | 37.156 | 37.457 | 38.930 | +4.35% | +0.81% |
+
+TB128 improves the long 1.7B single-thread projection by **7.46%**, but
+regresses that model's eight-thread long case **4.35%** and short case
+**8.18%**. 0.6B long/eight-thread regresses **27.64%**, with 5.33% baseline
+drift; its single-thread long result is essentially unchanged (+0.44%).
+This is no robust cross-model/prefill win. No end-to-end TTFT speedup is
+claimed; section 28's measured full-model INT8 2k/eight-thread baselines
+remain the comparison reference (1.7B prefill 10.433 s). Candidate load
+quantization functions are unchanged and no persistent weight copy is
+added. Scratch grows 128 KiB per active worker. Process RSS/startup values
+below include the micro-harness's source buffers, reference outputs and
+serialization; they are not whole-model peak-RAM/startup measurements.
+
+| Model/run | Peak RSS MiB | Read + quantize projection, s |
+|---|---:|---:|
+| locality-0.6-A1 | 55.40 | 0.012430 |
+| locality-0.6-B | 56.65 | 0.007200 |
+| locality-0.6-A2 | 55.29 | 0.007792 |
+| locality-1.7-A1 | 123.30 | 0.032929 |
+| locality-1.7-B | 123.91 | 0.022076 |
+| locality-1.7-A2 | 123.48 | 0.024349 |
+
+**NO-GO for implementing TB128 or a new one-time weight layout now.**
+The existing path already packs persistent weights once, and the measured
+tradeoff hurts the important threaded-prefill workload. A later targeted
+profile may investigate duplicated activation packing/shared panels or a
+thread-count-specific block choice, but only after hardware-counter or
+packing-time evidence and a full-model win. No such change is implemented.
+The isolated TB128 tensor crate passes fmt, strict all-target clippy and
+all 40 unit tests, including quantized correctness/thread/scalar coverage.
+Raw byte-exact outputs, five-round samples, A/B/A commands, RSS and logs
+are in `bench-results/cpu-q4-quality/locality-*`. SIMD, INT8 quantization
+quality, defaults and all three stashes are preserved.
+
+
+## 31. Consolidation audit and direct INT8 loading assessment (2026-10-12)
+
+What this repo does: Marin loads a local Qwen3 checkpoint and runs generation
+on CPU or CUDA, with shared tokenization, sampling and cache-reuse semantics.
+The assumed workload is one interactive user/model/session, not a concurrent
+server. This audit is capped at 45 minutes from 13:20:14 UTC. No new loader,
+model support, quantization, kernels or planner is implemented.
+
+### Real execution paths and boundaries
+
+`marin` / `marin-run` arguments → `cli::load::open` → `ModelDir::open`
+(config, tokenizer, safetensors headers) → `Footprint` / backend selection →
+`Engine::load` → common `Qwen3Weights::load` / `Store` → CPU `Matrix` or
+CUDA `Weight` → `Session` → `generate_reusing` → `CausalLm::forward` →
+attention/KV commit → sampler → token stream/rendering.
+
+The CPU model consumes BF16 tensors one at a time. BF16 matrices own the
+loader vector or a necessary alignment/odd-width repack. INT8 matrices own
+only codes/scales; norms are FP32. CPU prefill uses bounded SIMD panels and
+row/head threading, **not bounded prompt chunks**. CPU KV grows, commits
+length after a successful pass, and retains its high-water allocation after
+rollback/clear. CUDA uploads one tensor at a time, owns device buffers,
+uses the separate proven 512-token prefill chunks, paged f32/f16 KV and
+persistent decode/verification workspaces. CPU/CUDA cache mismatch returns
+an error. Model/backend switching drops the old session before loading and
+rebuilds/replays state rather than sharing stale KV.
+
+The existing `Store` trait genuinely has two implementations and shares
+model shape/weight validation. `Engine`/`EngineCache` enums and the small
+`CausalLm`/`SequenceCache` contracts are justified. CPU and GPU forward
+orchestration should remain separate: ownership, synchronization and
+workspace lifetimes differ. Moving them into a generic device-tensor layer
+would add coupling without a demonstrated need. CUDA is dynamically loaded;
+CPU execution does not require a working driver, although `model` still has
+a compile-time CUDA dependency. Removing that dependency or public backend
+APIs would be a separate compatibility change.
+
+| Category | Code/evidence | Decision |
+|---|---|---|
+| Production | CPU/CUDA BF16, opt-in CPU/CUDA INT8, SIMD/threading, growable CPU KV, GPU paging/f16, reuse, GPU snapshots | Keep |
+| Necessary fallbacks/reference | CPU scalar/non-AVX2, alignment/odd-width handling, GPU f32/scalar attention, strict HF verification, independent numerical tests | Keep |
+| Opt-in measured execution | GPU n-gram speculation and its rollback path | Keep |
+| Active diagnostics/experiments | `quality`, `trace`, `probe`, guess/replay/pass-cost commands; explicit GPU INT4 | Keep; callers/tests exist |
+| Historical artifacts | Rejected CPU bounded prefill, CPU Q4 scalar/TB128 private workspaces, failed CUDA prototypes and their measurements | Preserve; not reachable through root Cargo/CLI |
+
+The runtime n-gram index uses one fixed match length; the CLI replay index
+searches multiple lengths for experimental reports. They share a tiny hash
+routine but have different costs/semantics. Merging them would either broaden
+the runtime interface or add indexing work; no such refactor is justified.
+Likewise CPU pass buffers, per-worker packing, scoped thread startup and
+GPU per-prefill workspaces still allocate. They are bounded and used, not
+abandoned prototypes. Profile their cost before changing their lifetimes.
+The failed TB128 experiment remains rejected (section 30).
+
+### Safely removed or simplified
+
+- Removed the unused **loader → tensor dependency edge**, plus only that
+  dependency-list entry in Cargo.lock. No loader source, exports, tests,
+  macros or build scripts use it. Standalone loader now depends on serde,
+  serde_json, thiserror and tokenizers; workspace tensor/SIMD dependencies
+  remain because inference uses them. No package version changed.
+- CPU snapshot requests no longer spawn/join a full source-weight hash whose
+  result cannot produce a CPU snapshot identity. CUDA snapshot hashing is
+  unchanged. The existing CPU safety test now checks the hash handle is
+  absent, BF16/INT8 output unchanged, missing files remain missing and
+  existing snapshot bytes remain untouched. The added assertion failed on
+  the old path and passes after the conditional change. CPU snapshots remain
+  unsupported; this does not implement them. No speed gain is claimed.
+- Deleted one stale CPU attention comment referring to the removed bounded
+  prefill path. Exact reservation itself remains necessary bounded scratch
+  management and is retained. No mathematical code changed.
+- Corrected the at-a-glance Stage 3 row, which still called completed HF/CUDA
+  closure checks open. Its original failure/closure evidence remains intact.
+  The section 25 historical note about unnecessary CPU snapshot hashing is
+  superseded by this cleanup, not by new snapshot support.
+
+No function, CLI option, compatibility path, test, fallback or historical
+artifact was deleted. Public APIs that lack an internal caller are not
+proven dead for external/debug use. Net production Rust line count is not
+a useful acceptance criterion; this removes real work and a dependency edge.
+
+### Ranked remaining findings (left unchanged)
+
+1. **Memory diagnostics can say “fits” when CPU admission will refuse.**
+   `cli/memory.rs::footprint/available_bytes` uses host MemAvailable and
+   weights+full KV+slack; `fit_cpu` uses cgroup-aware memory and also includes
+   full-prefill workspace. A verified **512 MiB memory.max** child ran
+   `marin-run inspect Qwen3-1.7B --ctx 8192 --quantize int8` and printed
+   “needs about 3.92 GB, 10.49 GB free, fits”. No model was loaded in that
+   child. Actual CPU load/growth guards are still active; this is misleading
+   telemetry, not evidence they were bypassed. The same output labels the
+   1.77 GB INT8 payload “stored as bf16”. `describe` also uses a filename
+   heuristic and says chat templates are unsupported when reused by chat UI.
+   Small future fix: have inspection use the real precision and CPU budget
+   calculation, label backend-specific estimates, and avoid claiming general
+   chat capability from a filename. No planner is needed.
+
+2. **Default threads ignore CPU affinity when sysfs topology is present.**
+   `tensor/threads.rs::physical_cores` counts all host sibling lists. Fresh
+   process: available_parallelism=16, physical/default=8. A `taskset` child
+   with one allowed CPU: available_parallelism=1, physical/default still=8.
+   Explicit `--threads 1` works. A future change should cap usable cores by
+   affinity/quota without altering unconstrained defaults; do not add a pool
+   or scheduler before measuring that fix. [Rust's documented resource
+   limits](https://doc.rust-lang.org/std/thread/fn.available_parallelism.html)
+   explain why host topology alone is insufficient.
+
+3. **Weight-byte reports count norms at source BF16 width.**
+   `model/qwen3/weights.rs::loaded_bytes` counts norms at two bytes although
+   both stores keep four-byte norms. The underestimate is 131072 / 247808 B
+   on 0.6B/1.7B, and 392192 B for the 4B config. It did not invalidate the
+   measured RAM gates, but a new packed loader must account for actual typed
+   payloads. Its associated tests currently encode the source-width estimate;
+   changing it is a deliberate accounting correction, not a deletion.
+
+4. **Older NVIDIA GPUs do not have an explicit capability fallback.**
+   `cuda/gpu.rs::Gpu::new` compiles compute_80 tensor-core PTX before checking
+   fit/capabilities; `Backend::Auto` falls back for Unavailable/fit failures,
+   not arbitrary module/JIT errors. Pre-Ampere hardware therefore risks a
+   startup error instead of graceful CPU selection. [NVIDIA's MMA
+   requirements](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-mma)
+   make the minimum architecture relevant. This is a code-derived risk;
+   no older NVIDIA card was available. Check capability before compiling,
+   classify unsupported hardware explicitly, and preserve genuine driver
+   errors. Do not broaden fallback to swallow every CUDA error.
+
+5. **New artifacts need stronger trust-boundary rules than the current lite
+   safetensors reader.** The reader checks size/shape/bounds but does not
+   enforce disjoint spans or reject duplicate JSON keys. Shard paths are
+   joined without forbidding absolute/parent paths. Public quantization
+   structs can also be constructed with invalid groups/buffer lengths;
+   the current production quantizer validates its inputs, but an artifact
+   constructor must validate independently. Reject malformed new artifacts
+   before allocating/using them. Restrict new cache manifests to contained
+   paths; do not silently break legacy external-shard users in this cleanup.
+
+6. **Current persistence guarantees differ.** Snapshots use temp-file,
+   sync and rename; `Home::save_config/save_history` use truncating fs::write.
+   A crash or failed write can lose remembered settings/prompt history.
+   Atomic writes are a small separate reliability task. Snapshot temp names
+   use PID + File::create rather than exclusive creation; do not copy that
+   collision/symlink behavior into a new artifact publisher. Existing 64-bit
+   content hashes are documented compiler-dependent, so a long-lived
+   portable artifact needs an explicitly versioned stable digest scheme.
+   [DefaultHasher](https://doc.rust-lang.org/std/collections/hash_map/struct.DefaultHasher.html)
+   does not promise a stable algorithm. Neither format migration nor these
+   unrelated persistence changes is implemented here.
+
+On non-Linux systems `cpu_available_bytes` returns None. RAM guards are
+therefore not an established low-RAM guarantee on those systems. The current
+Linux/cgroup evidence must not be marketed as Windows/older-PC validation.
+
+### Actual load ownership and fresh measurements
+
+`Weights` retains paths and tensor metadata, not the BF16 checkpoint.
+`read_bf16` allocates one Vec<u16> and at most 4 MiB read scratch; the scratch
+drops on return. During quantization that one BF16 tensor coexists with its
+new codes/scales. `Matrix::quantized` consumes the source vector and retains
+only Q8. CUDA similarly releases host source/quantized vectors after upload.
+A tied head uses the embedding matrix once. A fresh CPU cache holds zero KV
+bytes before any token, independent of the 2048 context limit in this probe.
+
+Four fresh, serial production-model load-only probes record all 310 progress
+callbacks, /proc RSS/HWM, wall time and actual I/O. The callback runs after
+each BF16 read and before conversion/storage, so it measures an in-flight
+source tensor; HWM also captures conversions between callbacks. No weight
+snapshot hash is requested. Cache conditions were **uncontrolled**, and
+callback sampling adds overhead: times below are observations, not an A/B
+startup gate or a cold/warm speed comparison.
+
+| Model/format | Actual retained weight bytes incl. FP32 norms | Load s | Process peak RSS MB | Physical reads MB |
+|---|---:|---:|---:|---:|
+| 0.6B / bf16 | 1,192,230,912 | 1.352 | 1260.57 | 972.80 |
+| 0.6B / int8 | 614,871,040 | 1.087 | 699.55 | 0.00 |
+| 1.7B / bf16 | 3,441,397,760 | 3.457 | 3511.87 | 2591.00 |
+| 1.7B / int8 | 1,774,710,784 | 3.522 | 1891.98 | 2526.51 |
+
+For a live matrix with N values, conversion needs roughly 2N BF16 bytes plus
+1.03125N packed bytes, beside already loaded matrices. The existing guard
+allows 2×source bytes + 64 MiB, conservatively. Large tied embeddings are
+loaded first, so their conversion peak is not added to the full model.
+Later projections can add one BF16 matrix transient; they do not double the
+whole model. Direct loading should remove that transient and conversion,
+**not promise another 50% reduction in steady-state inference RAM**.
+
+### Smallest direct packed-INT8 milestone (proposal only)
+
+1. Export one tensor at a time with existing `tensor::quantize`; write and
+   discard each result rather than loading a whole model before serializing.
+   Use the existing Qwen expected tensor definitions. Produce a standalone,
+   explicitly selected CPU artifact bundle with config/tokenizer and optional
+   generation/tokenizer-config files, one weight payload and a manifest.
+   Ordinary HF loading and BF16 default remain unchanged. No automatic stale
+   source-directory cache or hidden format fallback in version 1.
+2. Reuse [safetensors' row-major little-endian
+   container](https://github.com/safetensors/safetensors#format): original
+   matrix names contain I8 `[rows, cols]`, paired FP32 scales
+   `[rows, cols/group]`; norm names contain exact promoted FP32 values.
+   Group, signed-byte encoding, table precision, tied-head policy, quantizer
+   revision, file/layout version, exact source/config/tokenizer identities
+   and payload digests belong in the manifest. One tied table, no unused
+   duplicate head. Choose/version a stable digest before coding; no new
+   dependency is added by this audit.
+3. Add checked typed I8/F32 reads to loader and a consuming packed-Q8 matrix
+   constructor in tensor. Validate shapes, group divisibility/limits,
+   offsets/overlap, duplicates, exact code/scale lengths and finite norm/scales
+   before use. Move codes/scales into existing Q8; do not clone a complete
+   encoded tensor, introduce mmap/unsafe, or decode whole weights. Keep file
+   parsing independent of math; model validates the Qwen semantic mapping.
+4. Extend the existing model reader for this explicit source format and
+   actual typed-byte accounting. CLI export/selection/inspect are the only
+   product plumbing. Force CPU for the first artifact path; original CPU/CUDA
+   HF selection stays intact. No general weight-provider framework, GGUF
+   engine, new backend or kernel. A cache hit reads the artifact once and
+   verifies it during that read. Rehashing all BF16 files on every hit would
+   erase the purpose; the explicitly selected artifact is the checkpoint,
+   while its recorded source identity is conversion provenance.
+5. Publish a unique, exclusively created temporary bundle on the same
+   filesystem, sync files and directory, then atomically rename and sync the
+   parent. A reader sees an old complete artifact or a new complete artifact.
+   Concurrent exporters must verify/reuse an already published identical
+   result; never overwrite a user's source checkpoint. Interrupted/corrupt,
+   incompatible or stale explicitly selected artifacts fail clearly; do not
+   trust file size/mtime as content identity or silently change precision.
+
+First close the inspection/accounting discrepancy, then implement/export/load
+on fixtures and the existing 0.6B/1.7B models. Relevant boundaries are loader,
+tensor Q8 construction, model weight reader/validator and CLI plumbing. The
+math/runtime/KV kernels need no redesign. Export can itself be bounded to
+one source+packed tensor; 4B's largest embedding would be about 1.18 GB live
+plus runtime, **an estimate**, rather than a resident 4B model.
+
+Proposed gates, fixed before that future implementation:
+
+| Area | Gate |
+|---|---|
+| Data correctness | All code bytes, FP32 scale/norm bits and tied-table identity equal current on-load INT8 quantization |
+| Execution | Bit-identical logits/greedy and seeded continuations, 0.6B/1.7B short/2k, 1/8 threads and scalar/SIMD; reuse/rollback/context errors unchanged |
+| Reference/defaults | Existing strict BF16/HF thresholds, CUDA/snapshot regressions and BF16 default untouched; INT8 remains opt-in |
+| Artifact safety | Malformed/foreign/truncated/NaN/group/shape/offset/checksum cases rejected before use; interrupted/concurrent publish never exposes partial data or alters source files |
+| Ownership | Cache hit performs no BF16 payload reads and no quantization; one owned code/scale allocation per tensor, no whole decoded model |
+| Memory | Cache-hit load peak no worse than current matched INT8 +16 MiB; target steady <=payload+128 MiB and peak <=payload+192 MiB; RSS and cgroup peak/OOM/reclaim recorded |
+| Startup | >=20% lower warm process-to-first-output and >=10% lower fadvise-cold time on both existing models; 3 fresh processes/condition, cache and I/O verified |
+| Inference speed | Decode/prefill within 2% of current INT8 or demonstrably indistinguishable in interleaved runs; no new Stage 4 acceptance claim |
+| 4B acceptance | Independent trusted-reference/model quality proof plus real short/2k CPU runs under 8 GiB/no-swap, zero OOM and >=1 GiB measured headroom; estimates alone do not qualify support |
+
+### 4B budget and decision
+
+Section 29's real Qwen3-4B / Instruct-2507 configs parse today: hidden 2560,
+query width 4096, FFN 9728, 36 layers, 32 query/8 KV heads, head_dim 128.
+Their non-square projections and group-4 attention meet current kernel
+conditions; group-128 INT8 divides every input dimension. No architecture
+expansion is indicated by inspection. **Actual 4B weights/numerics have not
+been loaded or accepted.** A reference requiring more RAM must be prepared
+on an appropriately sized system, not by bypassing the constrained run.
+
+Estimated payload is 4,148,752,384 B INT8 versus 8,045,328,384 B BF16.
+At 2k, FP32 KV is 576 MiB, named full-prefill workspace 312 MiB plus logits,
+attention packing 16 MiB, and the separate runtime/safety/growth allowances
+128/256/64 MiB. Total is about **5.185 GiB**. An 8 GiB machine with 2 GiB
+reserved for OS has about 0.815 GiB additional process-budget slack. This
+is a candidate for a real 2k pilot, not an unlimited-context promise. 4k's
+estimate is 6.068 GiB, already beyond that 6 GiB allowance. Growth copies
+and allocator/platform variation still need measurement.
+
+Existing matched warm INT8 load medians (section 25) are 0.996 / 2.273 s;
+fadvise-cold 1.446 / 3.549 s. A direct artifact reads roughly half the used
+BF16 payload and avoids conversion, but adds digest/validation cost. At the
+historical 2–3 GB/s disk rate, payload I/O alone is approximately 0.21–0.31 s
+for 0.6B, 0.59–0.89 s for 1.7B, 1.38–2.07 s for 4B. These are lower-bound
+estimates, not startup predictions. Current and proposed steady-state INT8
+payloads are identical. Direct loading's expected peak saving is a tensor
+transient (typically tens of MB near final load), not gigabytes.
+
+**GO for a narrowly scoped direct-INT8 artifact milestone**, after explicit
+format/digest and accounting gates are reviewed. **NO-GO for claiming 4B/8GiB
+support now.** Do not build INT4, new tiling/SIMD, FP16 CPU KV, CPU snapshots,
+chunked CPU prefill, the full V9 planner, a scheduler/server, offload or new
+model architecture as part of it. Growable FP32 KV remains independently GO;
+existing Stage 4 timing misses and rejected bounded prefill remain unchanged.
+
+### Final verification and preservation
+
+Final state: fmt, locked workspace/all-target check, all-feature/all-target
+clippy `-D warnings`, **594 workspace tests** with MARIN_REQUIRE_CUDA=1 on
+RTX 5050 (zero failures/ignores), line-limit and unsafe checks pass.
+Forced-scalar release tensor suite: **50 passed**, zero failures/ignores.
+Coverage includes BF16/INT8 numerical tests, thread invariance, retained KV,
+rollback, CPU/CUDA/model switching, GPU f32/f16 snapshots and corrupted/foreign
+files. The existing CPU snapshot safety test was strengthened, not replaced.
+No arithmetic/kernel/default changed. No commit, push or stash change.
+Prior README changes are byte-preserved, prior benchmark evidence is retained
+apart from the explicitly corrected stale overview row. Raw load callbacks,
+verified 512 MiB inspection, affinity output, intentional red/green test,
+Cargo dependency proof and all check logs are in
+`bench-results/consolidation-audit/`. No exhaustive benchmark matrix, new
+quantization experiment or 4B download/run. Older/non-Linux hardware and new
+loader gains remain unverified. This is a bounded execution/ownership audit,
+not a line-by-line proof of every CUDA instruction or terminal render path.

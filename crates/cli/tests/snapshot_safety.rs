@@ -203,6 +203,10 @@ fn the_cpu_never_saves_or_restores() -> Result<()> {
                 &Style::plain(),
                 false,
             )?;
+            assert!(
+                loaded.weights_hash.is_none(),
+                "CPU snapshots are unsupported, so their weight hash is unused"
+            );
             let settings = Settings {
                 max_tokens: 4,
                 temperature: 0.0,
