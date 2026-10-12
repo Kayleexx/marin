@@ -18,6 +18,8 @@ pub enum KvError {
     RollbackPastEnd { len: usize, held: usize },
     #[error("cache size arithmetic overflowed")]
     Overflow,
+    #[error("cannot allocate KV storage: {0}")]
+    Allocation(String),
 }
 
 #[derive(Debug)]
@@ -44,15 +46,15 @@ impl KvCache {
         capacity: usize,
     ) -> Result<Self, KvError> {
         let stride = kv_heads.checked_mul(head_dim).ok_or(KvError::Overflow)?;
-        let floats = stride.checked_mul(capacity).ok_or(KvError::Overflow)?;
-        let layers = (0..layers)
-            .map(|_| LayerKv {
-                keys: vec![0.0; floats],
-                values: vec![0.0; floats],
-            })
-            .collect();
+        Self::bytes_for(layers, kv_heads, head_dim, capacity).ok_or(KvError::Overflow)?;
+        let mut storage = Vec::new();
+        storage.try_reserve_exact(layers).map_err(allocation)?;
+        storage.resize_with(layers, || LayerKv {
+            keys: Vec::new(),
+            values: Vec::new(),
+        });
         Ok(Self {
-            layers,
+            layers: storage,
             stride,
             capacity,
             len: 0,
@@ -73,6 +75,88 @@ impl KvCache {
 
     pub fn clear(&mut self) {
         self.len = 0;
+    }
+
+    /// Actual vector capacity, including storage retained after rollback or clear.
+    pub fn bytes_held(&self) -> usize {
+        self.layers.iter().fold(0_usize, |bytes, layer| {
+            bytes.saturating_add(
+                layer
+                    .keys
+                    .capacity()
+                    .saturating_add(layer.values.capacity())
+                    .saturating_mul(size_of::<f32>()),
+            )
+        })
+    }
+
+    pub fn bytes_initialized(&self) -> usize {
+        self.layers.iter().fold(0_usize, |bytes, layer| {
+            bytes.saturating_add(
+                layer
+                    .keys
+                    .len()
+                    .saturating_add(layer.values.len())
+                    .saturating_mul(size_of::<f32>()),
+            )
+        })
+    }
+
+    /// Largest possible temporary copy among vectors that actually need to grow.
+    pub fn growth_copy_bytes(&self, positions: usize) -> Result<usize, KvError> {
+        let (_, floats) = self.reservation_size(positions)?;
+        Ok(self
+            .layers
+            .iter()
+            .flat_map(|layer| [&layer.keys, &layer.values])
+            .filter(|data| data.capacity() < floats)
+            .map(|data| data.capacity())
+            .max()
+            .unwrap_or(0)
+            .saturating_mul(size_of::<f32>()))
+    }
+
+    fn reservation_size(&self, positions: usize) -> Result<(usize, usize), KvError> {
+        if positions > self.capacity {
+            return Err(KvError::ContextFull {
+                needed: positions,
+                capacity: self.capacity,
+            });
+        }
+        let used = positions
+            .checked_mul(self.stride)
+            .ok_or(KvError::Overflow)?;
+        let positions = positions
+            .checked_next_multiple_of(256)
+            .ok_or(KvError::Overflow)?
+            .min(self.capacity);
+        let floats = positions
+            .checked_mul(self.stride)
+            .ok_or(KvError::Overflow)?;
+        Ok((used, floats))
+    }
+
+    /// Reserve every layer before a pass can write any of them. Length commits separately.
+    pub fn reserve(&mut self, positions: usize) -> Result<(), KvError> {
+        let (used, floats) = self.reservation_size(positions)?;
+        if self
+            .layers
+            .first()
+            .is_some_and(|layer| layer.keys.len() >= used)
+        {
+            return Ok(());
+        }
+        for layer in &mut self.layers {
+            for data in [&mut layer.keys, &mut layer.values] {
+                data.try_reserve_exact(floats.saturating_sub(data.len()))
+                    .map_err(allocation)?;
+            }
+        }
+        for layer in &mut self.layers {
+            layer.keys.resize(used.max(layer.keys.len()), 0.0);
+            layer.values.resize(used.max(layer.values.len()), 0.0);
+        }
+        Ok(())
     }
 
     pub fn bytes_for(
@@ -106,6 +190,10 @@ impl KvCache {
         let start = self.len.checked_mul(self.stride).ok_or(KvError::Overflow)?;
         let end = start.checked_add(keys.len()).ok_or(KvError::Overflow)?;
         let layers = self.layers.len();
+        if layer >= layers {
+            return Err(KvError::Layer { layer, layers });
+        }
+        self.reserve(end_pos)?;
         let slot = self
             .layers
             .get_mut(layer)
@@ -141,6 +229,7 @@ impl KvCache {
                 capacity: self.capacity,
             });
         }
+        self.reserve(new_len)?;
         self.len = new_len;
         Ok(())
     }
@@ -168,6 +257,10 @@ impl KvCache {
             _ => Err(shape),
         }
     }
+}
+
+fn allocation(error: std::collections::TryReserveError) -> KvError {
+    KvError::Allocation(error.to_string())
 }
 
 fn copy_range(dst: &mut [f32], start: usize, end: usize, src: &[f32]) -> Result<(), KvError> {
@@ -255,5 +348,69 @@ mod tests {
         assert_eq!(KvCache::bytes_for(2, 1, 2, 3), Some(2 * 2 * 2 * 3 * 4));
         assert_eq!(KvCache::bytes_for(usize::MAX, 2, 1, 1), None);
         assert!(KvCache::new(1, usize::MAX, 2, 1).is_err());
+    }
+
+    #[test]
+    fn growth_preserves_all_layers_and_reuses_the_high_water_mark() {
+        let mut kv = KvCache::new(2, 1, 2, 8192).unwrap();
+        assert_eq!(kv.bytes_held(), 0);
+        assert_eq!(kv.bytes_initialized(), 0);
+        assert_eq!(kv.growth_copy_bytes(127).unwrap(), 0);
+        for layer in 0..2 {
+            kv.write(layer, &[layer as f32; 254], &[3.0; 254]).unwrap();
+        }
+        kv.advance(127).unwrap();
+        assert_eq!(kv.capacity(), 8192);
+        assert_eq!(kv.bytes_held(), KvCache::bytes_for(2, 1, 2, 256).unwrap());
+        assert_eq!(
+            kv.bytes_initialized(),
+            KvCache::bytes_for(2, 1, 2, 127).unwrap()
+        );
+        assert_eq!(kv.growth_copy_bytes(127).unwrap(), 0);
+        assert_eq!(kv.growth_copy_bytes(257).unwrap(), 256 * 2 * 4);
+        kv.reserve(257).unwrap();
+        let held = kv.bytes_held();
+        for layer in 0..2 {
+            assert_eq!(kv.read(layer, 127).unwrap().0, &[layer as f32; 254]);
+        }
+        kv.truncate(126).unwrap();
+        kv.write(0, &[9.0, 10.0], &[11.0, 12.0]).unwrap();
+        kv.advance(1).unwrap();
+        assert_eq!(
+            kv.read(0, 127).unwrap().0.get(252..),
+            Some([9.0, 10.0].as_slice())
+        );
+        kv.clear();
+        kv.reserve(1).unwrap();
+        assert_eq!(kv.bytes_held(), held);
+        assert_eq!(kv.growth_copy_bytes(257).unwrap(), 0);
+        assert_eq!(
+            kv.bytes_initialized(),
+            KvCache::bytes_for(2, 1, 2, 257).unwrap()
+        );
+    }
+
+    #[test]
+    fn refused_growth_keeps_committed_data_and_length() {
+        let mut kv = KvCache::new(2, 1, 1, usize::MAX / 16).unwrap();
+        for layer in 0..2 {
+            kv.write(layer, &[7.0], &[8.0]).unwrap();
+        }
+        kv.advance(1).unwrap();
+        let held = kv.bytes_held();
+        assert!(matches!(
+            kv.reserve(usize::MAX / 16),
+            Err(KvError::Allocation(_))
+        ));
+        assert_eq!(kv.len(), 1);
+        assert_eq!(kv.bytes_held(), held);
+        for layer in 0..2 {
+            assert_eq!(
+                kv.read(layer, 1).unwrap(),
+                ([7.0].as_slice(), [8.0].as_slice())
+            );
+        }
+        assert!(kv.write(2, &[0.0; 257], &[0.0; 257]).is_err());
+        assert_eq!(kv.bytes_held(), held);
     }
 }

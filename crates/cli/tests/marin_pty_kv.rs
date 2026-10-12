@@ -49,7 +49,7 @@ struct Panels {
     weights: Vec<String>,
 }
 
-fn panels(args: &str, switch: bool) -> Res<Option<Panels>> {
+fn panels(args: &str, switch: Option<&str>) -> Res<Option<Panels>> {
     if !have("script") {
         eprintln!("skipping: `script` is not installed");
         return Ok(None);
@@ -75,12 +75,12 @@ fn panels(args: &str, switch: bool) -> Res<Option<Panels>> {
     let tabs = [&reply as Check, &kv, &model];
     let mut steps = vec![step("", Some(("prompt", &prompt)))];
     look(&mut steps, tabs);
-    if switch {
+    if let Some(target) = switch {
         steps.extend([
             step("/", Some(("menu", &menu))),
             step("backend", None),
             step("\r", Some(("backend menu", &backend))),
-            step("cuda", None),
+            step(target, None),
             step("\r", Some(("switched", &now))),
         ]);
         look(&mut steps, tabs);
@@ -141,7 +141,7 @@ fn the_cache_type_and_weight_format_reach_the_gpu_and_survive_a_model_switch() {
             "int8 weights, groups of 32",
         ),
     ] {
-        let Some(found) = panels(args, true).unwrap() else {
+        let Some(found) = panels(args, Some("cuda")).unwrap() else {
             return;
         };
         let expected = Panels {
@@ -154,12 +154,26 @@ fn the_cache_type_and_weight_format_reach_the_gpu_and_survive_a_model_switch() {
 
 #[test]
 fn without_flags_the_cpu_keeps_f32_and_bf16() {
-    if let Some(found) = panels("--backend cpu", false).unwrap() {
+    if let Some(found) = panels("--backend cpu", None).unwrap() {
         assert_eq!(
             found,
             Panels {
                 kv: vec!["f32".into()],
                 weights: vec!["bf16 weights".into()],
+            }
+        );
+    }
+}
+
+#[test]
+fn cpu_int8_and_f32_survive_reloading_the_backend() {
+    let args = "--backend cpu --quantize int8 --quant-group 32 --threads 8";
+    if let Some(found) = panels(args, Some("cpu")).unwrap() {
+        assert_eq!(
+            found,
+            Panels {
+                kv: vec!["f32".into(); 2],
+                weights: vec!["int8 weights, groups of 32".into(); 2],
             }
         );
     }

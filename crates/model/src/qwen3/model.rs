@@ -6,6 +6,7 @@ use tensor::{Matrix, QuantBits, QuantScheme, ensure_finite, rms_norm_rows};
 
 use super::Observer;
 use super::config::Qwen3Config;
+use super::cpu_memory::{CPU_SLACK_BYTES, before_growth, ensure_available};
 use super::layer::Buffers;
 use super::weights::{CpuStore, Qwen3Weights};
 use crate::ModelError;
@@ -33,6 +34,12 @@ impl Qwen3 {
             ));
         }
         let config = Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref())?;
+        let bytes = super::weights::loaded_bytes(&dir.weights, &config, quant)?;
+        ensure_available(
+            bytes
+                .checked_add(CPU_SLACK_BYTES)
+                .ok_or(kv::KvError::Overflow)?,
+        )?;
         let weights = Qwen3Weights::load(&dir.weights, &config, &mut CpuStore(quant), progress)?;
         Ok(Self {
             config,
@@ -78,14 +85,29 @@ impl Qwen3 {
         mut observe: Observer<'_>,
         probe: &mut Probe<'_>,
     ) -> Result<Vec<f32>, ModelError> {
-        let cfg = &self.config;
         if tokens.is_empty() {
             return Err(ModelError::NoTokens);
         }
         let start = kv.len();
-        let mut hidden = probe.time(Stage::Embedding, || self.embed(tokens))?;
-        notify(&mut observe, 0, last_row(&hidden, cfg.hidden_size));
+        let end = start
+            .checked_add(tokens.len())
+            .ok_or(kv::KvError::Overflow)?;
+        if end > kv.capacity() {
+            return Err(kv::KvError::ContextFull {
+                needed: end,
+                capacity: kv.capacity(),
+            }
+            .into());
+        }
+        let cfg = &self.config;
         let mut buffers = Buffers::default();
+        probe.layer(None);
+        let mut hidden = probe.time(Stage::Embedding, || {
+            before_growth(cfg, kv, end, tokens.len())?;
+            kv.reserve(end)?;
+            self.embed(tokens)
+        })?;
+        notify(&mut observe, 0, last_row(&hidden, cfg.hidden_size));
         for (index, layer) in self.weights.layers.iter().enumerate() {
             probe.layer(Some(index));
             layer.forward(cfg, index, &mut hidden, start, (kv, &mut buffers), probe)?;

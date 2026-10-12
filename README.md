@@ -104,7 +104,7 @@ On the CPU (Ryzen 7 260, 8 cores), Qwen3-0.6B: on **one thread** a 127-token pro
 
 CPU INT8 (group 128, three measured rounds after a warm-up) raises one-thread decode at 127 tokens from **18.5 to 34.5 tok/s on 0.6B** and **6.1 to 11.4 on 1.7B**. Peak RAM falls **1.30 to 0.73 GB** / **3.56 to 1.90 GB**. The 1/8-thread, 127/2,047-token matrix passes its speed and RAM gates; weights are 51.6% of BF16. Conversion happens at load time from the existing HF BF16 files; disk storage is unchanged. Relative quality gates pass on prose/code (97.559–98.730% top-1 agreement), with no new semantic regression in eight fixed prompts per model.
 
-CPU INT8 remains experimental: strict 0.6B HF parity and CUDA runtime regression checks are open, so full Stage 3 acceptance and INT4 are **no-go**. BF16 stays the default. [Full Stage 3 gates and measurements](BENCHMARKS.md#25-cpu-int8-weights-stage-3).
+CPU Stage 3 passes its original gates on both Qwen3 models, including strict HF parity and RTX 5050 CUDA/snapshot regressions. INT8 stays opt-in and BF16 stays the default. Stage 4 growable FP32 CPU KV is **GO**. Bounded prefill is **NO-GO and removed**; whole-prompt workspace budgeting and RAM safety checks remain. The original +77% TTFT failure was not reproduced conclusively, and final focused checks retain two narrow timing misses. Complete Stage 4 remains **NO-GO**; FP16 KV and INT4 have not started. [Final fallback evidence and limitations](BENCHMARKS.md#27-stage-4-bounded-prefill-regression-investigation). [Stage 3 acceptance](BENCHMARKS.md#25-cpu-int8-weights-stage-3).
 
 Methods, tables and commands to repeat each number are in [BENCHMARKS.md](BENCHMARKS.md).
 

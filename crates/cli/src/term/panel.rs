@@ -62,6 +62,7 @@ pub struct KvStats {
     pub used: usize,
     pub capacity: usize,
     pub bytes: u64,
+    pub held: usize,
     pub format: &'static str,
     pub backend: String,
 }
@@ -147,6 +148,10 @@ pub fn body(tab: Tab, data: &PanelData) -> Vec<String> {
                     data.kv.format,
                     data.kv.backend
                 ),
+                format!(
+                    "allocated     {}",
+                    bytes(u64::try_from(data.kv.held).unwrap_or(u64::MAX))
+                ),
                 "the KV cache remembers earlier tokens so they are not recomputed".to_string(),
             ]
         }
@@ -171,6 +176,7 @@ mod tests {
             kv: KvStats {
                 used: 29,
                 capacity: 2048,
+                held: 0,
                 bytes: 470_000_000,
                 format: "f16",
                 backend: "cuda".into(),

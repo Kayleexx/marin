@@ -156,7 +156,8 @@ fn open(request: Request<'_>) -> Result<Loaded, CliError> {
     }
     let dir = ModelDir::open(path)?;
     let config = Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref())?;
-    let ctx = resolve_ctx(&config, ctx, default_ctx)?;
+    let adaptive_ctx = ctx.is_none();
+    let mut ctx = resolve_ctx(&config, ctx, default_ctx)?;
     let mut footprint = footprint(&dir, &config, ctx, precision)?;
     let selected = Backend::select(
         backend,
@@ -169,9 +170,15 @@ fn open(request: Request<'_>) -> Result<Loaded, CliError> {
     if matches!(selected.backend, Backend::Cpu) {
         if kv_follows_backend {
             precision.kv = KvFormat::F32;
-            footprint = crate::memory::footprint(&dir, &config, ctx, precision)?;
         }
-        footprint.ensure_fits()?;
+        let old_ctx = ctx;
+        ctx = footprint.fit_cpu(&config, ctx, adaptive_ctx)?;
+        if chrome && ctx != old_ctx {
+            eprintln!(
+                "{} CPU context reduced to {ctx} tokens to fit available memory",
+                style.yellow("note:")
+            );
+        }
     }
     if let (Some(note), true) = (&selected.note, chrome) {
         eprintln!("{} {note}", style.yellow("note:"));

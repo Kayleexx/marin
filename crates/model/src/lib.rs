@@ -17,7 +17,8 @@ pub use error::ModelError;
 pub use metrics::{Probe, Stage, StageTimes, TraceEntry};
 pub use precision::Precision;
 pub use qwen3::{
-    Backend, BackendChoice, Engine, EngineCache, GpuCache, KvLayout, Observer, Qwen3, Qwen3Config,
-    Qwen3Gpu, Selected, kv_startup_bytes, kv_window_bytes, weight_bytes,
+    Backend, BackendChoice, CPU_SLACK_BYTES, Engine, EngineCache, GpuCache, KvLayout, Observer,
+    Qwen3, Qwen3Config, Qwen3Gpu, Selected, cpu_workspace_bytes, kv_startup_bytes, kv_window_bytes,
+    weight_bytes,
 };
 pub use tensor::{DEFAULT_GROUP, QuantBits, QuantScheme};

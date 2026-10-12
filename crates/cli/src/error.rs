@@ -98,6 +98,10 @@ impl CliError {
             Self::Model(ModelError::GpuMemory { .. }) => {
                 Some("try a smaller --ctx, or run with --backend cpu")
             }
+            Self::Model(ModelError::CpuMemory { .. })
+            | Self::Generate(GenerateError::Model(ModelError::CpuMemory { .. })) => {
+                Some("try a smaller --ctx, use --quantize int8, or close other programs")
+            }
             Self::Generate(GenerateError::Model(ModelError::Cuda(CudaError::KvMemory {
                 ..
             }))) => Some(

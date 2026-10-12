@@ -233,6 +233,7 @@ impl App {
                 used: s.kv_used,
                 capacity: s.ctx,
                 bytes: s.loaded.footprint.kv_window,
+                held: s.kv().kv_bytes_held(),
                 format: s.loaded.model.kv_format().label(),
                 backend: s.loaded.model.backend_name(),
             },

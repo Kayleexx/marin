@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod gpu_stats;
+mod memory;
 mod power;
 mod process;
 mod rates;
@@ -10,6 +11,7 @@ mod stage;
 pub use gpu_stats::{
     GpuSample, GpuStats, Sampler, Summary, parse_sample, power_limit_watts, summarize,
 };
+pub use memory::cpu_available_bytes;
 pub use power::on_ac_power;
 pub use process::{ProcessMemory, cpu_time, disk_read_bytes, process_memory};
 pub use rates::per_second;

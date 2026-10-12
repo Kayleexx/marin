@@ -8,7 +8,7 @@ use cli::load::load_for_snapshot;
 use cli::session::{Session, Settings};
 use cli::snapshot::{self, Reject};
 use cli::style::Style;
-use model::{BackendChoice, KvFormat, Precision};
+use model::{BackendChoice, KvFormat};
 use runtime::SequenceCache;
 use snapshot_common::{Result, Setup, fixture, precision, run, saved, then, tokens, work_dir};
 
@@ -191,31 +191,55 @@ fn guessing_ahead_before_the_save_changes_nothing() -> Result<()> {
 fn the_cpu_never_saves_or_restores() -> Result<()> {
     let dir = work_dir("cpu")?;
     let file = dir.join("s.bin");
-    let loaded = load_for_snapshot(
-        &fixture(),
-        Some(256),
-        256,
-        BackendChoice::Cpu,
-        Precision::default(),
-        &Style::plain(),
-        false,
-    )?;
-    let settings = Settings {
-        max_tokens: 4,
-        temperature: 0.0,
-        top_k: 0,
-        top_p: 1.0,
-        seed: Some(1),
-    };
-    let mut session = Session::new(loaded, settings, Style::plain())?;
-    session.use_snapshot(file.clone());
-    run(&mut session, &tokens(70, 1))?;
-    assert!(
-        session
-            .save_snapshot()
-            .map_err(|e| e.to_string())?
-            .is_none()
-    );
-    assert!(!file.exists() && session.restored.is_none());
+    let prompt = tokens(70, 1);
+    for int8 in [false, true] {
+        let open = || -> Result<Session> {
+            let loaded = load_for_snapshot(
+                &fixture(),
+                Some(256),
+                256,
+                BackendChoice::Cpu,
+                precision(KvFormat::F32, int8),
+                &Style::plain(),
+                false,
+            )?;
+            let settings = Settings {
+                max_tokens: 4,
+                temperature: 0.0,
+                top_k: 0,
+                top_p: 1.0,
+                seed: Some(1),
+            };
+            Ok(Session::new(loaded, settings, Style::plain())?)
+        };
+        let expected = run(&mut open()?, &prompt)?.tokens;
+        for existing in [false, true] {
+            let bytes = b"an existing file must not be consumed or overwritten";
+            if existing {
+                fs::write(&file, bytes)?;
+            }
+            for _ in 0..2 {
+                let mut session = open()?;
+                session.use_snapshot(file.clone());
+                assert_eq!(run(&mut session, &prompt)?.tokens, expected);
+                assert!(
+                    session
+                        .save_snapshot()
+                        .map_err(|e| e.to_string())?
+                        .is_none()
+                );
+                assert!(session.restored.is_none());
+                assert_eq!(session.last.as_ref().unwrap().reused, 0);
+                if existing {
+                    assert_eq!(fs::read(&file)?, bytes);
+                } else {
+                    assert!(!file.exists());
+                }
+            }
+            if existing {
+                fs::remove_file(&file)?;
+            }
+        }
+    }
     Ok(())
 }

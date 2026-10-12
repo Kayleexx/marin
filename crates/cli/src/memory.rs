@@ -6,9 +6,6 @@ use model::{Precision, Qwen3Config};
 
 use crate::CliError;
 
-/// Extra room for activations and logits on top of weights and the KV cache.
-const SLACK_BYTES: u64 = 256 * 1024 * 1024;
-
 #[derive(Debug, Clone, Copy)]
 pub struct Footprint {
     pub weights: u64,
@@ -66,12 +63,71 @@ pub fn footprint(
         kv,
         kv_window,
         kv_startup,
-        needed: weights.saturating_add(kv).saturating_add(SLACK_BYTES),
+        needed: weights
+            .saturating_add(kv)
+            .saturating_add(model::CPU_SLACK_BYTES),
         available: available_bytes(),
     })
 }
 
 impl Footprint {
+    pub fn fit_cpu(
+        &mut self,
+        cfg: &Qwen3Config,
+        ctx: usize,
+        adaptive: bool,
+    ) -> Result<usize, CliError> {
+        self.available = metrics::cpu_available_bytes()?;
+        let logits = model::cpu_workspace_bytes(cfg, 0)?;
+        let activation = model::cpu_workspace_bytes(cfg, 1)?
+            .checked_sub(logits)
+            .ok_or_else(|| CliError::BadOption("CPU workspace estimate overflows".into()))?;
+        let fixed = self
+            .weights
+            .checked_add(model::CPU_SLACK_BYTES)
+            .and_then(|n| n.checked_add(logits))
+            .ok_or_else(|| CliError::BadOption("CPU memory estimate overflows".into()))?;
+        let per_position = KvCache::bytes_for(cfg.layers, cfg.kv_heads, cfg.head_dim, 1)
+            .and_then(|n| u64::try_from(n).ok())
+            .filter(|n| *n > 0)
+            .ok_or_else(|| CliError::BadOption("CPU KV estimate overflows".into()))?;
+        let per_token = per_position
+            .checked_add(activation)
+            .ok_or_else(|| CliError::BadOption("CPU memory estimate overflows".into()))?;
+        let mut chosen = ctx;
+        if let (true, Some(available)) = (adaptive, self.available) {
+            let fit = available
+                .saturating_sub(fixed)
+                .checked_div(per_token)
+                .unwrap_or(0);
+            chosen = chosen.min(usize::try_from(fit).unwrap_or(usize::MAX));
+            if chosen == 0 {
+                return Err(CliError::NotEnoughMemory {
+                    needed: fixed.saturating_add(per_token),
+                    available,
+                });
+            }
+        }
+        self.kv = per_position
+            .checked_mul(
+                u64::try_from(chosen)
+                    .map_err(|_| CliError::BadOption("CPU context overflows".into()))?,
+            )
+            .ok_or_else(|| CliError::BadOption("CPU KV estimate overflows".into()))?;
+        self.kv_window = self.kv;
+        self.kv_startup = 0;
+        self.needed = fixed
+            .checked_add(self.kv)
+            .and_then(|n| {
+                activation
+                    .checked_mul(u64::try_from(chosen).ok()?)
+                    .and_then(|bytes| n.checked_add(bytes))
+            })
+            .ok_or_else(|| CliError::BadOption("CPU memory estimate overflows".into()))?;
+        self.ensure_fits()?;
+        Ok(chosen)
+    }
+
     pub fn ensure_fits(&self) -> Result<(), CliError> {
         match self.available {
             Some(available) if available < self.needed => Err(CliError::NotEnoughMemory {
@@ -86,6 +142,32 @@ impl Footprint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_admission_budgets_the_whole_prefill_workspace() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-chat");
+        let dir = ModelDir::open(&path).unwrap();
+        let cfg =
+            Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref()).unwrap();
+        let mut usage = footprint(&dir, &cfg, 1024, Precision::default()).unwrap();
+        assert_eq!(usage.fit_cpu(&cfg, 1024, false).unwrap(), 1024);
+        assert_eq!(usage.kv_startup, 0);
+        assert_eq!(
+            usage.needed,
+            usage.weights
+                + usage.kv
+                + model::CPU_SLACK_BYTES
+                + model::cpu_workspace_bytes(&cfg, 1024).unwrap()
+        );
+        let mut short = footprint(&dir, &cfg, 512, Precision::default()).unwrap();
+        short.fit_cpu(&cfg, 512, false).unwrap();
+        assert_eq!(
+            usage.needed - short.needed,
+            usage.kv - short.kv + model::cpu_workspace_bytes(&cfg, 1024).unwrap()
+                - model::cpu_workspace_bytes(&cfg, 512).unwrap()
+        );
+    }
 
     #[test]
     fn the_gpu_needs_a_slab_to_start_not_the_whole_window() {

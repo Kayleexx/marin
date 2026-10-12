@@ -150,6 +150,12 @@ fn the_record_keeps_every_run_and_says_what_it_was_measured_on()
     assert_eq!(json["precision"], "bf16 weights, f32 math");
     assert_eq!(json["quantization"], "none");
     assert!(json["hardware"]["gpu"].is_null(), "a CPU run has no gpu");
+    assert!(json["load"]["kv_held_pages"].is_null());
+    assert!(
+        json["load"]["kv_held_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0)
+    );
     let runs = json["runs"].as_array().ok_or("no runs")?;
     assert_eq!(runs.len(), 3);
     for run in runs {

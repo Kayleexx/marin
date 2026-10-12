@@ -36,6 +36,35 @@ fn a_header_survives_a_round_trip() {
 }
 
 #[test]
+fn bf16_int8_and_different_int8_groups_cannot_share_a_snapshot() {
+    let identities: Vec<_> = [(0, 0), (8, 32), (8, 128)]
+        .into_iter()
+        .map(|(weight_bits, weight_group)| Identity {
+            weight_bits,
+            weight_group,
+            ..identity()
+        })
+        .collect();
+    for saved in &identities {
+        let h = Header {
+            identity: *saved,
+            ..header(100)
+        };
+        let decoded = Header::decode(&h.encode()).unwrap();
+        for now in &identities {
+            let expected = if saved == now {
+                Ok(())
+            } else if saved.weight_bits != now.weight_bits {
+                Err(Reject::Foreign("weight quantization"))
+            } else {
+                Err(Reject::Foreign("weight quantization group"))
+            };
+            assert_eq!(decoded.check_against(now), expected);
+        }
+    }
+}
+
+#[test]
 fn flipping_any_header_byte_is_noticed() {
     let bytes = header(100).encode();
     for at in 0..bytes.len() {

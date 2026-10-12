@@ -213,6 +213,11 @@ pub fn text(r: &Record) -> String {
             units::bytes(bytes),
             units::bytes(r.load.kv_reserved_bytes)
         ),
+        (None, Some(bytes)) => format!(
+            "kv cache {} held, up to {}",
+            units::bytes(bytes),
+            units::bytes(r.load.kv_reserved_bytes)
+        ),
         _ => format!(
             "kv cache reserved {}",
             units::bytes(r.load.kv_reserved_bytes)

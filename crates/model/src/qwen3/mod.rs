@@ -1,5 +1,6 @@
 mod attention;
 mod config;
+mod cpu_memory;
 mod engine;
 mod fit;
 mod gpu;
@@ -13,6 +14,7 @@ mod weights;
 mod workspace;
 
 pub use config::Qwen3Config;
+pub use cpu_memory::{CPU_SLACK_BYTES, cpu_workspace_bytes};
 
 /// Receives the last token's hidden state before layer 0 (index 0) and after each layer.
 pub type Observer<'a> = Option<&'a mut dyn FnMut(usize, &[f32])>;

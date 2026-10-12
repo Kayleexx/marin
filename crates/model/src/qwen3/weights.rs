@@ -11,6 +11,10 @@ pub(crate) trait Store {
     type Matrix;
     type Vector;
 
+    fn before_read(&mut self, _bytes: u64) -> Result<(), ModelError> {
+        Ok(())
+    }
+
     fn matrix(
         &mut self,
         rows: usize,
@@ -35,6 +39,14 @@ pub(crate) struct CpuStore(pub Option<QuantScheme>);
 impl Store for CpuStore {
     type Matrix = Matrix;
     type Vector = Vec<f32>;
+
+    fn before_read(&mut self, bytes: u64) -> Result<(), ModelError> {
+        let needed = bytes
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(64 * 1024 * 1024))
+            .ok_or_else(|| ModelError::InvalidConfig("CPU tensor load size overflows".into()))?;
+        super::cpu_memory::ensure_available(needed)
+    }
 
     fn matrix(&mut self, rows: usize, cols: usize, bits: Vec<u16>) -> Result<Matrix, ModelError> {
         Ok(match self.0 {
@@ -155,6 +167,9 @@ struct Reader<'a, S: Store, F: FnMut(u64, u64)> {
 
 impl<S: Store, F: FnMut(u64, u64)> Reader<'_, S, F> {
     fn read(&mut self, name: &str) -> Result<Vec<u16>, ModelError> {
+        if let Some(info) = self.weights.info(name) {
+            self.store.before_read(info.byte_len())?;
+        }
         let bits = self.weights.read_bf16(name)?;
         let bytes = u64::try_from(bits.len()).unwrap_or(0).saturating_mul(2);
         self.loaded = self.loaded.saturating_add(bytes);

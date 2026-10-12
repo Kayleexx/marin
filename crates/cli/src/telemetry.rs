@@ -99,7 +99,11 @@ pub fn resource_lines(s: &Session) -> Vec<String> {
             units::bytes(u64::try_from(bytes).unwrap_or(0)),
             units::bytes(fp.kv_window)
         ),
-        None => format!("{} reserved", units::bytes(fp.kv_window)),
+        None => format!(
+            "{} held, up to {}",
+            units::bytes(u64::try_from(s.kv().kv_bytes_held()).unwrap_or(0)),
+            units::bytes(fp.kv_window)
+        ),
     };
     let mut lines = vec![
         format!(

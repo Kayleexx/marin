@@ -858,32 +858,414 @@ not imply GPU execution. No dependencies or unsafe Rust were added.
 **Verification and decision.** BF16 strict HF verification passes for both
 1.7B chat and Base, at 1 and 8 threads; chat maximum logit differences are
 1.72e-5 / 1.91e-5 / 1.91e-5, Base 2.10e-5 / 2.67e-5 / 1.72e-5. Forced
-scalar Base verification also passes, with the existing tolerances. No
-0.6B HF reference is saved, and this environment has no PyTorch/Transformers
-to generate one. Its kernel references and BF16-relative quality tests pass,
-but strict 0.6B HF parity remains **open**.
+scalar Base verification also passes, with the existing tolerances. At the
+initial run there was no saved 0.6B HF reference, and the default Python
+lacked PyTorch/Transformers. Its kernel references and BF16-relative quality tests passed,
+but strict 0.6B HF parity was **open** at that point. The closure audit below
+now supplies and passes its independent HF reference.
 
-| Gate | Final status |
+| Gate | Status before the RTX 5050 recheck |
 |---|---|
 | Decode, prefill/TTFT, stored weights, peak RAM | **pass**, both sizes, 1/8 threads, short/long contexts |
 | Relative output quality | **pass** on the four 1,024-position corpora; fixed greedy prompts show no new semantic regression |
 | Cold-load penalty | **pass** for measured fresh-process warm/fadvise-cold conditions; full cold boot unmeasured |
 | Kernel correctness and scalar/thread paths | **pass**, independent f64 tests, group 96 across 512-column panels, isolated SIMD/scalar checks at 1/2/8/16 threads |
-| Strict BF16 HF parity | **pass** on 1.7B chat/Base; **open** on 0.6B |
+| Strict BF16 HF parity | **pass** on 1.7B chat/Base and, in the closure audit below, 0.6B chat |
 | CLI selection, default BF16, validation, auto fallback, KV reuse | CPU tests and real-model INT8 reuse pass |
+| CPU INT8 snapshot round trip | **out of scope**: pre-existing unsupported CPU capability; the original gate explicitly covers existing GPU snapshots |
 | Existing CUDA inference and GPU snapshots | compile coverage and existing tests retained; runtime tests skip without a visible GPU, so runtime regression verification is **open** |
 | llama.cpp comparison / energy | local comparable pp/tg and RAM/startup measured; generated-output llama.cpp TTFT unavailable; package energy permission-denied |
 
-**Go/no-go:** performance, RAM and measured relative quality support keeping
-CPU INT8 as an **experimental opt-in**. Full Stage 3 acceptance is not
-closed: strict 0.6B HF verification and CUDA/snapshot runtime verification
-are unavailable. **No-go to INT4; no INT4 feasibility experiment was run.**
-BF16 remains the default/reference. Close these verification gaps and extend
-quality coverage before treating a lower-bit format as accepted. The results
-are from one Zen 4 laptop, not an older DDR4 PC; non-x86 hardware, larger
-models, other group sizes and long conversational quality are unmeasured.
+**Initial go/no-go (before the RTX 5050 was visible):** performance, RAM and measured relative quality support keeping
+CPU INT8 as an **experimental opt-in**. Full Stage 3 acceptance was not
+closed: the closure audit supplies strict 0.6B HF verification, but
+CUDA/snapshot runtime verification remained unavailable in that environment.
+CPU snapshot support is not an original Stage 3 gate.
+**No INT4 feasibility experiment was run.**
+BF16 remains the default/reference. Close the remaining verification gaps
+before Stage 3 acceptance. The closure audit extends conversation quality
+coverage; no lower-bit work is authorized or performed here. Results are
+from one Zen 4 laptop, not an older DDR4 PC; non-x86 hardware, larger
+models, other group sizes and conversation quality beyond 1,088 tokens
+are unmeasured.
 
-Raw artifacts are in `bench-results/cpu-stage3/final/`: command manifests,
+**Closure audit (2026-10-11).** Started from clean commit `9d41f88` with
+all three original stashes intact. No runtime behavior, defaults, dependencies
+or weight formats changed in this audit: changes are reference data, tests
+and this evidence. BF16 stays default, INT8 opt-in. The measured executable
+is exactly the original Stage 3 binary (SHA256
+`eff4b9b9346468ae93446b14313581fd85e9fb031d3df1b6b9372e64f85b7477`);
+its historical runtime tag is `961096041874-dirty`, not the current git HEAD.
+Follow-up artifacts and complete command manifests are in
+`bench-results/cpu-stage3/closure/`; they do not replace the original matrix.
+
+**0.6B HF gap closed.** An existing local Python environment was found at
+`/home/mitali/miracles/ralph/.venv/bin/python`: PyTorch `2.13.0+cu130`,
+Transformers `5.17.0`, CPU execution, offline HF loading. The unchanged
+`scripts/gen_reference.py` keeps source weights BF16 and upcasts linear and
+embedding math to f32. It generated `tests/reference/qwen3-0.6b.json` from
+the real local chat checkpoint: three prompts, 16 greedy decode steps each,
+five reference logits per step and 28 layer norms per prompt. Generator,
+checkpoint, config and reference SHA256 hashes and exact environment are in
+`tests/reference/qwen3-0.6b.provenance.json`. This is an HF-generated
+reference, not Marin output saved as its own reference.
+
+| Path | Threads | Max logit differences, three cases | Max relative layer differences, three cases | Greedy choices |
+|---|---|---|---|---|
+| SIMD | 1 | 1.91e-5 / 1.43e-5 / 1.81e-5 | 6.28e-7 / 2.70e-7 / 6.06e-7 | 48/48 |
+| SIMD | 8 | 1.91e-5 / 1.43e-5 / 1.81e-5 | 6.28e-7 / 2.70e-7 / 6.06e-7 | 48/48 |
+| Scalar fallback | 8 | 3.24e-5 / 2.67e-5 / 3.81e-5 | 9.90e-7 / 9.03e-7 / 1.41e-6 | 48/48 |
+
+All pass the unchanged strict limits: absolute logit tolerance `5e-4` plus
+`1e-4 * abs(reference)`, relative norm tolerance `1e-4`, exact greedy ids.
+HF verification intentionally tests BF16; quantized quality is evaluated
+relative to that reference path, not by loosening HF tolerances.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 /home/mitali/miracles/ralph/.venv/bin/python scripts/gen_reference.py reference /home/mitali/models/Qwen3-0.6B tests/reference/qwen3-0.6b.json --steps 16
+# Repeat SIMD at --threads 1 and 8; add MARIN_MATMUL_SCALAR=1 for the fallback.
+marin-run verify /home/mitali/models/Qwen3-0.6B --reference tests/reference/qwen3-0.6b.json --backend cpu --threads 8
+```
+
+**Snapshots and switches: supported behavior versus missing capability.**
+`Engine::kv_layout()` returns `None` on CPU and CPU page export/import
+returns `Unsupported`. `Session::snapshot_identity()` therefore never
+restores or saves a CPU cache. This predates INT8. The requested CPU INT8
+save/restart/restore gate **cannot pass** on this implementation.
+
+On both real chat models and both BF16/INT8, the normal `marin` CLI was run
+fresh and then in two fresh processes with a missing snapshot, and two with
+an existing invalid file: **20 launches total**. Same-format replies match
+the fresh run byte-for-byte; missing files stay missing, existing bytes
+stay unchanged. This verifies safe replay and preservation, **not** a
+successful CPU snapshot save/restore or payload corruption detection.
+The extended fixture test also asserts zero reused positions and no restore
+result across both precisions and both file states. A new header test checks
+all nine ordered BF16/INT8-group-32/INT8-group-128 identity pairs: only
+identical formats are accepted. Header validation alone does not verify
+real GPU page import or checksum-failure recovery.
+
+Actual terminal tests exercise INT8 CPU reload, CPU → CUDA failure → CPU
+recovery, CPU → auto fallback, a switch to a second model configuration,
+continued generation after every switch, retained INT8/f32 labels and a
+restored terminal. The model-change test observes an empty reply state;
+the inspected switch path also constructs a new chat for a different model.
+These use the real CLI and loaded tiny HF fixture, not a mocked backend. Real
+0.6B INT8 explicit CUDA selection fails; hidden-GPU auto selection succeeds
+on CPU. Successful CPU ↔ CUDA execution remains **unverified**:
+`nvidia-smi` cannot contact the driver and `/dev/nvidia0`, `/dev/nvidiactl`
+and `/dev/nvidia-uvm` are absent. Running
+`MARIN_REQUIRE_CUDA=1 cargo test -p cli --test snapshot --test snapshot_safety -- --nocapture`
+returns 101: all four tests in the first snapshot binary fail with
+`no CUDA-capable device is visible`; Cargo then stops, so the second binary
+is not reached. This deliberate required-device failure is retained in
+`cuda-required-snapshots.log`; ordinary full-suite skips are not GPU evidence.
+
+**Storage and memory audit.** `CpuStore::matrix` consumes one `Vec<u16>`
+from the file loader, `Matrix::quantized` retains only the exclusive
+`Storage::Int8(Q8)` variant, and the source BF16 vector drops on return.
+The file loader retains paths/tensor metadata, not an mmap or a full-file
+BF16 buffer; its read scratch is at most 4 MiB. Tied embedding/head share
+one matrix. Norms intentionally retain small f32 vectors. The existing
+`weight_bytes` estimate counts these norms at their BF16 source width;
+actual CPU weight payload is 131,072 bytes higher on 0.6B and 247,808
+bytes higher on 1.7B, for both weight formats, before vector/struct overhead.
+This small accounting difference does not change the RAM gates. Decode expands
+bytes into vector registers; SIMD prefill expands at most a four-row,
+512-column panel into f32 (8 KiB), plus 2 KiB scratch and 128 KiB packed
+activations, per worker. Scalar fallback expands one row at a time. There is no retained model-sized BF16
+or f32 reconstruction. A new internal test checks code/scale byte lengths,
+contents and allocation pointers remain unchanged through prefill and
+decode; runtime RSS provides a separate check at real model scale.
+
+There is a known startup inefficiency when `--snapshot` is requested on CPU:
+`load_for_snapshot` still starts a full source-file hash, and the first
+prompt joins it before discovering that CPU identity is unsupported.
+That adds disk/CPU work without a usable snapshot; it does not retain a
+full weight copy. Fixing the missing CPU snapshot capability requires a
+separate coherent page-export/import change and real round-trip tests.
+No unsupported behavior was relabeled as snapshot compatibility.
+
+**Follow-up quality, speed and startup.** Two additional fixed conversation
+corpora concatenate the eight previously saved prompts and their BF16 replies
+in ChatML order (repeated four times), never using INT8 output as a target.
+The first 64 tokens prime the cache and the following 1,024 positions are
+scored. These are narrow tests of the same tasks, not a held-out benchmark
+or proof of general model quality.
+
+| Model | Same top-1 | Mean loss, BF16 / INT8 | Δ loss (nats) | Δ perplexity | Gate |
+|---|---|---|---|---|---|
+| 0.6B | 99.414% | 1.2607 / 1.2627 | +0.001962 | +0.196% | pass |
+| 1.7B | 99.316% | 1.7411 / 1.7299 | -0.011156 | -1.109% | pass |
+
+The lower measured 1.7B loss is a local rounding result; it does not establish
+that INT8 improves the model. The original prose/code gates still apply.
+Six real `marin` INT8 launches also compare a fixed roughly 200-token user
+prompt at 1 and 8 threads and forced scalar: replies are byte-identical
+within each model. The terminal switch tests and isolated kernel tests cover
+actual prefill dispatch; the scalar override tests the Rust fallback, not
+an artificially SIMD-disabled compiler.
+
+Diagnostic repeats use the same original executable, eight prefill threads,
+32 reply tokens, one warm-up and three measured rounds per case. Formats
+run serially in blocks. This host now shows substantial timing drift and
+RAM pressure; these measurements are **not** a replacement for the earlier
+controlled 1/8-thread acceptance matrix or evidence of a new optimization.
+For example, 0.6B BF16 short TTFT is now 766 ms rather than 303 ms, despite
+identical executable bytes. Available RAM and cache residency also changed;
+no single cause of the timing change was established. Values below are
+BF16 / INT8; process RSS includes loading and all requests.
+
+| Model | Prompt / context | TTFT (s) | Decode (tok/s) | Peak RSS (GB) |
+|---|---|---|---|---|
+| 0.6B | 127 / 160 | 0.766 / 0.361 | 12.80 / 28.59 | 1.308 / 0.727 |
+| 0.6B | 2047 / 2080 | 7.835 / 7.799 | 11.34 / 14.91 | 1.892 / 1.331 |
+| 1.7B | 127 / 160 | 1.306 / 0.923 | 5.26 / 10.28 | 3.567 / 1.900 |
+| 1.7B | 2047 / 2080 | 18.027 / 13.716 | 4.99 / 8.39 | 4.224 / 2.606 |
+
+The repeated RAM savings are 561–582 MB on 0.6B and 1.62–1.67 GB on 1.7B,
+meeting the original RAM gate. Long 1.7B INT8 RSS is 2.606 GB versus the
+original 2.593 GB: a 13 MB change, not an additional BF16 model allocation.
+Both formats are slower in absolute time than the original run; INT8 still
+has lower TTFT in these repeats and higher decode throughput. These
+non-interleaved ratios should not be treated as stable performance estimates.
+
+Fresh-process startup repeats use seven prompt tokens, two outputs, 16
+configured positions, eight threads, no warm-up, three alternating-order
+pairs per cache attempt. Fadvise-cold means per-file `DONTNEED`, not a cold
+boot. The first 0.6B startup set overlapped full correctness checks; it is
+preserved under `startup-overlap/` and excluded below. A separate
+`startup-recheck-manifest.json` records the serial repeats after all checks
+and other model runs completed.
+
+| Model / condition | Median load, BF16 / INT8 (s) | INT8 penalty (s) | Physical load reads |
+|---|---|---|---|
+| 0.6B / fadvise-cold | 1.413 / 1.913 | +0.500 | 0.978–0.980 GB BF16; 0.978 GB INT8 |
+| 0.6B / pre-read attempts | 0.904 / 1.440 | +0.536 | 2/3 zero-I/O runs per format; first pair read 1.075 / 0.088 GB |
+| 1.7B / pre-read attempts | refused / 4.634 | unavailable | INT8 2.678–3.007 GB |
+| 1.7B / fadvise-cold | refused / 4.561 | unavailable | INT8 3.078–3.183 GB |
+
+The 0.6B penalty remains below its 3 s cap. Pre-reading a checkpoint did
+**not** guarantee cache warmth under these conditions: the first 0.6B pair
+and all 1.7B INT8 pre-read trials still performed physical I/O. Do not label
+the mixed pre-read medians as guaranteed page-cache-warm latency. All six
+1.7B BF16 startup attempts were refused by the memory guard before model
+loading (e.g. 3.71 GB needed, 3.64 GB available); INT8 completed all six,
+with peak RSS about 1.899 GB. Thus a fresh 1.7B load-penalty comparison
+cannot be computed here. The original complete cold/warm evidence is kept,
+but repeating its warm comparison on an uncontended host remains open.
+Manifest entries retain exact errors, available memory and load averages;
+failed commands are not silently omitted or assigned zero load time.
+
+**Closure checks and decision.** Workspace/all-targets check,
+all-targets/all-features clippy with `-D warnings`, fmt, line-limit and unsafe
+checks pass. Full workspace/all-features tests report **583 passed**;
+GPU-dependent test functions may return early, so this count is not CUDA
+runtime coverage. Release forced-scalar INT8 integration kernels pass, as
+do isolated SIMD/scalar 1/2/8/16-thread prefill and immutable-storage tests.
+The explicit required-CUDA failure described above is a separate failed
+hardware gate, not a suppressed full-suite failure. No tolerances or skips
+were changed. Command arrays and return codes are in `checks.json`.
+
+**Earlier closure decision (before the hardware recheck): BLOCKED.** Strict 0.6B HF parity and CPU storage/compatibility
+checks are now established; extended measured relative quality passes.
+Successful CUDA switches and GPU snapshot recovery were unavailable, and
+the fresh 1.7B startup pair was blocked by RAM admission. CPU snapshots are
+unsupported in both formats and outside the original gate, not an INT8
+regression or an acceptance blocker. Keep BF16 default and INT8 opt-in.
+Do not start Stage 4 implementation or INT4 from this audit. The plan below
+is conditional, not permission to bypass these remaining gates.
+
+**CPU Stage 4 proposal — measured baseline, no implementation.** Both
+models have 28 layers, eight KV heads, head dimension 128. The present CPU
+cache reserves the complete contiguous f32 window with `vec![0.0; ...]`;
+Linux demand paging means reservation is not the same as resident RAM.
+`Footprint::ensure_fits` admits the full window plus a fixed 256 MiB slack,
+while CPU attention requires contiguous `&[f32]` keys/values. GPU slab/page
+ownership and `SequenceCache` commit/truncate rules are useful references;
+porting GPU pointers or adopting paging immediately is unnecessary.
+
+| Positions | f32 KV bytes | f16 KV bytes (projection) |
+|---|---|---|
+| 128 | 29,360,128 | 14,680,064 |
+| 2,048 | 469,762,048 | 234,881,024 |
+| 8,192 | 1,879,048,192 | 939,524,096 |
+
+At 127 populated tokens, increasing configured context from 160 to 8,192
+raises INT8 peak RSS only 727 → 756 MB (0.6B) and 1,900 → 1,936 MB
+(1.7B); unused zero pages are mostly not resident. In contrast, 1.7B BF16
+with an 8K reservation is refused before loading: estimated need 5.59 GB,
+4.68 GB available at that launch. Growable KV should improve committed
+capacity/admission and growth control; do not claim a 1.88 GB startup RSS
+saving on this Linux host.
+
+F16 is the first lower-precision candidate: section 12's earlier CUDA
+measurements passed quality, while Q8 keys failed. Those are GPU results,
+not CPU predictions. Fully populated 8K **INT8 weights + f16 KV** would be
+2,714,234,880 bytes of payload, including f32 norms, before workspace/allocator
+overhead; adding current 256 MiB slack gives 2,982,670,336 bytes. A 3 GB target has almost no margin.
+CPU `hidden`/`Buffers`/`MlpBuffers` contain
+`4 * (4*hidden + 2*q_dim + 2*kv_dim + 2*intermediate)` bytes per prompt token:
+64 KiB on 0.6B and 104 KiB on 1.7B. At 8,192 tokens that is 537 / 872 MB
+of named buffers alone, excluding vector capacity, attention scratch and
+quantized-kernel panels. A lower KV format alone cannot satisfy that budget.
+A 512-token chunk would bound these named buffers to 34 / 55 MB; this is
+an arithmetic projection, not an implemented or timed optimization.
+
+Proposed small sequence, conditional on closing Stage 3 first:
+
+1. **Grow contiguous f32 KV first.** Keep the logical context limit separate
+   from allocated positions; start with 256 positions and grow in bounded
+   increments, with checked sizes and fallible reservation. Preserve prefix,
+   clear/truncate and all-layer commit rules on allocation failure. Expose
+   actual vector capacities/bytes, not RSS alone. Gates: exact f32 reference
+   logits and replies, strict HF unchanged, 1/8-thread behavior, no committed
+   length change on failure; at 127 used positions with an 8K limit, KV
+   allocation at most one 256-position increment. Growth-event p95 latency,
+   TTFT and decode must be measured; no more than 5% TTFT or 3% decode loss
+   against the existing f32 path at 127/2K/8K. Measure resize-copy peaks before
+   deciding whether CPU pages earn an attention-layout change.
+2. **Opt-in f16 KV.** Store 16-bit data and decode bounded attention tiles,
+   retaining f32 accumulation and the f32/scalar reference. Do not maintain
+   a full f32 mirror. Reuse section 12's independently rounded reference
+   and test finite-range/subnormal/saturation boundaries. Gates on both
+   models, BF16 and INT8 weights, 1/8 threads: KV bytes at most 55% of f32;
+   at least 4,096 scored positions each of prose/code/conversation, loss
+   increase at most 0.30%, same top-1 at least 97.5%, at least 6/8 identical
+   greedy replies; decode no more than 3% slower at 2K/4K/8K and TTFT no
+   more than 5% worse. Keep f32 default until separate default gates pass.
+   Do not start Q8 keys or any INT4 experiment.
+3. **Bound whole-process RAM.** Account for source conversion temporaries,
+   actual KV allocation/growth, all prompt buffers, panels, tokenizer and
+   allocator headroom. Compare current full-prefill with 256/512-token
+   chunks using existing cache append semantics before choosing a chunk.
+   Validate with real 2/3/4 GiB process limits on a host that exposes the
+   limits, plus the 8 GB/16 GB machine profiles; stop admission/growth
+   cleanly and preserve the last committed prefix. Target 1.7B INT8/f16,
+   fully populated 8K, peak RSS below **3,000,000,000 bytes**, with no hidden
+   weight/KV mirror, swapping or OOM. Report virtual reservation, RSS/PSS,
+   cold/warm startup, TTFT, decode, resize peaks, page faults and correctness
+   at equal populated contexts. This target remains unmeasured and may
+   require bounded prefill; it is not inherited from the old INT4 roadmap.
+
+No Stage 4 source, format, dependency or CLI option was added. No commits,
+pushes or stash changes were performed.
+
+**Final Stage 3 acceptance recheck (2026-10-11; RTX 5050 available).**
+**GO: every mandatory original gate passes for Qwen3-0.6B and Qwen3-1.7B,
+CPU INT8 group 128.** This supersedes the earlier BLOCKED decisions above.
+BF16 remains the default/reference and INT8 remains opt-in. No Stage 4 or
+INT4 experiment, runtime change, dependency, unsafe code, commit, push or
+stash change was made. The added test extends the existing terminal helper
+to cover successful CPU → CUDA → CPU → CUDA switches and a model switch,
+alongside the retained hidden-GPU failure/recovery case.
+
+The recheck uses the unchanged release binary whose SHA256 is recorded
+above, on the same Ryzen 7 260 / 16 GB host with the powersave governor and
+AC power. The RTX 5050 Laptop GPU now reports 8,151 MiB, driver 610.57.04.
+Fresh command arrays, return codes, hardware/source hashes, admission
+conditions and measurements are in `bench-results/cpu-stage3/acceptance/`.
+Tests finish before timing; model/format loads and timing runs are serial.
+The earlier Stage 4 proposal is retained from the previous request; this
+recheck does not investigate or implement that proposal.
+
+| Original gate / scope | Classification | Exact evidence |
+|---|---|---|
+| Kernel correctness | **passed** | Independent decoded f64 GEMV/GEMM tests, zero/signed-extreme groups, shape rejection, remainder cases and groups 32/64/96/128/256/512; full SIMD tests plus release forced-scalar `scalar-kernels.log` |
+| BF16 / FP32 reference correctness | **passed** | Fresh CPU and CUDA strict HF checks on both chat models: three prompts × 16 exact greedy steps per model/backend; `verify-{0.6,1.7}-{cpu,cuda}.log`. Earlier 1/8-thread and scalar HF checks remain valid; tolerances unchanged |
+| Relative quality | **passed** | Four fresh 1,024-position prose/code pairs below; all eight scoring arrays exactly reproduce original top-1 and target log-probabilities. Original eight-prompt semantic review remains 7/8 byte-exact on 0.6B, 8/8 on 1.7B, no new observed semantic regression |
+| Decode | **passed** | All eight fresh pairs below exceed ≥1.25x short / ≥1.10x long; one warm-up and three measured rounds per format, 32 output tokens |
+| Prefill / TTFT | **passed** | All eight fresh pairs stay within +10%; worst observed regression +5.0204%, 1.7B / one thread / 127 tokens |
+| Stored weights / peak RAM | **passed** | Storage 51.57% of BF16; every matched-window peak-RSS saving exceeds 35% of BF16 weight bytes. Exclusive INT8 storage, per-tensor loading and bounded panels remain unchanged; immutable-code/scale tests pass |
+| Cold start | **passed** | Three filesystem-cold and three verified zero-read warm fresh loads per format/model; penalties +0.304/+0.384 s (0.6B cold/warm), +0.495/+0.776 s (1.7B). Separate process-to-first-output measurements below |
+| CLI / dispatch / threads / KV reuse | **passed** | Both CLIs, default BF16, invalid options, CPU INT4 refusal, hidden-GPU auto fallback, successful and failed backend/model switching; scalar kernels and isolated SIMD/scalar 1/2/8/16-thread prefill/storage tests pass. Existing real-model retained-cache evidence remains valid |
+| Existing CUDA / GPU snapshots | **passed** | Full suite with `MARIN_REQUIRE_CUDA=1`: quantized-model suite 4/4 (3 GPU, 1 CPU rejection), snapshots 4/4, snapshot safety 4/4 (3 GPU, 1 CPU unsupported), CLI precision 5/5, inspect/reload 3/3, INT8 switching 2/2 (combined CPU/GPU cases). GPU restore/continuation, corruption/incomplete files, incompatible weights/KV/model identity and fresh-process CLI snapshots pass; group incompatibility is additionally covered by header identity tests |
+| Local llama.cpp reference | **passed** | Original pinned local BF16/Q8_0 results above and `final/` artifacts, matching 1/8 threads, short/long depths, CPU-only and f32 KV. Unchanged source/binary; pp/tg remain distinct from generated-output TTFT |
+| CPU energy availability reporting | **passed** | Package-counter reads still return permission denied, recorded in `environment.json`; original gate explicitly permits unavailable energy |
+| Numerical CPU energy measurement | **blocked, optional** | No readable package counter; no joules/token claim and no acceptance blocker |
+| CPU snapshot implementation | **out of scope** | Unsupported before INT8 and still unsupported for BF16/INT8; the original gate explicitly says existing GPU snapshots. Safe ignored-request tests are not presented as successful CPU restoration |
+| Full cold boot, older/non-x86 PCs, larger models, other group-size quality, llama.cpp generated-output TTFT, Stage 4 / INT4 | **out of scope** | Not required by the fixed Stage 3 gates or not authorized here; no results inferred |
+
+Fresh medians below use prompts 127/2,047 and identical f32-KV windows
+160/2,080 respectively; GB means decimal bytes. Each row is BF16 / INT8.
+
+| Model | Threads | Prompt | TTFT (s) | Decode (tok/s) | Peak RSS (GB) |
+|---|---:|---:|---:|---:|---:|
+| 0.6B | 1 | 127 | 1.129 / 1.063 | 19.64 / 36.37 | 1.301 / 0.727 |
+| 0.6B | 1 | 2,047 | 25.674 / 24.518 | 13.80 / 22.02 | 1.874 / 1.314 |
+| 0.6B | 8 | 127 | 0.304 / 0.263 | 19.11 / 34.99 | 1.308 / 0.728 |
+| 0.6B | 8 | 2,047 | 5.262 / 4.958 | 13.43 / 20.15 | 1.890 / 1.329 |
+| 1.7B | 1 | 127 | 3.600 / 3.781 | 6.91 / 12.78 | 3.557 / 1.899 |
+| 1.7B | 1 | 2,047 | 66.521 / 66.952 | 6.29 / 10.55 | 4.212 / 2.576 |
+| 1.7B | 8 | 127 | 0.781 / 0.611 | 7.17 / 13.11 | 3.570 / 1.900 |
+| 1.7B | 8 | 2,047 | 11.829 / 10.064 | 6.25 / 10.37 | 4.227 / 2.591 |
+
+Decode speedups are 1.500–1.852x; peak-RSS savings are 560–580 MB on
+0.6B and 1.636–1.670 GB on 1.7B. Stored weight accounting remains
+1,192,099,840 / 614,739,968 bytes and 3,441,149,952 / 1,774,462,976 bytes.
+The small common f32-norm accounting difference documented earlier does
+not change either storage or RAM verdict. Source/storage inspection and
+tests confirm no retained full-weight BF16 copy; temporary per-tensor BF16,
+f32 rows/panels and activations remain bounded as described above.
+
+| Model / corpus | Same top-1 (out of 1,024) | Loss change (nats/token) | Perplexity change |
+|---|---:|---:|---:|
+| 0.6B / prose | 999 (97.5586%) | +0.002940 | +0.294410% |
+| 0.6B / code | 1,003 (97.9492%) | −0.003038 | −0.303324% |
+| 1.7B / prose | 1,004 (98.0469%) | −0.003562 | −0.355518% |
+| 1.7B / code | 1,011 (98.7305%) | +0.003040 | +0.304416% |
+
+These establish relative quality preservation on the fixed corpora, not
+a broad improvement in quality. The 0.6B prose result has only one matched
+position above the minimum passing count. The earlier semantic review's
+baseline errors still apply; neither lower loss nor wording equality proves
+general task success. Fresh strict HF checks retain `5e-4 + 1e-4*abs(logit)`
+and `1e-4` relative layer-norm tolerances. CUDA maximum logit errors are
+1.91e-5 (0.6B) and 1.72e-5 (1.7B); all greedy choices match.
+
+**RAM guard and startup.** Admission still reserves weights + the complete
+f32 KV window + 256 MiB. BF16 1.7B requires 3,713,255,424 bytes at context
+16 or 5,588,633,600 at 8,192; previous available RAM was below those limits,
+so refusal was correct. Fresh admission logs show sufficient host RAM;
+all process/ancestor cgroups have unlimited `memory.max`/`memory.high` and
+zero OOM events. No limit was changed or bypassed. Both formats also pass
+the 8,192-window diagnostic naturally, with peak RSS 3.585 / 2.021 GB;
+unused f32 KV pages are demand-paged, so this is not a populated-8K result.
+
+| Model / cache condition | Load BF16 / INT8 (s) | Load penalty (s) | Process to first output BF16 / INT8 (s) |
+|---|---:|---:|---:|
+| 0.6B / zero-read warm | 0.612 / 0.996 | +0.384 | 0.921 / 1.334 |
+| 0.6B / fadvise-cold | 1.142 / 1.446 | +0.304 | 1.466 / 1.827 |
+| 1.7B / zero-read warm | 1.497 / 2.273 | +0.776 | 2.006 / 2.829 |
+| 1.7B / fadvise-cold | 3.054 / 3.549 | +0.495 | 3.063 / 3.879 |
+
+Load uses seven prompt/two output tokens, context 16; first-output uses
+the normal `marin-run` generation path, fixed five-token prompt, one output,
+context 64. Both configure eight threads and group 128; three fresh
+processes per format/condition. Warm loads and first-output trials report
+zero physical reads. Cold loads read 977.69–977.79 MB (0.6B) and
+3,069.28–3,077.33 MB (1.7B); cold first-output trials read 977,690,624 and
+3,069,280,256 bytes respectively. Cold means per-file `POSIX_FADV_DONTNEED`,
+not a cold boot or system-wide cache drop. Initial single-pre-read trials
+with residual I/O are retained as diagnostics and excluded from the
+zero-read warm medians. `fincore`, process I/O, admission conditions and
+every attempt are recorded in `warm-manifest.json` / `first-output-io.json`.
+INT8 adds measurable load-time conversion cost; the load and TTFT limits
+pass, and observed RAM/quality results reproduce the earlier evidence.
+
+**Final verification:** fmt, locked workspace/all-targets check,
+all-targets/all-features clippy `-D warnings`, locked full workspace tests
+with CUDA required (**584 passed**), line-limit and unsafe checks all pass.
+Release forced-scalar kernels/storage and isolated SIMD/scalar prefill
+thread tests pass. `checks.json` and logs record commands and outcomes;
+`summary.json`, `verified-warm-summary.json` and
+`first-verified-summary.json` contain exact unrounded values. Prior
+uncommitted changes/reference fixtures and all three stash identities are
+preserved; HEAD is still `9d41f88`. No genuine Stage 3 runtime regression
+was found. **GO for Stage 3 under the fixed gates and measured scope;
+no Stage 4 or INT4 work is started or authorized by this result.**
+
+Raw original artifacts are in `bench-results/cpu-stage3/final/`: command manifests,
 JSON speed/quality/load/profile records, reference logs, first-visible-output
 and semantic outputs/review, GGUF provenance samples, hardware/build metadata,
 and the isolated llama f32 parser build script. Parent-directory results
@@ -950,3 +1332,781 @@ marin-run bench MODEL --backend cpu --prompt-tokens 127 --tokens 32 --runs 2 --w
 ```
 
 Add `--quantize int8` to the first, third and fourth commands for int8 runs. The guessing replay tools are `marin-run guess`, `guess-report` and `pass-cost`. Every table lists its sample size next to it; most speed rows are 2–5 runs per side on one machine, so treat differences of a few percent as noise unless the ranges are clearly apart.
+
+### 26. Adaptive CPU KV (stage 4): gates fixed before implementation
+
+Stages are sequential: A growable FP32 storage, B RAM budgeting and bounded
+prefill, C opt-in FP16 feasibility. No later implementation starts while an
+earlier mandatory gate is failed or unmeasured. BF16 weights and FP32 CPU KV
+remain defaults. CPU snapshots are unsupported and outside this milestone.
+
+| Stage / area | Mandatory acceptance gate |
+|---|---|
+| A correctness | Unchanged strict HF verification for both Qwen3 models; identical greedy outputs against the saved Stage 3 binary with BF16 and INT8 weights; scalar/SIMD, 1/8 threads, growth boundaries, clear/reuse, truncation, failed writes and rollback preserve every committed layer's prefix |
+| A allocation | Logical context stays independent of allocation; at 127 held tokens and context 8192, actual KV vector capacities cover at most 256 positions; report actual capacity bytes, not estimated RSS savings; arithmetic overflow and allocator refusal return errors without committing tokens |
+| A speed | Both models, INT8, 127/2047/4095/8159 prompt tokens, 32 outputs, context 8192, 1/8 threads: one warm-up and three measured rounds; median TTFT regression ≤5%, decode regression ≤3% versus saved Stage 3 binary. BF16 correctness and short/2k speed also checked. Growth latency/copy peaks reported separately |
+| A peak RAM | Same workloads and process lifetime: peak RSS no more than 64 MiB above baseline; no full-model dequantization or second full KV mirror |
+| B correctness | Chunked versus unbounded prefill passes strict HF tolerances and identical greedy outputs with both weight formats; an admission/growth failure preserves the previously committed prefix; explicit unsupported context still fails clearly |
+| B RAM / OOM | Effective cgroup-v2 4 GiB and 8 GiB limits, swap disabled, both models at short/2k/4k/8k; report memory.max/current/events, peak RSS and KV allocation. Zero OOM kills; clean rejection where weights + KV + bounded workspace cannot fit. Account ancestor limits and retain safety headroom; no override of genuine limits |
+| B performance | Bounded prefill at 512 tokens maximum; same A timing matrix, TTFT regression ≤10% and decode ≤3% versus A; report startup warm/cold and process-to-first-output, allocator/growth peaks and output checks |
+| C FP16 | Only after A/B pass: safe scalar conversion and available SIMD paths measured; storage ≤55% of FP32; no full FP32 KV mirror; both models and weight formats, ≥4096 teacher-forced positions each prose/code/conversation: top-1 ≥97.5%, relative mean loss increase ≤0.30%, ≥6/8 identical greedy prompts; TTFT ≤5% and decode ≤3% regression at 2k/4k/8k. FP32 remains default |
+| All compatibility / checks | INT8 opt-in, scalar fallback, threading, KV reuse and RTX 5050 CUDA/snapshot regressions preserved; fmt, workspace all-target check, all-feature clippy -D warnings, full all-feature tests, 425-line and unsafe checks pass |
+
+Baseline binaries and pre-change working-tree hashes are retained under ignored
+`bench-results/cpu-stage4/baseline/`. The old Stage 3 proposal above remains
+historical planning, not measurements or Stage 4 acceptance. Linux demand-zero
+full-context vectors need not consume their entire virtual size in RSS.
+Fallible reservation preserves data on allocator refusal ([Rust Vec docs](https://doc.rust-lang.org/std/vec/struct.Vec.html#method.try_reserve_exact));
+it does not prevent a later physical-memory OOM under overcommit. Stage B must
+therefore use actual memory constraints ([kernel cgroup-v2 documentation](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html)),
+not treat an address-space limit as a RAM limit.
+
+
+CPU allocation audit: KV is `[position][kv_head][head_dim]` per layer,
+with a separate committed length. Truncation/clear retain storage; runtime
+rollback uses the same length. Each Qwen3 model needs 229,376 FP32 KV
+bytes per position (1,879,048,192 bytes at 8192). CPU attention reads only
+the visible prefix; SIMD prefill temporarily packs one KV head per worker,
+not a second full-cache mirror. Decode reads the cache directly. Growable
+storage reuses the GPU cache's logical-limit/high-water distinction without
+introducing CPU page tables or changing CUDA allocation.
+
+The existing CLI admission estimate still charges the full logical FP32
+window and reads host `MemAvailable`; it does not yet account cgroup limits.
+The CPU forward pass still sizes reusable intermediates to the entire
+prompt: named activation buffers are 64/104 KiB per token for 0.6B/1.7B,
+excluding attention packing, quantization panels and logits. These are
+source-derived estimates, not measured peak RSS. Stage A alone therefore
+does not establish graceful low-RAM inference; that remains Stage B's gate.
+
+FP16 API audit only: Rust's [native `f16`](https://doc.rust-lang.org/std/primitive.f16.html)
+is experimental. The [half crate](https://docs.rs/half/latest/half/#hardware-support)
+offers safe slice conversion, independent F16C detection and software fallback.
+AVX2 dispatch alone does not establish F16C support. These are published API
+facts, not conversion throughput or model-quality measurements. No dependency
+or CPU FP16 inference path has been added; feasibility remains gated on A/B.
+
+**Stage A: GO (2026-10-12).** Growable contiguous FP32 KV passes its fixed
+gates; stages B and C have no implementation yet. Storage starts
+empty, reserves all layers before a forward pass, grows in 256-position
+increments and retains its high-water allocation on clear/truncation. Only
+visible storage is initialized; attention kernels and weights are unchanged.
+Both CLIs expose actual allocated bytes separately from the window limit.
+
+All six CLAUDE checks pass, including 587 workspace tests with the RTX 5050
+visible (`MARIN_REQUIRE_CUDA=1`). Both models pass unchanged strict HF
+verification at 1/8 threads with SIMD and forced scalar dispatch: eight
+commands, 48 greedy steps each, with layer observations. A separate 128 MiB
+**address-space** limit forces partial all-layer allocator refusal: vector
+capacity grows from 58,720,256 to 123,731,968 bytes before refusal; every
+committed prefix survives and clear/reuse succeeds. This is not a physical
+4 GiB RAM test. Raw evidence is under `bench-results/cpu-stage4/`.
+
+Completed pairs: context limit 8192, 32 outputs, one warm-up plus three
+measured rounds per process. The two repeated cases below use all fifteen
+original and repeat rounds per build; every other row uses three. The table
+compares the saved Stage 3 binary with growable KV. These
+are local Ryzen 7 260 measurements, not published performance results.
+
+| Model | Threads | Prompt | Weights | TTFT ms (old / grown) | Decode tok/s (old / grown) | Peak RSS delta MiB | KV capacity MiB |
+|---|---:|---:|---|---:|---:|---:|---:|
+| 0.6B | 8 | 127 | int8 | 264.2 / 254.9 | 35.244 / 34.792 | -83.44 | 56 |
+| 0.6B | 8 | 127 | bf16 | 303.4 / 294.2 | 18.760 / 19.025 | -0.27 | 56 |
+| 1.7B | 8 | 127 | int8 | 750.2 / 715.7 | 11.906 / 12.020 | -25.65 | 56 |
+| 1.7B | 8 | 127 | bf16 | 955.3 / 853.8 | 6.525 / 6.592 | -10.57 | 56 |
+| 0.6B | 8 | 2047 | int8 | 4620.3 / 4389.1 | 20.810 / 20.839 | -36.94 | 504 |
+| 0.6B | 8 | 2047 | bf16 | 4714.0 / 4820.7 | 14.017 / 13.968 | +19.54 | 504 |
+| 1.7B | 8 | 2047 | int8 | 11030.9 / 11010.0 | 9.557 / 9.588 | +50.36 | 504 |
+| 1.7B | 8 | 2047 | bf16 | 13192.7 / 13141.0 | 5.792 / 5.873 | +37.82 | 504 |
+| 0.6B | 8 | 4095 | int8 | 16174.4 / 16185.7 | 14.544 / 14.646 | -21.60 | 952 |
+| 1.7B | 8 | 4095 | int8 | 32521.2 / 27228.7 | 8.150 / 8.143 | +52.82 | 952 |
+| 0.6B | 8 | 8159 | int8 | 80275.5 / 79816.8 | 9.302 / 9.270 | -10.78 | 1792 |
+| 1.7B | 8 | 8159 | int8 | 104095.1 / 100743.4 | 6.259 / 6.268 | +0.19 | 1792 |
+| 0.6B | 1 | 127 | int8 | 1227.0 / 1134.1 | 36.173 / 36.744 | -83.51 | 56 |
+| 0.6B | 1 | 127 | bf16 | 1156.9 / 1142.5 | 19.347 / 19.445 | -0.51 | 56 |
+| 1.7B | 1 | 127 | int8 | 3699.4 / 3815.1 | 12.770 / 12.853 | -88.67 | 56 |
+| 1.7B | 1 | 127 | bf16 | 3669.9 / 3542.4 | 6.909 / 6.862 | +4.59 | 56 |
+| 0.6B | 1 | 2047 | int8 | 24044.5 / 24303.4 | 22.103 / 21.911 | -41.22 | 504 |
+| 0.6B | 1 | 2047 | bf16 | 24486.8 / 24168.3 | 14.447 / 14.367 | +0.13 | 504 |
+| 1.7B | 1 | 2047 | int8 | 64818.5 / 66604.3 | 10.296 / 10.259 | +43.77 | 504 |
+| 1.7B | 1 | 2047 | bf16 | 69012.9 / 63271.2 | 5.985 / 6.082 | +37.45 | 504 |
+| 0.6B | 1 | 4095 | int8 | 65892.4 / 61595.3 | 15.314 / 15.320 | -47.72 | 952 |
+| 1.7B | 1 | 4095 | int8 | 142854.8 / 141528.6 | 8.573 / 8.588 | -38.28 | 952 |
+| 0.6B | 1 | 8159 | int8 | 182569.6 / 180900.2 | 9.676 / 9.636 | +0.14 | 1792 |
+| 1.7B | 1 | 8159 | int8 | 350754.5 / 335899.9 | 6.507 / 6.536 | +0.04 | 1792 |
+
+The initial 0.6B/8-thread/2k INT8 pair missed decode by 3.11%. A
+follow-up used four alternating-order pairs, all twelve measured
+rounds per build: TTFT 4684.293/4371.755 ms, decode 20.7996/20.8988 tok/s
+(baseline/grown). The pooled ratios 0.9333/1.0048 pass. All initial and
+repeat results are retained; no sample was dropped. The measurement
+controller was paused while an existing BF16 child completed, to serialize
+these retries. Its manifest wall duration includes that controller pause;
+CLI-internal TTFT/decode values do not.
+
+The initial 1.7B/1-thread/127-token INT8 pair missed TTFT by 9.44%.
+Four alternating-order pairs (twelve rounds per build, no discarded samples)
+give pooled TTFT 3694.699/3758.526 ms and decode 12.7680/12.8490 tok/s:
+ratios 1.0173/1.0063 pass. Original and repeat data are retained in
+`retry-short-*.json`. The controller pause again affects only manifest
+wall duration, not the already running child's internal timing.
+
+Pooling the original three rounds with every repeat gives **15 samples
+per build**. The 0.6B/8-thread/2k ratios are 0.94995 TTFT and 1.00143
+decode; the 1.7B/1-thread/short ratios are 1.03127 and 1.00655. Both
+pass with the original misses included (`retry-*-all-samples.json`).
+
+All 32 semantic comparisons (eight prompts × two models × two weight formats)
+and 16 long-prompt comparisons are byte-identical to the saved Stage 3 binary.
+The latter feed actual 124/1987/3975/7920-token text after decode/re-encode;
+the speed matrix feeds exact 127/2047/4095/8159-token IDs. Both use context
+8192 and eight threads. Original CLI stdout/stderr are retained.
+
+The separate synthetic growth experiment writes zero K/V to all 28 layers,
+256 positions at a time through 8192, ten rounds per build (320 steps each).
+It measures reserve/initialize/write together, excludes cache construction,
+and uses fresh caches. These are allocator measurements, not inference or
+4/8 GiB physical-RAM tests.
+
+| Growth microbenchmark | Stage 3 full-window vectors | Growable vectors |
+|---|---:|---:|
+| Median step / p95 / maximum (ms) | 8.168 / 17.739 / 21.259 | 20.985 / 28.410 / 30.001 |
+| Median total through 8192 (ms) | 226.725 | 715.847 |
+| Maximum process RSS (bytes) | 1,882,804,224 | 1,882,959,872 |
+| Final KV capacity (bytes) | 1,879,048,192 | 1,879,048,192 |
+
+Incremental initialization/reallocation adds 489.123 ms in this synthetic
+sequence and 155,648 bytes to its peak RSS. The measured inference matrix
+still clears the speed gate. Partial allocator-refusal evidence above
+covers preserved committed prefixes; it cannot prove physical OOM safety.
+
+| Stage A gate | Decision | Exact evidence |
+|---|---|---|
+| Numerical / outputs / rollback | PASS | Eight strict HF commands, 384 greedy steps; 32 semantic + 16 long outputs exact; growth/truncate/clear/replay and partial allocator-failure prefix checks |
+| Actual allocation / limits | PASS | Empty initial vectors; 127 positions use 256-position capacity (58,720,256 bytes); logical 8192 limit retained; checked overflow/refusal tests |
+| Speed | PASS | All 24 pairs; worst accepted TTFT regression 3.13%, decode regression 1.28%; two cases pool all 15 original/repeat samples |
+| Peak RAM / representation | PASS | Worst matrix RSS delta +52.82 MiB <64 MiB; repeated-case peak includes all five processes per build; CPU weights remain packed INT8 and attention packs one head per worker |
+| Compatibility / required checks | PASS | Six checks exit 0, 587 tests passed with RTX 5050 required; scalar/SIMD and 1/8-thread HF verification; GPU switching/quantization/snapshot regressions exercised |
+| Stage B low-RAM / bounded prefill | UNMEASURED | Not implemented yet; Stage A does not establish graceful physical-memory OOM handling |
+| Stage C FP16 | GATED | No conversion throughput, quality or model-speed claim; FP32 remains default |
+
+Raw evidence: `stage-a-acceptance.json`, `stage-a-manifest.json`, all original
+and retry benchmark JSON, `retry-peak-rss-all-processes.json`, `correctness.json`,
+`long-correctness.json`, `growth-summary.json`, and six check logs under
+`bench-results/cpu-stage4/`. Stage A is accepted; overall Stage 4 is not yet
+accepted. Real 4/8 GiB RAM runs, bounded prefill and FP16 remain outstanding.
+
+
+**Stage B implemented, validation pending (2026-10-12).** CPU prefill is split
+into at most 512 tokens per pass, reusing the existing layer buffers. A failure
+in any chunk rolls committed length back to the original prefix; observers
+still report only the final token once per layer. Twelve saved Stage A
+numerical cases (512/513/1025 positions, both models and weight formats,
+eight greedy steps each) pass unchanged logit and norm tolerances and every
+greedy choice. These comparisons preceded the memory-budget implementation;
+they will be repeated on the final build.
+
+CPU admission now budgets weights, the full requested FP32 window, bounded
+named workspace and 256 MiB headroom against host MemAvailable and visible
+cgroup-v2 ancestor memory.max/high limits. Default contexts may shrink;
+explicit contexts never shrink silently. CPU tensor reads and each forward
+chunk recheck available memory before allocation, with 64 MiB growth
+headroom, actual initialized KV high-water bytes, possible single-vector
+copy space and attention packing capacity. Retained vectors that already
+fit are not charged a reallocation copy. No CUDA allocation code changed.
+
+The reclaimable-file estimate excludes shmem, dirty, writeback and
+unevictable pages from memory.stat file bytes, then constrains it by
+memory.current and host MemAvailable. This uses the documented counters;
+it is a conservative planning estimate, not a kernel reservation or a
+guarantee against concurrent external pressure. Unreadable identified
+Linux limits fail closed. Physical 4/8 GiB runs and final speed/startup
+comparisons remain unmeasured; Stage B and overall Stage 4 are not accepted.
+
+
+First Stage B build: all six checks passed (593 tests), including unchanged
+trace assertions after moving memory preparation into the embedding timer.
+The earlier trace-order failure and interrupted copy-budget check attempt
+are retained separately. Final-build numerical/HF checks passed. The real
+384 MiB, swap-off ballast test rejected growth in both weight formats at
+57,573,376 / 56,643,584 available bytes, preserved all committed layers,
+and resumed with exact replay after release; memory.peak 346,013,696 bytes,
+all memory.events counters zero.
+
+The first 4 GiB/1.7B/INT8/8k profile **rejected during growth**, despite
+nominal window admission: peak RSS 4,046,729,216 bytes; a subsequent chunk
+needed 327 MB while only 236 MB remained. memory.max was 4,294,967,296,
+memory.swap.max 0; max 12397, oom 0, oom_kill 0. Its wrapper exit 0 records a
+verified clean rejection, not successful inference. No output-parity pass
+is claimed for that case. BF16/8k rejected at admission under 4 GiB;
+BF16/short also rejected under the 3 GiB process budget that reserves 1 GiB
+for a hypothetical 4 GiB system's OS/apps. BF16/8k completed under 8 GiB,
+peak RSS 5,680,910,336 bytes, exact Stage 3 output, all event counters zero.
+
+Investigation found that reused named buffers were charged again on each
+chunk, and attention packing performed repeated vector growth. The next
+build credits only already initialized buffer values within the new chunk's
+shape and reserves each head's final packing size upfront. Neither the
+64/256 MiB headroom nor actual memory limits are reduced. These changes
+require new correctness, speed and RAM evidence; no new GO is claimed.
+Initial raw data are retained under `stage-b-before-buffer-fix/` and
+`ram-before-buffer-fix/`. The measurement controller was stopped after its
+active child finished; partial timing results remain historical, not final
+acceptance. FP16 remains gated on Stage B.
+
+
+Final Stage B candidate (`marin-run` SHA-256
+`99905c1cc4e0a425cc3dff2a55045cec60def510fae6241c220fc177618a5286`):
+all six required checks pass, 594 tests with CUDA required. The twelve
+512/513/1025-position numerical comparisons and eight strict Hugging Face
+verification commands pass again. The 384 MiB swap-disabled rollback/replay
+check also passes on this build. No numerical tolerances changed.
+
+The revised 4 GiB/1.7B/INT8/8k run still **rejects cleanly during growth**:
+peak RSS 4,038,946,816 bytes, requesting another 280 MB with 244 MB available.
+Its cgroup reached memory.peak 4,294,967,296 bytes; max 12428, oom 0,
+oom_kill 0, swap current 0. This establishes graceful refusal, not support
+for this workload under that budget. Buffer credit and packing reservation
+reduce the estimated next allocation but do not make it fit; legitimate
+limits and headroom remain intact. Final timing, the full RAM matrix and
+startup comparisons are running serially. Stage B remains unaccepted.
+
+
+**Final Stage B timing and RAM matrix (2026-10-12).** All 24 timing cases
+and 64 swap-disabled cgroup profiles completed on the frozen candidate above.
+The original speed gate is **FAILED**: 1.7B INT8, one thread, 8159 prompt
+tokens has median TTFT 595819.3 ms versus 335899.9 ms for Stage A (+77.38%).
+All three measured candidate samples are retained (595727.5–596200.8 ms).
+The other 23 cases pass TTFT ≤10%; every case passes decode ≤3%.
+Stage B is **NO-GO** on the current measurements; FP16 remains blocked.
+Diagnosis and the remaining startup/CLI evidence are pending.
+
+| Model | Threads | Prompt IDs | Weights | A / B TTFT (ms) | A / B decode (tok/s) | B−A peak RSS (MiB) | Actual KV held (MiB) |
+|---|---:|---:|---|---:|---:|---:|---:|
+| 0.6B | 8 | 127 | int8 | 254.9 / 240.0 | 34.792 / 36.821 | +0.02 | 56 |
+| 0.6B | 8 | 127 | bf16 | 294.2 / 267.9 | 19.025 / 19.914 | -0.67 | 56 |
+| 1.7B | 8 | 127 | int8 | 715.7 / 618.4 | 12.020 / 12.945 | +0.60 | 56 |
+| 1.7B | 8 | 127 | bf16 | 853.8 / 764.3 | 6.592 / 7.016 | -0.09 | 56 |
+| 0.6B | 8 | 2047 | int8 | 4389.1 / 4379.4 | 20.839 / 21.586 | -84.20 | 504 |
+| 0.6B | 8 | 2047 | bf16 | 4820.7 / 4579.1 | 13.968 / 14.583 | -91.77 | 504 |
+| 1.7B | 8 | 2047 | int8 | 11010.0 / 10309.7 | 9.588 / 10.347 | -142.68 | 504 |
+| 1.7B | 8 | 2047 | bf16 | 13141.0 / 12355.4 | 5.873 / 6.207 | -145.66 | 504 |
+| 0.6B | 8 | 4095 | int8 | 16185.7 / 15252.0 | 14.646 / 15.033 | -141.93 | 952 |
+| 1.7B | 8 | 4095 | int8 | 27228.7 / 28386.1 | 8.143 / 8.658 | -345.70 | 952 |
+| 0.6B | 8 | 8159 | int8 | 79816.8 / 79584.3 | 9.270 / 9.535 | -282.01 | 1792 |
+| 1.7B | 8 | 8159 | int8 | 100743.4 / 104091.6 | 6.268 / 6.419 | -554.04 | 1792 |
+| 0.6B | 1 | 127 | int8 | 1134.1 / 1092.9 | 36.744 / 37.064 | +0.09 | 56 |
+| 0.6B | 1 | 127 | bf16 | 1142.5 / 1124.8 | 19.445 / 19.852 | +0.53 | 56 |
+| 1.7B | 1 | 127 | int8 | 3815.1 / 3649.5 | 12.853 / 13.141 | -0.09 | 56 |
+| 1.7B | 1 | 127 | bf16 | 3542.4 / 3613.2 | 6.862 / 7.049 | -0.07 | 56 |
+| 0.6B | 1 | 2047 | int8 | 24303.4 / 23837.5 | 21.911 / 22.066 | -88.09 | 504 |
+| 0.6B | 1 | 2047 | bf16 | 24168.3 / 25641.8 | 14.367 / 14.653 | -89.32 | 504 |
+| 1.7B | 1 | 2047 | int8 | 66604.3 / 63737.6 | 10.259 / 10.776 | -152.24 | 504 |
+| 1.7B | 1 | 2047 | bf16 | 63271.2 / 61224.7 | 6.082 / 6.278 | -148.50 | 504 |
+| 0.6B | 1 | 4095 | int8 | 61595.3 / 63515.2 | 15.320 / 15.532 | -163.76 | 952 |
+| 1.7B | 1 | 4095 | int8 | 141528.6 / 141893.6 | 8.588 / 8.751 | -348.40 | 952 |
+| 0.6B | 1 | 8159 | int8 | 180900.2 / 185106.5 | 9.636 / 9.794 | -316.73 | 1792 |
+| 1.7B | 1 | 8159 | int8 | 335899.9 / 595819.3 | 6.536 / 6.608 | -571.80 | 1792 |
+
+Stage A comparison uses its original three rounds, except the two previously
+repeated cases use all 15 original/repeat samples. RSS deltas compare the
+original A process and the B process. No B speed miss has been discarded.
+
+RAM profiles below use eight threads, one cold-requested fresh benchmark
+process with 32 output tokens, then a separate exact-output companion.
+Prompts have 127/2015/4063/8159 exact IDs for context 256/2048/4096/8192;
+companion text has 124/1987/3975/7920 actual IDs. Every successful companion
+is byte-identical to Stage 3. A per-file DONTNEED hint is requested; actual
+load I/O is in the raw JSON. Limits 3/6 GiB simulate leaving 1/2 GiB for
+OS/apps on 4/8 GiB machines; these are process constraints on this Zen 4
+laptop, not measurements on physically smaller or older PCs.
+
+| Process cap / profile | Model | Weights | Context | Outcome | TTFT (ms) | Decode (tok/s) | Peak RSS (MiB) | Actual KV (MiB) |
+|---|---|---|---:|---|---:|---:|---:|---:|
+| 4 GiB (4GiB) | 0.6B | bf16 | 2048 | exact output | 4416.6 | 14.816 | 1714.97 | 448 |
+| 4 GiB (4GiB) | 0.6B | bf16 | 256 | exact output | 274.2 | 20.140 | 1249.62 | 56 |
+| 4 GiB (4GiB) | 0.6B | bf16 | 4096 | exact output | 15119.9 | 11.268 | 2241.22 | 896 |
+| 4 GiB (4GiB) | 0.6B | bf16 | 8192 | exact output | 80161.6 | 7.836 | 3275.43 | 1792 |
+| 4 GiB (4GiB) | 0.6B | int8 | 2048 | exact output | 4453.7 | 22.458 | 1180.41 | 448 |
+| 4 GiB (4GiB) | 0.6B | int8 | 256 | exact output | 243.8 | 36.991 | 704.56 | 56 |
+| 4 GiB (4GiB) | 0.6B | int8 | 4096 | exact output | 14643.7 | 15.237 | 1686.62 | 896 |
+| 4 GiB (4GiB) | 0.6B | int8 | 8192 | exact output | 79444.3 | 9.670 | 2776.24 | 1792 |
+| 4 GiB (4GiB) | 1.7B | bf16 | 2048 | clean rejection | — | — | 130.04 | — |
+| 4 GiB (4GiB) | 1.7B | bf16 | 256 | exact output | 911.9 | 7.032 | 3407.93 | 56 |
+| 4 GiB (4GiB) | 1.7B | bf16 | 4096 | clean rejection | — | — | 130.07 | — |
+| 4 GiB (4GiB) | 1.7B | bf16 | 8192 | clean rejection | — | — | 130.45 | — |
+| 4 GiB (4GiB) | 1.7B | int8 | 2048 | exact output | 10058.9 | 10.320 | 2327.85 | 448 |
+| 4 GiB (4GiB) | 1.7B | int8 | 256 | exact output | 589.9 | 12.776 | 1823.70 | 56 |
+| 4 GiB (4GiB) | 1.7B | int8 | 4096 | exact output | 27523.4 | 8.571 | 2853.12 | 896 |
+| 4 GiB (4GiB) | 1.7B | int8 | 8192 | clean rejection | — | — | 3851.84 | — |
+| 3 GiB (4GiB-OS-reserve) | 0.6B | bf16 | 2048 | exact output | 4456.4 | 14.396 | 1716.34 | 448 |
+| 3 GiB (4GiB-OS-reserve) | 0.6B | bf16 | 256 | exact output | 266.3 | 19.701 | 1248.19 | 56 |
+| 3 GiB (4GiB-OS-reserve) | 0.6B | bf16 | 4096 | exact output | 15199.4 | 11.476 | 2237.60 | 896 |
+| 3 GiB (4GiB-OS-reserve) | 0.6B | bf16 | 8192 | clean rejection | — | — | 132.11 | — |
+| 3 GiB (4GiB-OS-reserve) | 0.6B | int8 | 2048 | exact output | 4453.4 | 22.280 | 1180.42 | 448 |
+| 3 GiB (4GiB-OS-reserve) | 0.6B | int8 | 256 | exact output | 240.9 | 36.997 | 704.90 | 56 |
+| 3 GiB (4GiB-OS-reserve) | 0.6B | int8 | 4096 | exact output | 14498.5 | 15.449 | 1687.93 | 896 |
+| 3 GiB (4GiB-OS-reserve) | 0.6B | int8 | 8192 | exact output | 79873.5 | 9.625 | 2748.26 | 1792 |
+| 3 GiB (4GiB-OS-reserve) | 1.7B | bf16 | 2048 | clean rejection | — | — | 132.24 | — |
+| 3 GiB (4GiB-OS-reserve) | 1.7B | bf16 | 256 | clean rejection | — | — | 131.33 | — |
+| 3 GiB (4GiB-OS-reserve) | 1.7B | bf16 | 4096 | clean rejection | — | — | 130.78 | — |
+| 3 GiB (4GiB-OS-reserve) | 1.7B | bf16 | 8192 | clean rejection | — | — | 132.02 | — |
+| 3 GiB (4GiB-OS-reserve) | 1.7B | int8 | 2048 | exact output | 10190.9 | 10.252 | 2332.62 | 448 |
+| 3 GiB (4GiB-OS-reserve) | 1.7B | int8 | 256 | exact output | 604.9 | 12.322 | 1823.05 | 56 |
+| 3 GiB (4GiB-OS-reserve) | 1.7B | int8 | 4096 | exact output | 27021.6 | 8.507 | 2855.77 | 896 |
+| 3 GiB (4GiB-OS-reserve) | 1.7B | int8 | 8192 | clean rejection | — | — | 131.71 | — |
+| 8 GiB (8GiB) | 0.6B | bf16 | 2048 | exact output | 4448.0 | 14.750 | 1714.86 | 448 |
+| 8 GiB (8GiB) | 0.6B | bf16 | 256 | exact output | 271.3 | 20.042 | 1249.29 | 56 |
+| 8 GiB (8GiB) | 0.6B | bf16 | 4096 | exact output | 15133.9 | 11.265 | 2237.21 | 896 |
+| 8 GiB (8GiB) | 0.6B | bf16 | 8192 | exact output | 80070.0 | 7.802 | 3275.54 | 1792 |
+| 8 GiB (8GiB) | 0.6B | int8 | 2048 | exact output | 4554.3 | 22.094 | 1180.11 | 448 |
+| 8 GiB (8GiB) | 0.6B | int8 | 256 | exact output | 242.9 | 36.574 | 704.63 | 56 |
+| 8 GiB (8GiB) | 0.6B | int8 | 4096 | exact output | 14825.0 | 15.470 | 1685.26 | 896 |
+| 8 GiB (8GiB) | 0.6B | int8 | 8192 | exact output | 79527.6 | 9.552 | 2757.93 | 1792 |
+| 8 GiB (8GiB) | 1.7B | bf16 | 2048 | exact output | 12079.7 | 6.396 | 3875.75 | 448 |
+| 8 GiB (8GiB) | 1.7B | bf16 | 256 | exact output | 751.3 | 7.222 | 3408.29 | 56 |
+| 8 GiB (8GiB) | 1.7B | bf16 | 4096 | exact output | 29893.7 | 5.656 | 4392.79 | 896 |
+| 8 GiB (8GiB) | 1.7B | bf16 | 8192 | exact output | 112734.2 | 4.495 | 5412.17 | 1792 |
+| 8 GiB (8GiB) | 1.7B | int8 | 2048 | exact output | 9893.5 | 10.570 | 2328.16 | 448 |
+| 8 GiB (8GiB) | 1.7B | int8 | 256 | exact output | 633.0 | 13.047 | 1823.86 | 56 |
+| 8 GiB (8GiB) | 1.7B | int8 | 4096 | exact output | 27242.2 | 8.756 | 2855.02 | 896 |
+| 8 GiB (8GiB) | 1.7B | int8 | 8192 | exact output | 102678.3 | 6.512 | 3948.66 | 1792 |
+| 6 GiB (8GiB-OS-reserve) | 0.6B | bf16 | 2048 | exact output | 4499.5 | 14.695 | 1714.60 | 448 |
+| 6 GiB (8GiB-OS-reserve) | 0.6B | bf16 | 256 | exact output | 270.3 | 20.145 | 1248.37 | 56 |
+| 6 GiB (8GiB-OS-reserve) | 0.6B | bf16 | 4096 | exact output | 14853.9 | 11.318 | 2237.66 | 896 |
+| 6 GiB (8GiB-OS-reserve) | 0.6B | bf16 | 8192 | exact output | 79971.1 | 7.860 | 3277.97 | 1792 |
+| 6 GiB (8GiB-OS-reserve) | 0.6B | int8 | 2048 | exact output | 4523.5 | 22.131 | 1180.38 | 448 |
+| 6 GiB (8GiB-OS-reserve) | 0.6B | int8 | 256 | exact output | 252.8 | 36.733 | 704.49 | 56 |
+| 6 GiB (8GiB-OS-reserve) | 0.6B | int8 | 4096 | exact output | 14638.7 | 15.176 | 1689.62 | 896 |
+| 6 GiB (8GiB-OS-reserve) | 0.6B | int8 | 8192 | exact output | 79322.7 | 9.627 | 2762.19 | 1792 |
+| 6 GiB (8GiB-OS-reserve) | 1.7B | bf16 | 2048 | exact output | 11997.6 | 6.344 | 3875.84 | 448 |
+| 6 GiB (8GiB-OS-reserve) | 1.7B | bf16 | 256 | exact output | 838.7 | 7.364 | 3408.27 | 56 |
+| 6 GiB (8GiB-OS-reserve) | 1.7B | bf16 | 4096 | exact output | 29999.8 | 5.639 | 4392.84 | 896 |
+| 6 GiB (8GiB-OS-reserve) | 1.7B | bf16 | 8192 | exact output | 110827.3 | 4.604 | 5415.75 | 1792 |
+| 6 GiB (8GiB-OS-reserve) | 1.7B | int8 | 2048 | exact output | 9921.7 | 10.511 | 2327.91 | 448 |
+| 6 GiB (8GiB-OS-reserve) | 1.7B | int8 | 256 | exact output | 600.1 | 13.008 | 1824.05 | 56 |
+| 6 GiB (8GiB-OS-reserve) | 1.7B | int8 | 4096 | exact output | 26168.9 | 8.674 | 2855.93 | 896 |
+| 6 GiB (8GiB-OS-reserve) | 1.7B | int8 | 8192 | exact output | 104134.2 | 6.502 | 3916.65 | 1792 |
+
+All 64 profiles have memory.swap.max 0 and zero memory.events oom, oom_kill
+and oom_group_kill. There are 54 completed inferences and 10 clean rejections.
+Raw before/after memory.max/high/current/peak/events and swap counts, actual
+RSS, load I/O, companion process-to-first-output and exact-output results
+are in `bench-results/cpu-stage4/ram/*.json`. Rejected runs emit no benchmark
+JSON or KV-capacity metric; no allocation or quality pass is invented for them.
+The outer unrestricted measurement-controller service reported a small swap
+peak; each limited inference service independently enforces swap-off.
+
+The first startup harness was invalid: bench requires at least two output
+tokens, but it requested one. It failed argument validation before loading
+the model; the log is retained in `startup-invalid-one-token/`. The corrected
+harness uses two benchmark tokens and a separate one-token streaming CLI
+process. This is a harness error, not an inference regression.
+
+
+
+**Final startup and CLI adaptation evidence.** Forty-eight alternating-order
+fresh-process samples (three per build/model/format/cache condition) passed
+exact one-token output comparison. Bench uses 127 prompt IDs, two outputs,
+8192 context, eight threads, no warm-up; the separate one-token CLI streams
+plain text and supplies process-to-first-stdout. Medians below compare
+Stage A / Stage B. Peak RSS is the maximum streaming-process RSS among
+three samples; separate benchmark RSS is retained in `startup/records.json`.
+
+| Model | Weights | Requested cache state | A / B load (s) | A / B process-first-output (s) | A / B benchmark TTFT (ms) | A / B peak streaming RSS (MiB) | A / B load disk reads (bytes) |
+|---|---|---|---:|---:|---:|---:|---:|
+| 0.6B | bf16 | warm | 0.6216 / 0.6717 | 0.9472 / 1.0062 | 292.0 / 287.8 | 1211.79 / 1211.57 | 0 / 0 |
+| 0.6B | bf16 | cold | 1.1744 / 1.2391 | 1.5262 / 1.5942 | 343.5 / 283.6 | 1211.11 / 1210.98 | 977690624 / 977690624 |
+| 0.6B | int8 | warm | 1.0155 / 1.0683 | 1.3449 / 1.4058 | 253.6 / 250.2 | 672.07 / 672.50 | 0 / 0 |
+| 0.6B | int8 | cold | 1.5397 / 1.6160 | 1.8994 / 1.9342 | 250.1 / 276.6 | 672.21 / 671.52 | 977690624 / 977690624 |
+| 1.7B | bf16 | warm | 1.7982 / 1.8691 | 2.2622 / 2.3450 | 868.0 / 886.7 | 3359.25 / 3359.16 | 0 / 0 |
+| 1.7B | bf16 | cold | 2.6693 / 2.7402 | 3.1618 / 3.2029 | 789.4 / 869.6 | 3359.27 / 3359.07 | 3069280256 / 3069280256 |
+| 1.7B | int8 | warm | 2.3909 / 2.3991 | 2.8340 / 2.9352 | 692.7 / 671.0 | 1810.44 / 1810.41 | 0 / 0 |
+| 1.7B | int8 | cold | 3.6194 / 3.5521 | 4.1179 / 4.0512 | 720.0 / 746.3 | 1810.39 / 1810.37 | 3069280256 / 3069280256 |
+
+Cold-requested load reads were 977,690,624 / 3,069,280,256 bytes for
+0.6B / 1.7B in these medians; these are actual I/O counters, not a claim
+that every source byte was cold. Warm load reads were zero. Source files
+also contain unused LM-head data. CPU memory checks before each tensor
+add safety work: observed median load differences span −67 to +76 ms;
+0.6B BF16 warm load is +50 ms (+8.06%), cold +65 ms (+5.51%). This startup
+cost is reported rather than hidden; the fixed Stage B startup gate requires
+measurement, with no invented speed threshold. Host load and cold-cache
+hints remain measurement limitations.
+
+All 32 semantic prompts are byte-identical to Stage 3 on the final build.
+Together with 54 successful constrained long-output companions, twelve
+chunk-boundary numerical cases and eight strict HF commands, this passes
+the stated FP32 correctness/output checks. Raw evidence is
+`stage-b/semantic.json`, `numeric-b-check.log`, `stage-b/verify-*.log`
+and `ram/*.json`.
+
+A real 1 GiB cgroup-v2, swap-off run tested both normal CLI entry points
+with isolated XDG configuration/state directories. Qwen3-0.6B INT8 defaults
+shrank to 277 (`marin-run`, default 2048) and 275 (`marin`, default 4096)
+positions, and both generated successfully. Both explicit --ctx 8192
+requests rejected instead of shrinking; both BF16-default requests rejected
+instead of silently quantizing. Aggregate memory.peak 736,202,752 bytes,
+all memory.events counters zero. Raw logs and selected-context evidence are
+in `default-context/summary.json`. No saved user model selection changed.
+
+
+
+**Long-prefill diagnosis and final decision.** A separate safe Rust harness
+links the unchanged release model/tensor libraries and feeds the exact
+benchmark's 8159 repeated lighthouse IDs to Qwen3-1.7B INT8 with one thread,
+8192 context and a fresh cache. It times one forward pass, not the benchmark's
+warm-up plus three reused-cache runs. Wall time is 352.494463 s.
+
+| Fresh-cache diagnostic stage | Calls | Seconds |
+|---|---:|---:|
+| Embedding, memory checks and KV preparation | 16 | 1.901225 |
+| Norm | 1360 | 0.277029 |
+| QKV projections | 448 | 35.598477 |
+| RoPE | 448 | 0.177864 |
+| KV writes | 448 | 0.130733 |
+| Attention | 448 | 121.209289 |
+| Attention output projection | 448 | 17.836592 |
+| MLP | 448 | 174.585637 |
+| Residual addition | 896 | 0.286496 |
+| LM head | 16 | 0.251848 |
+
+MLP and attention dominate this fresh-cache diagnostic; allocation/admission
+work is not its dominant cost. This pass does **not** reproduce the warmed
+595.819 s acceptance result and cannot replace those three samples. The
+warm-state/performance discrepancy remains unresolved. CPU policy sampled
+in the diagnostic was powersave / balance_performance, active core about
+5.016 GHz; no equivalent per-core frequency series was collected during the
+original failed case. Allocator/cache placement and changing runtime/power
+conditions are hypotheses, not established causes. No speculative kernel
+fix, unsafe floating-point mode, power-policy change, discarded sample or
+gate relaxation was used. Raw stage trace and diagnostic source are
+`profile-b.csv`, `profile-b.rs`, `profile-b.logits` and `profile-b-power.jsonl`.
+
+| Stage 4 acceptance gate | Classification | Evidence / limitation |
+|---|---|---|
+| A growable storage / rollback / reuse | PASSED — GO | Stage A table above, allocation/refusal tests and 24 before/after pairs; 127 positions hold 256-position payload instead of the full 8192 window |
+| B numerical correctness / outputs | PASSED | Twelve 512/513/1025 boundary comparisons with unchanged HF tolerances; eight strict HF commands; 32 semantic + 54 successful constrained long-output comparisons exact |
+| B context policy / bounded work | PASSED | At most 512 positions per chunk; whole-request length rollback after later-chunk failure; real 1 GiB CLI adaptation to 277/275 positions; explicit windows and BF16 defaults reject rather than silently changing |
+| B RAM / OOM | PASSED for tested profiles | 64 effective 3/4/6/8 GiB cgroup-v2 cases, swap disabled, zero OOM events/kills; 54 completions / 10 clean rejections; 384 MiB ballast preserves prefix and resumes exact replay; rejected CLI runs emit no KV-capacity metric |
+| B decode performance | PASSED | All 24 comparisons satisfy ≤3% regression; measured ratios 1.00706–1.07914 versus Stage A |
+| B prefill performance | FAILED — NO-GO | 23/24 satisfy ≤10%; 1.7B INT8, one thread, 8k TTFT 335.900 → 595.819 s (+77.38%); all original samples retained, warm-state discrepancy unresolved |
+| B startup / process-first-output / peak reporting | PASSED as a reporting gate | 48 alternating-order fresh-process samples; exact output; warm/cold-requested load, actual I/O, TTFT, streaming latency and RSS table above; small startup regressions disclosed |
+| BF16/FP32 reference, INT8 opt-in, scalar/SIMD, threads, CUDA | PASSED | Defaults unchanged; source stays packed INT8; strict scalar/SIMD 1/8-thread HF checks; full CUDA-required workspace suite on RTX 5050 |
+| Required checks | PASSED | fmt, check, clippy -D warnings, workspace/all-features tests (594), line limit and unsafe checks all exit 0 on the frozen candidate |
+| CPU snapshots | OUT OF SCOPE | Existing unsupported CPU save/restore remains unsupported; CUDA snapshot regression suite passes; no CPU snapshot implementation |
+| C CPU FP16 conversion / storage / quality / speed | BLOCKED | Stage B prefill gate fails; only the previously recorded official API audit exists. No FP16 path, conversion benchmark or model-quality pass is claimed |
+| Physical older CPU / physical 4/8 GiB PC | NOT MEASURED | Same Zen 4 laptop with enforced process limits; forced scalar checks are compatibility evidence, not older-hardware timing |
+
+**Decision: Stage A GO; Stage B NO-GO; overall Stage 4 NO-GO.** The growable
+FP32 and bounded-prefill/memory-budget candidate remains uncommitted for
+review. FP32 KV and BF16 weights remain defaults; CPU INT8 stays opt-in.
+Stop here: no CPU FP16, INT4, CPU snapshots or later features. Before a new
+acceptance attempt, the measured next step is an alternating-order A/B
+1.7B/one-thread/8k comparison with identical cache reuse and per-stage timing,
+plus allocator/RSS and CPU-frequency observations. Preserve the original
+three samples and retain every follow-up; diagnose the warm-state gap before
+changing kernel or allocation policy.
+
+The memory checks estimate available capacity; they do not reserve it against
+concurrent external allocations. Graceful refusal is demonstrated for the
+listed workloads, not a universal OOM guarantee. HEAD, all three stash IDs,
+all pre-existing non-document files and the original BENCHMARKS prefix
+remain unchanged. No dependencies, commits, pushes or stash operations were
+introduced.
+
+
+### 27. Stage 4 bounded-prefill regression investigation
+
+The accepted Stage 3 gates in section 25 and the original Stage 4 gates in
+section 26 remain unchanged. The +77.38% 1.7B INT8 / one-thread / 8k TTFT
+failure is retained. No new feature is authorized by this investigation.
+
+Before changing production source, archive the exact failed candidate
+(SHA-256 `99905c1cc4e0a425cc3dff2a55045cec60def510fae6241c220fc177618a5286`)
+and rerun its original 8159-ID prompt / 32-output / 8192-window / one-warm-up /
+three-measured-round command. Compare the saved growable-only Stage A binary
+on the same workload, serially. Record CPU frequency/policy, faults, RSS,
+swap and commands; do not change machine power policy or memory limits.
+
+The controlled diagnostic factors are prefill chunk size, actual KV growth
+versus already allocated/initialized reusable storage, and profiling state.
+Use the same model weights, input IDs, dispatch and thread count. Sweep
+smaller legal bounds as well as larger/unbounded diagnostic batches to
+separate batching efficiency from repeated KV packing. Larger diagnostic
+batches do not relax the production bound of at most 512 positions.
+Break down each chunk's projections/MLP GEMM, attention packing/computation,
+KV reads/writes, reservation/copy work and memory-guard time. Where allocation
+and copying cannot be separated without an unsafe allocator hook, report
+the combined measured duration and explicitly distinguish pointer/capacity
+observations and source-derived copy bounds from hardware traffic.
+
+Accept only a measured root-cause fix that retains growable KV, legitimate
+memory limits/headroom, rollback/reuse, BF16/FP32 defaults and INT8 opt-in.
+Rerun the original 24-case Stage 4 timing matrix (both models, 1/8 threads,
+INT8 all four depths; BF16 short/2k), strict numerical/output checks, scalar
+fallback, full CUDA-required suite and all constrained RAM profiles. No
+sample dropping, threshold change or format default change. If bounded
+prefill cannot pass, disable/revert that component under the user's explicit
+fallback instruction, keeping independently validated growth/safety work;
+do not relabel a disabled component as passing the 512-token gate.
+
+Evidence and preservation hashes are retained under ignored
+`bench-results/cpu-stage4-fix/`. The unchanged-binary reproduction is running;
+no new performance or root-cause claim is made yet. No FP16, INT4, CPU
+snapshots, Stage 5, dependency, commit, push or stash change is introduced.
+
+
+**Unmodified same-session reproduction.** Candidate B and archived growable-only
+A ran serially with the original 8159/32/8192, one-thread, one-warm-up,
+three-measured-round settings. B: TTFT 370689.686 ms (367024.885–372912.933),
+decode 5.88469 tok/s. A: TTFT 374361.124 ms (374255.981–374458.282),
+decode 6.21664 tok/s. Same-session B/A ratios are 0.99019 TTFT and 0.94660
+decode: the archived +77.38% TTFT failure is **not reproduced in this first
+process**, and decode still misses the original ≤3% gate. Both the original
+failure and every new sample are retained; no pass or code fix is claimed.
+
+Frequency/policy, faults, RSS and swap are recorded per process every five
+seconds. System-wide CPU and other-process activity were additionally observed
+from partway through B. CPU policy was powersave/balance_performance and
+observed active-core frequencies were near 5 GHz. Timing services had no
+artificial RAM limit; B/A observed small nonzero process swap (436/2056 KiB
+in late samples), disclosed rather than treated as swap-disabled RAM tests.
+These observations do not reconstruct the missing telemetry from the earlier
+595.819 s run. Raw commands, results and telemetry are in
+`bench-results/cpu-stage4-fix/`. Production Rust and binary hashes are unchanged.
+
+**Public-kernel batching/allocation sweep.** Synthetic finite inputs use the
+real 1.7B gate/down dimensions, group-128 INT8 and the unchanged public Matrix
+API. Each case is a fresh process with one unmeasured and three measured
+rounds, processing 8159 rows; all outputs are bit-identical to the same
+kernel's unbatched reference. This is a GEMM calibration, not full-model
+quality or acceptance. KV allocation primers use the actual KvCache API:
+none, full 8192 reservation, or sixteen 512-position growth steps. Both
+nonempty primers finish with 1,879,048,192 bytes of KV capacity. Allocation
+and input-copy durations, pointer phases and commands are retained.
+
+| GEMM shape | Batch | No KV primer (s) | Direct full reservation (s) | Incremental KV growth (s) |
+|---|---:|---:|---:|---:|
+| 6144 × 2048 | 128 | 2.169363 | 2.187002 | 2.167221 |
+| 6144 × 2048 | 256 | 2.180028 | 2.177217 | 2.185392 |
+| 6144 × 2048 | 512 | 2.178438 | 2.165138 | 2.459139 |
+| 6144 × 2048 | 1024 | 2.169980 | 2.166572 | 2.128451 |
+| 6144 × 2048 | 2048 | 2.120636 | 2.119729 | 2.159751 |
+| 6144 × 2048 | 8192 | 2.188202 | 2.174362 | 2.158127 |
+| 2048 × 6144 | 128 | 2.034616 | 2.044572 | 1.963643 |
+| 2048 × 6144 | 256 | 2.005822 | 1.989797 | 1.961229 |
+| 2048 × 6144 | 512 | 2.006230 | 2.001394 | 2.147177 |
+| 2048 × 6144 | 1024 | 2.003367 | 2.008048 | 1.933839 |
+| 2048 × 6144 | 2048 | 1.932880 | 2.086566 | 2.008591 |
+| 2048 × 6144 | 8192 | 1.998999 | 2.018857 | 2.013122 |
+
+The 512-row incremental-primer cases are slower: gate 2.4591 versus
+2.1651 s (+13.58%), down 2.1472 versus 2.0014 s (+7.29%). Smaller batches
+do not show that interaction in this calibration. Other batches and primers
+are close enough that arithmetic batching alone does not establish a
+77% model slowdown. Pointer phases differ between allocation histories;
+cache/alignment sensitivity is a hypothesis requiring a focused control,
+not an established hardware cause.
+
+**Warmed chunk profile on unchanged libraries.** A genuine runtime warm-up
+processes the full prompt and 31 decode passes (32 sampled outputs), then
+clears committed KV length and times all 16 bounded chunks. Growable-history
+prefill is 368.218526 s: MLP 185.774342 s, attention 125.234731 s, QKV
+37.827698 s, output projection 17.991617 s. Embedding/guards/reservation
+sum only 0.009019 s and KV writes 0.129182 s. Every returned logit is
+bit-identical to the saved cold profile. Per-layer traces and per-chunk
+totals are in `warm-profile-grown.csv` and `warm-chunks-grown.json`.
+The direct-reservation control and exact-kernel alignment calibration are
+still running. No production optimization has been made.
+
+
+**Completed allocation controls; fallback decision.** Direct preallocation followed
+by the same real warm-up measures 358.202962 s versus incremental-history
+368.218526 s. Direct-control MLP is 177.593947 s and attention 124.763385 s;
+guards/reservation total 0.009161 s. Both profiles return bit-identical logits.
+The model's tensor dependency fingerprint matches the explicitly linked tensor
+library. Synthetic kernels are still calibrations, not full-model measurements.
+
+An exact unchanged INT8 GEMM kernel with controlled scratch pointer phases
+measures 1.943952 s with both buffers cache-line aligned versus 2.198063 s
+with both offset by 16 bytes (three measured samples per phase). This ~13%
+sensitivity does not establish the archived 77% cause. No speculative alignment
+optimization is accepted. The unchanged CLI under a process-local static
+malloc mmap threshold of 8192 bytes measures 367734.074 ms at 8k (one measured
+round after one warm-up), also without the archived failure. Short-prompt
+normal/static-threshold TTFT is 4108.423/4130.837 ms. This allocator control
+changes neither memory limits nor machine-wide policy; it is not a production
+setting or a gate pass.
+
+Attention batch sizes 128/256/512/1024/2048/4096/8192 were measured with the
+unchanged public kernel and an exact-source private packing calibration.
+All outputs are bit-identical to that kernel's unbatched reference. At 512,
+repeated source KV packing processes 570155008 logical bytes per layer;
+unbounded processes 66838528. Packing takes about 0.10 versus 0.014 seconds
+per synthetic layer. These are source-derived logical copy sizes, not hardware
+traffic counters. Synthetic attention timings do not represent real-model
+attention latency. Raw fresh/primed packing and full-attention samples are
+retained in `attention-sweep.csv`; no unsafe allocator hook was introduced.
+
+The unchanged same-session run does not reproduce the archived +77.38%
+TTFT failure, and still fails decode by 5.34%. A causal fix is therefore
+**unproven**. Under the user's explicit fallback authorization, bounded prefill
+is removed rather than accepted on these controls. The single whole-prompt
+pass retains growable KV, checked full-input/context arithmetic and commit
+only after successful inference. CPU admission now budgets full-window
+activation memory, including when selecting an omitted default context;
+the before-growth guard still budgets resident KV, copy/packing headroom and
+the actual input workspace against host/cgroup availability. No memory-limit
+bypass is introduced. Full-input workspace can legitimately cause additional
+low-RAM rejections compared with bounded prefill.
+
+The original ≤512 production bound is **DISABLED / NOT PASSED**, not relaxed.
+Original timing, correctness and RAM gates will be rerun on the fallback;
+Stage 4 as originally scoped remains NO-GO while bounded prefill is absent.
+No FP16, INT4, snapshots, Stage 5 or default-format change is introduced.
+
+
+**Final validation scope, explicitly narrowed by the user.** After more than
+two hours of diagnostics, the user requested convergence: keep the fallback,
+stop expanding investigation, and use focused checks rather than another
+exhaustive 8k single-thread matrix. This supersedes the investigation's
+planned full rerun above; it does not change any original gate or make
+unmeasured cells pass. Only the required verification suite and one serial
+focused-validation controller remain active. No competing CPU timing jobs
+are scheduled. The final controller checks both models/formats, scalar
+reference verification, 1/8-thread short A/B timings, eight-thread INT8 2k
+A/B timings, boundary numerics, real pressure rollback, focused 4/8 GiB
+swap-disabled profiles and both CLIs' adaptive defaults under 1 GiB.
+The complete final timing/RAM matrices and cold-start reruns are explicitly
+unverified; the existing archived results are historical evidence.
+
+
+**Final fallback targeted timing — all samples retained.** Final `marin-run`
+SHA-256 is `05d194ea2ae87fe5793af4b3bc3905f828d18e080ae0b0d6b42e4b1148ca1931`.
+Ten serial, alternating-order A/fallback pairs use context 8192, 32 outputs,
+one warm-up and three measured rounds per binary. A is the archived accepted
+growable-only Stage A binary; fallback is whole-prompt prefill with the
+retained guards and full-workspace admission. This is a targeted comparison,
+not a replacement for A's original 24-case comparison against Stage 3.
+The 10% TTFT / 3% decode thresholds below are the unchanged comparison
+against A; they do not replace A's stricter 5% versus Stage 3 gate.
+
+| Model | Weights | Threads | Prompt | A / fallback TTFT (ms) | A / fallback decode (tok/s) | TTFT change | Decode change | RSS delta (MiB) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 0.6B | bf16 | 1 | 127 | 1136.734 / 1116.034 | 19.28232 / 18.91943 | -1.8210% | -1.8820% | +0.0703 |
+| 0.6B | bf16 | 8 | 127 | 326.712 / 289.462 | 19.43884 / 19.24654 | -11.4014% | -0.9892% | -0.6836 |
+| 0.6B | int8 | 1 | 127 | 1105.109 / 1205.811 | 36.67452 / 35.86439 | +9.1125% | -2.2090% | +0.1797 |
+| 0.6B | int8 | 8 | 127 | 254.488 / 267.228 | 36.08887 / 35.58839 | +5.0063% | -1.3868% | +0.2617 |
+| 1.7B | bf16 | 1 | 127 | 3598.949 / 3625.199 | 6.51802 / 6.56685 | +0.7294% | +0.7492% | -0.0234 |
+| 1.7B | bf16 | 8 | 127 | 826.086 / 812.912 | 6.53733 / 6.55247 | -1.5948% | +0.2315% | +0.4062 |
+| 1.7B | int8 | 1 | 127 | 3879.441 / 3825.295 | 12.00675 / 12.37575 | -1.3957% | +3.0732% | -0.3203 |
+| 1.7B | int8 | 8 | 127 | 685.498 / 757.319 | 11.73164 / 12.26128 | +10.4772% | +4.5146% | -0.2969 |
+| 0.6B | int8 | 8 | 2047 | 4435.728 / 4675.380 | 21.58436 / 20.87638 | +5.4028% | -3.2801% | +2.0898 |
+| 1.7B | int8 | 8 | 2047 | 10936.079 / 10980.033 | 9.56583 / 9.58155 | +0.4019% | +0.1643% | -2.9844 |
+
+**Two focused failures remain:** 1.7B INT8 / eight threads / 127 positions
+has +10.4772% TTFT; 0.6B INT8 / eight threads / 2047 positions has -3.2801%
+decode. All other targeted cells satisfy those thresholds; every RSS delta
+is below +64 MiB. No failing sample is removed, no threshold is changed, and
+no further sweep/retake is scheduled after the user's convergence instruction.
+These misses do not establish a causal memory-guard or allocation regression;
+no causal fix or complete performance acceptance is claimed. The original
++77.38% failure is likewise retained as historical evidence, not explained
+away by the new unchanged-binary run.
+
+Initial KV is 58,720,256 bytes at the short prompt (256-position payload)
+and 528,482,304 bytes after the 2047-position warm-up (2304-position payload,
+including decode crossing 2048). The final forward still reserves only actual
+used positions and keeps the warmed allocation for reuse. It does not allocate
+an 8192-position KV window for a short prompt. Load durations are retained in
+`final-timing.json`; these cache conditions are uncontrolled and are not a
+replacement for cold/zero-read-warm startup measurements.
+
+
+**Final focused correctness and memory evidence.** All twelve boundary checks
+(512/513/1025 positions, both models and BF16/INT8) match the saved Stage A
+logits, hidden-state values, layer norms and eight greedy choices bit for bit:
+maximum absolute/relative difference zero. Eight fresh strict HF runs pass
+both models with SIMD/scalar and 1/8 threads, using BF16 weights and FP32 math;
+HF tolerances remain unchanged. The full suite covers grow/truncate/reuse,
+whole-pass failure prefix preservation, INT8 storage/dispatch/threading, real
+RTX 5050 backend/model switching, CUDA quantization and existing GPU snapshots.
+CPU snapshot support remains unchanged and unsupported.
+
+Focused RAM runs use effective cgroup-v2 limits below, swap disabled, eight
+threads, one fresh-process measured round with no warm-up and 32 outputs.
+Per-file DONTNEED is requested; actual load disk reads and process-to-first
+stdout are retained, not treated as a verified cold boot. Every successful
+case has a separately generated text-prompt companion that exactly matches
+the archived Stage 3 output. Actual text-token counts are recorded separately
+from benchmark IDs. Rejections emit no KV measurement; dash means unavailable,
+not zero allocation or an output-quality pass.
+
+| Limit | Model | Weights | Context | Result | TTFT (ms) | Decode (tok/s) | Process peak RSS (MiB) | Cgroup peak (MiB) | Held KV (MiB) |
+|---|---|---|---:|---|---:|---:|---:|---:|---:|
+| 4GiB | 0.6B | bf16 | 2048 | exact output | 4834.944 | 13.89028 | 1785.020 | 2945.762 | 448.000 |
+| 4GiB | 0.6B | int8 | 2048 | exact output | 4504.940 | 20.76173 | 1251.023 | 2396.480 | 448.000 |
+| 4GiB | 1.7B | bf16 | 2048 | clean refusal | — | — | 130.922 | 131.906 | — |
+| 4GiB | 1.7B | bf16 | 8192 | clean refusal | — | — | 134.055 | 141.031 | — |
+| 4GiB | 1.7B | int8 | 2048 | exact output | 11385.742 | 9.51117 | 2445.809 | 4096.000 | 448.000 |
+| 4GiB | 1.7B | int8 | 8192 | clean refusal | — | — | 131.984 | 134.023 | — |
+| 8GiB | 1.7B | bf16 | 4096 | exact output | 33155.489 | 5.09845 | 4683.441 | 4991.652 | 896.000 |
+| 8GiB | 1.7B | int8 | 4096 | exact output | 28914.500 | 7.95161 | 3124.117 | 6264.055 | 896.000 |
+
+All 8 profiles have **zero `oom` and `oom_kill` events**, zero
+swap, 5 exact-output completions and 3 clean refusals.
+Admission and growth respect the actual limits; no override was used.
+
+The real 384 MiB pressure test passes with BF16 and INT8: 320 MiB touched
+ballast forces the before-growth guard to refuse, every layer's committed
+five-token prefix is unchanged, and release/replay returns exactly the fresh
+result. Cgroup peak is 347082752 bytes; OOM/kill/max events
+are zero and swap is disabled. Under 1 GiB, both normal CLIs adapt an omitted
+INT8 context and produce output; explicit 8192 and BF16 defaults fail clearly.
+Selected INT8 contexts are marin-run-int8-default: 330, marin-int8-default: 328.
+All six CLI cases preserve zero OOM kills. Full-window budgeting can refuse
+work that formerly fit with bounded workspace; this is an intentional honest
+resource limit, not evidence that the old low-RAM capability is retained.
+
+**Final checks:** fmt, locked workspace/all-target check, all-target/all-feature
+clippy `-D warnings`, locked full all-feature suite with `MARIN_REQUIRE_CUDA=1`
+(**594 passed**), 425-line and unsafe checks all pass. Final source hashes,
+commands, return codes and raw samples are in `final-build.json`,
+`final-manifest.json`, `checks/`, `final-timing.json`, `ram/`,
+`default-context/` and `final-acceptance.json` under
+`bench-results/cpu-stage4-fix/`.
+
+| Component / gate | Final decision | Evidence / remaining limit |
+|---|---|---|
+| Growable FP32 KV independently | **GO** | Accepted Stage A's original 24-case speed/RAM matrix remains intact; KV implementation is unchanged in this investigation. Final growth/reuse/truncation/refusal tests, exact boundary numerics and strict HF pass |
+| Full-prefill workspace budgeting / existing RAM guards | **Focused correctness and safety PASS; performance NO-GO** | Full input/context memory is budgeted; pressure rollback and eight constrained profiles pass. Two targeted A/B performance misses are retained above; no blanket performance acceptance |
+| Bounded prefill | **NO-GO / REMOVED** | Original +77.38% TTFT failure remains; unchanged new run did not reproduce it, but lost 5.34% decode. Allocation, packing and alignment controls do not establish its cause. No bounded-prefill gate pass is claimed |
+| Final fallback short / 2k speed | **Two focused failures** | +10.4772% TTFT at 1.7B INT8 / 8 threads / 127; -3.2801% decode at 0.6B INT8 / 8 threads / 2047 versus A. Other eight cells pass the corresponding limits; no retries or sample exclusion |
+| Final full 24-case timing matrix / populated 8k one-thread speed | **UNVERIFIED** | Not rerun after fallback under the user's convergence instruction. Archived A/B and unchanged-binary reproduction remain separate historical measurements |
+| Final complete 4/8 GiB and OS-reserve RAM matrix / controlled cold and warm startup | **UNVERIFIED** | Focused profiles do not replace the original 64 profiles or 48 controlled startup samples; the full-prefill workspace changed, so those old B results cannot be transferred |
+| BF16 default / INT8 opt-in / scalar / threads / CUDA | **PASS** | Defaults unchanged, eight HF runs and 594-test CUDA-required suite pass |
+| FP16 / INT4 / CPU snapshots / new stages | **NOT IMPLEMENTED** | Outside this authorized fallback; CPU snapshots remain unsupported |
+
+**Decision: growable FP32 KV GO; bounded prefill NO-GO and removed;
+complete Stage 4 NO-GO.** The fallback is finished with full-workspace
+admission and existing RAM safety intact. Remaining narrow timing failures
+and unverified cells are explicit; no claimed root-cause fix for +77% and
+no claim that every original Stage 4 gate passes. Investigation stops here
+at the user's request. BF16/FP32 defaults, INT8 opt-in, prior uncommitted work,
+HEAD and all three stash identities are preserved. No commit or push.
+
+
+**Timing environment limit:** focused A/B timing processes were not swap-disabled.
+The final controller's systemd completion log reports 10.1M peak swap over
+its entire lifetime; individual focused timing processes were not sampled
+for swap, so that number cannot be attributed to either narrow miss. Normal
+desktop background work was not stopped. These are additional reasons not to
+infer a proven causal regression or broad speed acceptance from close results.
+The separate constrained RAM units explicitly disable swap, and both their
+benchmark and exact-output companions have zero OOM/kill events and zero swap.
+The 4 GiB 1.7B INT8 2k case reaches the cgroup limit including filesystem cache;
+limit/reclaim events are preserved in its raw record and are not hidden as
+unused headroom. `final-service.log` retains the controller completion accounting.
+All Marin Stage 4 benchmark/validation services are now inactive; no further
+benchmark or background investigation is scheduled.

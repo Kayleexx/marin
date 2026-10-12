@@ -140,6 +140,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inference_keeps_the_original_codes_and_scales() {
+        let scheme = QuantScheme::new(QuantBits::Int8, 32).unwrap();
+        let bits = vec![(1.25_f32.to_bits() >> 16) as u16; 7 * 96];
+        let q = Q8::new(7, 96, &bits, scheme).unwrap();
+        let original = (q.codes.clone(), q.scales.clone());
+        let pointers = (q.codes.as_ptr(), q.scales.as_ptr());
+        assert_eq!(q.codes.len() + q.scales.len() * 4, 7 * 96 + 7 * 3 * 4);
+        for tokens in [1, 3, 65, 1] {
+            let mut out = vec![0.0; tokens * 7];
+            q.matmul(&vec![1.0; tokens * 96], &mut out).unwrap();
+            assert!(out.iter().all(|v| (*v - 120.0).abs() < 1e-4));
+            assert_eq!((&q.codes, &q.scales), (&original.0, &original.1));
+            assert_eq!((q.codes.as_ptr(), q.scales.as_ptr()), pointers);
+        }
+    }
+
+    #[test]
     fn prefill_is_bit_identical_across_thread_counts() {
         let scheme = QuantScheme::new(QuantBits::Int8, 32).unwrap();
         let bits: Vec<_> = (0..13 * 96)

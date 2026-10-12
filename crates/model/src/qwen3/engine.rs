@@ -232,11 +232,18 @@ fn wrong_backend() -> ModelError {
 }
 
 impl EngineCache {
-    /// Pages and bytes of KV memory held; `None` on the CPU, which reserves the whole window up front.
+    /// Physical GPU pages and bytes; CPU storage has no page table.
     pub fn kv_held(&self) -> Option<(usize, usize)> {
         match self {
             Self::Cpu(_) => None,
             Self::Cuda(c) => Some(c.kv_held()),
+        }
+    }
+
+    pub fn kv_bytes_held(&self) -> usize {
+        match self {
+            Self::Cpu(c) => c.bytes_held(),
+            Self::Cuda(c) => c.kv_held().1,
         }
     }
 }

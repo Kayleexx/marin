@@ -234,9 +234,7 @@ pub fn run(
             kv_held_pages: cache
                 .kv_held()
                 .and_then(|(pages, _)| u64::try_from(pages).ok()),
-            kv_held_bytes: cache
-                .kv_held()
-                .and_then(|(_, bytes)| u64::try_from(bytes).ok()),
+            kv_held_bytes: u64::try_from(cache.kv_bytes_held()).ok(),
             rss_growth_bytes: rss_growth,
             disk_read_bytes: disk_read,
             gpu_upload,

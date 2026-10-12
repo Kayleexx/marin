@@ -88,3 +88,81 @@ fn feeding_more_tokens_than_the_cache_holds_is_an_error_not_corruption() {
     assert!(model.forward(&all, &mut cache).is_err());
     assert_eq!(cache.used(), 0, "a failed forward commits nothing");
 }
+
+#[test]
+fn cpu_growth_and_rollback_match_a_fresh_pass_with_both_weight_formats() {
+    let (_, dir) = load().unwrap();
+    for quant in [
+        None,
+        Some(model::QuantScheme {
+            bits: model::QuantBits::Int8,
+            group: 32,
+        }),
+    ] {
+        let model = Qwen3::load_quantized(&dir, quant, |_, _| {}).unwrap();
+        let mut cache = model.new_cache(512).unwrap();
+        let tokens = vec![3; 257];
+        model.forward(&tokens[..255], &mut cache).unwrap();
+        let before = cache.bytes_held();
+        let grown = model.forward(&tokens[255..], &mut cache).unwrap();
+        assert!(cache.bytes_held() > before);
+        let (fresh, _) = last_logits(&model, &[&tokens], 512).unwrap();
+        close(&grown, &fresh);
+        cache.truncate(255).unwrap();
+        assert!(model.forward(&[u32::MAX], &mut cache).is_err());
+        assert_eq!(cache.used(), 255);
+        let resumed = model.forward(&[4], &mut cache).unwrap();
+        let mut expected = vec![3; 255];
+        expected.push(4);
+        close(&resumed, &last_logits(&model, &[&expected], 512).unwrap().0);
+        cache.clear();
+        close(&model.forward(&expected, &mut cache).unwrap(), &resumed);
+    }
+}
+
+#[test]
+fn whole_prefill_observes_once_and_preserves_the_prefix_on_failure() {
+    let (_, dir) = load().unwrap();
+    for quant in [
+        None,
+        Some(model::QuantScheme::new(model::QuantBits::Int8, 32).unwrap()),
+    ] {
+        let model = Qwen3::load_quantized(&dir, quant, |_, _| {}).unwrap();
+        let mut cache = model.new_cache(1024).unwrap();
+        model.forward(&[3; 5], &mut cache).unwrap();
+        let prefix: Vec<_> = (0..model.config().layers)
+            .map(|layer| {
+                let (keys, values) = cache.read(layer, 5).unwrap();
+                (keys.to_vec(), values.to_vec())
+            })
+            .collect();
+        let mut bad = vec![3; 513];
+        *bad.last_mut().unwrap() = u32::MAX;
+        assert!(model.forward(&bad, &mut cache).is_err());
+        assert_eq!(cache.len(), 5);
+        for (layer, (keys, values)) in prefix.iter().enumerate() {
+            assert_eq!(
+                cache.read(layer, 5).unwrap(),
+                (keys.as_slice(), values.as_slice())
+            );
+        }
+        let input = vec![3; 513];
+        let mut observed = Vec::new();
+        let mut stages = model::StageTimes::traced();
+        let result = model
+            .forward_with(
+                &input,
+                &mut cache,
+                Some(&mut |index, _| observed.push(index)),
+                &mut model::Probe::on(&mut stages),
+            )
+            .unwrap();
+        assert_eq!(observed, (0..=model.config().layers).collect::<Vec<_>>());
+        assert_eq!(stages.calls(model::Stage::Embedding), 1);
+        assert_eq!(cache.len(), 518);
+        close(
+            &result,
+            &last_logits(&model, &[&vec![3; 518]], 1024).unwrap().0,
+        );
+    }
+}

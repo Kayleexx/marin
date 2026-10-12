@@ -30,4 +30,8 @@ pub enum ModelError {
     Cuda(#[from] CudaError),
     #[error("the GPU has {} MB free but this needs about {} MB", free / 1_000_000, needed / 1_000_000)]
     GpuMemory { needed: u64, free: u64 },
+    #[error("cannot read CPU memory limits: {0}")]
+    CpuMemoryInfo(std::io::Error),
+    #[error("CPU needs another {} MB but only {} MB is available", needed / 1_000_000, available / 1_000_000)]
+    CpuMemory { needed: u64, available: u64 },
 }

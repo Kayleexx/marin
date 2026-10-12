@@ -1,0 +1,21 @@
+{
+  "head": "9d41f88c87d5e5d0510a2800e02ebe5be18f2c2b",
+  "marin_binary_sha256": "eff4b9b9346468ae93446b14313581fd85e9fb031d3df1b6b9372e64f85b7477",
+  "python": "/home/mitali/miracles/ralph/.venv/bin/python",
+  "torch": "2.13.0+cu130",
+  "transformers": "5.17.0",
+  "generator": "scripts/gen_reference.py reference /home/mitali/models/Qwen3-0.6B tests/reference/qwen3-0.6b.json --steps 16",
+  "generator_sha256": "d88ce295f9b1429daa6d7006907aff8eb43ea40a0a55f9feefb2995094de55a2",
+  "reference_sha256": "abaec950dd87a62c3d10ff794ccc2c13723816e0939502bb2fec87e3f72db1a2",
+  "OMP_NUM_THREADS": "8",
+  "MKL_NUM_THREADS": "8",
+  "HF_HUB_OFFLINE": "1",
+  "TRANSFORMERS_OFFLINE": "1",
+  "weights": {
+    "model.safetensors": {
+      "bytes": 1503300328,
+      "sha256": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b"
+    }
+  },
+  "config_sha256": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd"
+}
