@@ -4,6 +4,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum LoaderError {
+    #[error("invalid packed INT8 artifact: {0}")]
+    Packed(String),
     #[error("{0} is not a directory")]
     NotADirectory(PathBuf),
     #[error("{dir} is missing: {}", files.join(", "))]

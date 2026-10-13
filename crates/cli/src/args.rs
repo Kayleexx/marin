@@ -32,13 +32,20 @@ pub struct Cli {
     /// Never use colors (also honors NO_COLOR)
     #[arg(long, global = true)]
     pub no_color: bool,
-    /// CPU threads for prompt passes (default: one per physical core; 1 runs on a single thread)
+    /// CPU threads for prompt passes (default: physical cores capped by affinity/quota; explicit N overrides this)
     #[arg(long, global = true, value_name = "N")]
     pub threads: Option<usize>,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Convert original BF16 weights once into a standalone packed INT8 model folder
+    ExportInt8 {
+        model_dir: PathBuf,
+        output: PathBuf,
+        #[arg(long, default_value_t = model::DEFAULT_GROUP)]
+        quant_group: usize,
+    },
     /// Explain a model folder in plain words and estimate its memory use
     Inspect {
         /// Folder with config.json, tokenizer.json and model.safetensors

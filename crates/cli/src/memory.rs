@@ -1,5 +1,3 @@
-use std::fs;
-
 use kv::KvCache;
 use loader::ModelDir;
 use model::{Precision, Qwen3Config};
@@ -9,6 +7,9 @@ use crate::CliError;
 #[derive(Debug, Clone, Copy)]
 pub struct Footprint {
     pub weights: u64,
+    pub parameters: Option<u64>,
+    pub recurrent: u64,
+    pub quant: Option<tensor::QuantScheme>,
     /// The whole `--ctx` window.
     pub kv: u64,
     /// The whole window in the GPU cache's format.
@@ -20,10 +21,7 @@ pub struct Footprint {
 }
 
 pub fn available_bytes() -> Option<u64> {
-    let text = fs::read_to_string("/proc/meminfo").ok()?;
-    let line = text.lines().find(|l| l.starts_with("MemAvailable:"))?;
-    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
-    kib.checked_mul(1024)
+    metrics::cpu_available_bytes().ok().flatten()
 }
 
 pub const DEFAULT_CTX: usize = 2048;
@@ -52,6 +50,50 @@ pub fn footprint(
             max: cfg.max_positions,
         });
     }
+    if model::qwen35::is_qwen35(&dir.config_json) {
+        if precision.weights.is_some() {
+            return Err(CliError::BadOption(
+                "Qwen3.5 quantization is unsupported".into(),
+            ));
+        }
+        let c = model::qwen35::TextConfig::parse(
+            &dir.config_json,
+            dir.generation_config_json.as_deref(),
+        )?;
+        let weights = model::qwen35::weight_bytes(&dir.weights)?;
+        let kv = c.state_bytes(ctx)? as u64;
+        let needed = weights
+            .checked_add(kv.saturating_mul(2))
+            .and_then(|n| n.checked_add(c.workspace_bytes(ctx, ctx).ok()? as u64))
+            .and_then(|n| n.checked_add(model::CPU_SLACK_BYTES))
+            .ok_or_else(|| CliError::BadOption("hybrid memory overflow".into()))?;
+        return Ok(Footprint {
+            weights,
+            parameters: dir
+                .weights
+                .names()
+                .filter(|n| n.starts_with("model.language_model."))
+                .try_fold(0_u64, |count, name| {
+                    let i = dir.weights.info(name)?;
+                    let elements = i
+                        .shape
+                        .iter()
+                        .try_fold(1_u64, |n, x| n.checked_mul(*x as u64))?;
+                    count.checked_add(elements)
+                }),
+            recurrent: c.state_bytes(0)? as u64,
+            quant: None,
+            kv,
+            kv_window: kv,
+            kv_startup: c.state_bytes(0)? as u64,
+            needed: needed.max(
+                model::qwen35::load_bytes(&dir.weights, &c)?
+                    .checked_add(model::CPU_SLACK_BYTES)
+                    .ok_or_else(|| CliError::BadOption("load memory overflow".into()))?,
+            ),
+            available: metrics::cpu_available_bytes()?,
+        });
+    }
     let kv = KvCache::bytes_for(cfg.layers, cfg.kv_heads, cfg.head_dim, ctx)
         .and_then(|b| u64::try_from(b).ok())
         .ok_or_else(|| CliError::BadOption(format!("--ctx {ctx} is too large")))?;
@@ -60,13 +102,17 @@ pub fn footprint(
     let kv_window = model::kv_window_bytes(cfg, ctx, precision.kv).unwrap_or(kv);
     Ok(Footprint {
         weights,
+        parameters: cfg.parameter_count(),
+        recurrent: 0,
+        quant: precision.weights,
         kv,
         kv_window,
         kv_startup,
         needed: weights
             .saturating_add(kv)
-            .saturating_add(model::CPU_SLACK_BYTES),
-        available: available_bytes(),
+            .saturating_add(model::CPU_SLACK_BYTES)
+            .saturating_add(model::cpu_workspace_bytes(cfg, ctx)?),
+        available: metrics::cpu_available_bytes()?,
     })
 }
 
@@ -151,6 +197,21 @@ mod tests {
         let cfg =
             Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref()).unwrap();
         let mut usage = footprint(&dir, &cfg, 1024, Precision::default()).unwrap();
+        assert_eq!(
+            usage.needed,
+            usage.weights
+                + usage.kv
+                + model::CPU_SLACK_BYTES
+                + model::cpu_workspace_bytes(&cfg, 1024).unwrap()
+        );
+        let mut limited = usage;
+        limited.available = Some(512 << 20);
+        limited.weights = 1024 << 20;
+        limited.needed = limited.weights
+            + limited.kv
+            + model::CPU_SLACK_BYTES
+            + model::cpu_workspace_bytes(&cfg, 1024).unwrap();
+        assert!(limited.ensure_fits().is_err());
         assert_eq!(usage.fit_cpu(&cfg, 1024, false).unwrap(), 1024);
         assert_eq!(usage.kv_startup, 0);
         assert_eq!(

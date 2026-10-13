@@ -44,6 +44,11 @@ impl Store for GpuStore<'_> {
         Ok(Weight::Quant(self.gpu.upload_quantized(&quantized)?))
     }
 
+    fn packed(&mut self, quant: tensor::Quantized) -> Result<Weight, ModelError> {
+        quant.validate_int8()?;
+        Ok(Weight::Quant(self.gpu.upload_quantized(&quant)?))
+    }
+
     fn vector(&mut self, values: Vec<f32>) -> Result<Buffer, ModelError> {
         Ok(self.gpu.upload(&values)?)
     }
@@ -133,6 +138,7 @@ impl Qwen3Gpu {
         progress: impl FnMut(u64, u64),
     ) -> Result<Self, ModelError> {
         let config = Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref())?;
+        super::weight_bytes::loaded_bytes(&dir.weights, &config, quant)?;
         let mut store = GpuStore { gpu: &gpu, quant };
         let weights = Qwen3Weights::load(&dir.weights, &config, &mut store, progress)?;
         gpu.synchronize()?;

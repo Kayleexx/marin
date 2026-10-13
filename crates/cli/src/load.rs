@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use loader::ModelDir;
-use model::{Backend, BackendChoice, Engine, KvFormat, Precision, QuantScheme, Qwen3Config};
+use model::{Backend, BackendChoice, Engine, KvFormat, Precision, QuantScheme, Selected};
 
 use crate::CliError;
 use crate::memory::{Footprint, footprint, resolve_ctx};
@@ -154,24 +154,44 @@ fn open(request: Request<'_>) -> Result<Loaded, CliError> {
         }
     }
     let dir = ModelDir::open(path)?;
-    let config = Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref())?;
+    let config = Engine::parse_config(&dir)?;
+    let hybrid = model::qwen35::is_qwen35(&dir.config_json);
+    if hybrid && !kv_follows_backend && precision.kv != KvFormat::F32 {
+        return Err(CliError::BadOption("Qwen3.5 requires FP32 state".into()));
+    }
     let adaptive_ctx = ctx.is_none();
     let mut ctx = resolve_ctx(&config, ctx, default_ctx)?;
     let mut footprint = footprint(&dir, &config, ctx, precision)?;
-    let selected = Backend::select(
-        backend,
-        footprint.weights.saturating_add(footprint.kv_startup),
-        footprint
-            .weights
-            .saturating_add(footprint.kv_window.max(footprint.kv_startup)),
-    )?;
+    let selected = if hybrid {
+        if backend == BackendChoice::Cuda || precision.weights.is_some() {
+            return Err(CliError::BadOption(
+                "Qwen3.5 requires CPU BF16 weights with FP32 math".into(),
+            ));
+        }
+        Selected {
+            backend: Backend::Cpu,
+            note: Some("Qwen3.5 text inference uses the CPU".into()),
+        }
+    } else {
+        Backend::select(
+            backend,
+            footprint.weights.saturating_add(footprint.kv_startup),
+            footprint
+                .weights
+                .saturating_add(footprint.kv_window.max(footprint.kv_startup)),
+        )?
+    };
     let mut precision = precision;
     if matches!(selected.backend, Backend::Cpu) {
         if kv_follows_backend {
             precision.kv = KvFormat::F32;
         }
         let old_ctx = ctx;
-        ctx = footprint.fit_cpu(&config, ctx, adaptive_ctx)?;
+        if hybrid {
+            footprint.ensure_fits()?;
+        } else {
+            ctx = footprint.fit_cpu(&config, ctx, adaptive_ctx)?;
+        }
         if chrome && ctx != old_ctx {
             eprintln!(
                 "{} CPU context reduced to {ctx} tokens to fit available memory",

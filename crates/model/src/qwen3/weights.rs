@@ -31,6 +31,8 @@ pub(crate) trait Store {
     ) -> Result<Self::Matrix, ModelError> {
         self.matrix(rows, cols, bits)
     }
+    fn packed(&mut self, quant: tensor::Quantized) -> Result<Self::Matrix, ModelError>;
+
     fn vector(&mut self, values: Vec<f32>) -> Result<Self::Vector, ModelError>;
 }
 
@@ -53,6 +55,10 @@ impl Store for CpuStore {
             Some(scheme) => Matrix::quantized(rows, cols, bits, scheme)?,
             None => Matrix::new(rows, cols, bits)?,
         })
+    }
+
+    fn packed(&mut self, quant: tensor::Quantized) -> Result<Matrix, ModelError> {
+        Ok(Matrix::from_int8(quant)?)
     }
 
     fn vector(&mut self, values: Vec<f32>) -> Result<Vec<f32>, ModelError> {
@@ -82,9 +88,9 @@ pub(crate) struct Qwen3Weights<M, V> {
     pub lm_head: Option<M>,
 }
 
-struct Expected {
-    name: String,
-    shape: Vec<usize>,
+pub(crate) struct Expected {
+    pub name: String,
+    pub shape: Vec<usize>,
 }
 
 fn expected(name: String, shape: &[usize]) -> Expected {
@@ -94,7 +100,7 @@ fn expected(name: String, shape: &[usize]) -> Expected {
     }
 }
 
-fn expected_tensors(cfg: &Qwen3Config) -> Result<Vec<Expected>, ModelError> {
+pub(crate) fn expected_tensors(cfg: &Qwen3Config) -> Result<Vec<Expected>, ModelError> {
     let (h, i, hd) = (cfg.hidden_size, cfg.intermediate_size, cfg.head_dim);
     let (q, kv) = (cfg.q_dim()?, cfg.kv_dim()?);
     let mut all = vec![
@@ -124,7 +130,7 @@ fn expected_tensors(cfg: &Qwen3Config) -> Result<Vec<Expected>, ModelError> {
 }
 
 /// Lists every missing, mis-shaped or wrongly typed tensor at once, plus the bytes to be read.
-fn validate(weights: &Weights, expected: &[Expected]) -> Result<u64, ModelError> {
+pub(crate) fn validate(weights: &Weights, expected: &[Expected]) -> Result<u64, ModelError> {
     let mut problems = Vec::new();
     let mut bytes = 0_u64;
     for want in expected {
@@ -132,19 +138,49 @@ fn validate(weights: &Weights, expected: &[Expected]) -> Result<u64, ModelError>
             problems.push(format!("missing tensor {}", want.name));
             continue;
         };
+        let dtype = if weights.packed_group().is_some() {
+            if want.shape.len() == 2 {
+                Dtype::I8
+            } else {
+                Dtype::F32
+            }
+        } else {
+            Dtype::Bf16
+        };
         if info.shape != want.shape {
             problems.push(format!(
                 "tensor {} has shape {:?} but config.json implies {:?}",
                 want.name, info.shape, want.shape
             ));
-        } else if info.dtype != Dtype::Bf16 {
+        } else if info.dtype != dtype {
             problems.push(format!(
-                "tensor {} is {} but only BF16 is supported",
+                "tensor {} is {} but expected {dtype:?}",
                 want.name,
                 info.dtype_name()
             ));
         }
         bytes = bytes.saturating_add(info.byte_len());
+    }
+    if let Some(group) = weights.packed_group() {
+        let mut count = expected.len();
+        for want in expected {
+            if let [rows, cols] = want.shape.as_slice() {
+                count = count.saturating_add(1);
+                let name = format!("{}.scales", want.name);
+                let valid = cols.checked_rem(group) == Some(0)
+                    && weights.info(&name).is_some_and(|i| {
+                        i.dtype == Dtype::F32
+                            && i.shape == [*rows, cols.checked_div(group).unwrap_or(0)]
+                    });
+                if !valid {
+                    problems.push(format!("invalid scales/group: {name}"));
+                }
+                bytes = bytes.saturating_add(weights.info(&name).map_or(0, |i| i.byte_len()));
+            }
+        }
+        if weights.names().count() != count {
+            problems.push("unexpected packed tensors".into());
+        }
     }
     if problems.is_empty() {
         return Ok(bytes);
@@ -178,6 +214,25 @@ impl<S: Store, F: FnMut(u64, u64)> Reader<'_, S, F> {
     }
 
     fn matrix(&mut self, name: &str, rows: usize, cols: usize) -> Result<S::Matrix, ModelError> {
+        if let Some(group) = self.weights.packed_group() {
+            let scales_name = format!("{name}.scales");
+            let bytes = self
+                .weights
+                .info(name)
+                .map_or(0, |i| i.byte_len())
+                .saturating_add(self.weights.info(&scales_name).map_or(0, |i| i.byte_len()));
+            self.store.before_read(bytes)?;
+            let quant = tensor::Quantized {
+                rows,
+                cols,
+                scheme: QuantScheme::new(tensor::QuantBits::Int8, group)?,
+                codes: self.weights.read_i8(name)?,
+                scales: self.weights.read_f32(&scales_name)?,
+            };
+            self.loaded = self.loaded.saturating_add(bytes);
+            (self.progress)(self.loaded, self.total);
+            return self.store.packed(quant);
+        }
         let bits = self.read(name)?;
         self.store.matrix(rows, cols, bits)
     }
@@ -188,64 +243,26 @@ impl<S: Store, F: FnMut(u64, u64)> Reader<'_, S, F> {
         rows: usize,
         cols: usize,
     ) -> Result<S::Matrix, ModelError> {
+        if self.weights.packed_group().is_some() {
+            return self.matrix(name, rows, cols);
+        }
         let bits = self.read(name)?;
         self.store.projection(rows, cols, bits)
     }
 
     fn vector(&mut self, name: &str) -> Result<S::Vector, ModelError> {
+        if self.weights.packed_group().is_some() {
+            let bytes = self.weights.info(name).map_or(0, |i| i.byte_len());
+            self.store.before_read(bytes)?;
+            let values = self.weights.read_f32(name)?;
+            self.loaded = self.loaded.saturating_add(bytes);
+            (self.progress)(self.loaded, self.total);
+            return self.store.vector(values);
+        }
         let bits = self.read(name)?;
         self.store
             .vector(bits.into_iter().map(bf16_to_f32).collect())
     }
-}
-
-/// Bytes of the tensors this model actually loads (shards may hold extras such as an unused `lm_head`). With a
-/// quantization scheme the projection matrices count as they are stored once quantized.
-pub(crate) fn loaded_bytes(
-    weights: &Weights,
-    cfg: &Qwen3Config,
-    quant: Option<QuantScheme>,
-) -> Result<u64, ModelError> {
-    let read = validate(weights, &expected_tensors(cfg)?)?;
-    let Some(scheme) = quant else {
-        return Ok(read);
-    };
-    let (h, i) = (cfg.hidden_size, cfg.intermediate_size);
-    let (q, kv) = (cfg.q_dim()?, cfg.kv_dim()?);
-    let (mut original, mut quantized) = (0_u64, 0_u64);
-    for (rows, cols) in [(q, h), (kv, h), (kv, h), (h, q), (i, h), (i, h), (h, i)] {
-        if cols.checked_rem(scheme.group) != Some(0) {
-            return Err(ModelError::Unsupported(format!(
-                "a projection matrix has {cols} columns, which is not a multiple of the quantization group size {}",
-                scheme.group
-            )));
-        }
-        let (Some(bf16), Some(packed)) = (
-            rows.checked_mul(cols)
-                .and_then(|n| n.checked_mul(2))
-                .and_then(|n| u64::try_from(n).ok()),
-            scheme.matrix_bytes(rows, cols),
-        ) else {
-            return Err(ModelError::InvalidConfig("weight size overflows".into()));
-        };
-        original = original.saturating_add(bf16);
-        quantized = quantized.saturating_add(packed);
-    }
-    let layers = u64::try_from(cfg.layers).unwrap_or(u64::MAX);
-    let mut saved = original.saturating_sub(quantized).saturating_mul(layers);
-    let table = scheme.table();
-    let tables = if cfg.tie_embeddings { 1 } else { 2 };
-    let (Some(bf16), Some(packed)) = (
-        cfg.vocab_size
-            .checked_mul(h)
-            .and_then(|n| n.checked_mul(2))
-            .and_then(|n| u64::try_from(n).ok()),
-        table.matrix_bytes(cfg.vocab_size, h),
-    ) else {
-        return Err(ModelError::InvalidConfig("weight size overflows".into()));
-    };
-    saved = saved.saturating_add(bf16.saturating_sub(packed).saturating_mul(tables));
-    Ok(read.saturating_sub(saved))
 }
 
 impl<M, V> Qwen3Weights<M, V> {

@@ -93,15 +93,28 @@ impl Backend {
 /// A loaded model on whichever backend was selected.
 pub enum Engine {
     Cpu(Box<Qwen3>),
+    Qwen35(Box<crate::qwen35::Qwen35>),
     Cuda(Box<Qwen3Gpu>),
 }
 
 pub enum EngineCache {
     Cpu(KvCache),
+    Qwen35(Box<crate::qwen35::Cache>),
     Cuda(Box<GpuCache>),
 }
 
 impl Engine {
+    pub fn parse_config(dir: &ModelDir) -> Result<Qwen3Config, ModelError> {
+        if crate::qwen35::is_qwen35(&dir.config_json) {
+            Ok(crate::qwen35::TextConfig::parse(
+                &dir.config_json,
+                dir.generation_config_json.as_deref(),
+            )?
+            .summary())
+        } else {
+            Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref())
+        }
+    }
     /// Loads the weights onto `backend`, quantizing the layer projections with `quant` if given (INT8 on CPU).
     pub fn load(
         dir: &ModelDir,
@@ -109,6 +122,16 @@ impl Engine {
         quant: Option<QuantScheme>,
         progress: impl FnMut(u64, u64),
     ) -> Result<Self, ModelError> {
+        if crate::qwen35::is_qwen35(&dir.config_json) {
+            if quant.is_some() || !matches!(backend, Backend::Cpu) {
+                return Err(ModelError::Unsupported(
+                    "Qwen3.5 supports CPU BF16 weights / FP32 math only".into(),
+                ));
+            }
+            return Ok(Self::Qwen35(Box::new(crate::qwen35::Qwen35::load(
+                dir, progress,
+            )?)));
+        }
         Ok(match backend {
             Backend::Cpu => Self::Cpu(Box::new(Qwen3::load_quantized(dir, quant, progress)?)),
             Backend::Cuda(gpu) => Self::Cuda(Box::new(Qwen3Gpu::load(dir, *gpu, quant, progress)?)),
@@ -119,8 +142,8 @@ impl Engine {
     pub fn with_kv_format(self, format: KvFormat) -> Result<Self, ModelError> {
         match self {
             Self::Cuda(m) => Ok(Self::Cuda(Box::new(m.with_kv_format(format)))),
-            Self::Cpu(_) if format == KvFormat::default() => Ok(self),
-            Self::Cpu(_) => Err(ModelError::Unsupported(format!(
+            Self::Cpu(_) | Self::Qwen35(_) if format == KvFormat::default() => Ok(self),
+            Self::Cpu(_) | Self::Qwen35(_) => Err(ModelError::Unsupported(format!(
                 "a {} KV cache needs the GPU backend",
                 format.label()
             ))),
@@ -129,7 +152,7 @@ impl Engine {
 
     pub fn kv_format(&self) -> KvFormat {
         match self {
-            Self::Cpu(_) => KvFormat::default(),
+            Self::Cpu(_) | Self::Qwen35(_) => KvFormat::default(),
             Self::Cuda(m) => m.kv_format(),
         }
     }
@@ -138,6 +161,7 @@ impl Engine {
     pub fn quantization(&self) -> Option<QuantScheme> {
         match self {
             Self::Cpu(m) => m.quantization(),
+            Self::Qwen35(_) => None,
             Self::Cuda(m) => m.quantization(),
         }
     }
@@ -145,6 +169,7 @@ impl Engine {
     pub fn config(&self) -> &Qwen3Config {
         match self {
             Self::Cpu(m) => m.config(),
+            Self::Qwen35(m) => m.config(),
             Self::Cuda(m) => m.config(),
         }
     }
@@ -152,7 +177,7 @@ impl Engine {
     /// Short description of where the math runs, e.g. `cpu` or `cuda (NVIDIA GeForce ...)`.
     pub fn backend_name(&self) -> String {
         match self {
-            Self::Cpu(_) => "cpu".to_string(),
+            Self::Cpu(_) | Self::Qwen35(_) => "cpu".to_string(),
             Self::Cuda(m) => match m.gpu().info() {
                 Ok(info) => format!("cuda ({})", info.name),
                 Err(_) => "cuda".to_string(),
@@ -163,6 +188,7 @@ impl Engine {
     pub fn new_cache(&self, capacity: usize) -> Result<EngineCache, ModelError> {
         Ok(match self {
             Self::Cpu(m) => EngineCache::Cpu(m.new_cache(capacity)?),
+            Self::Qwen35(m) => EngineCache::Qwen35(Box::new(m.new_cache(capacity)?)),
             Self::Cuda(m) => EngineCache::Cuda(Box::new(m.new_cache(capacity)?)),
         })
     }
@@ -170,7 +196,7 @@ impl Engine {
     /// What the GPU path has launched, allocated and copied so far; `None` on the CPU.
     pub fn traffic(&self) -> Option<Traffic> {
         match self {
-            Self::Cpu(_) => None,
+            Self::Cpu(_) | Self::Qwen35(_) => None,
             Self::Cuda(m) => Some(m.gpu().traffic()),
         }
     }
@@ -178,7 +204,7 @@ impl Engine {
     /// The GPU's name, compute capability and memory; `None` on the CPU or when the driver cannot say.
     pub fn gpu_info(&self) -> Option<GpuInfo> {
         match self {
-            Self::Cpu(_) => None,
+            Self::Cpu(_) | Self::Qwen35(_) => None,
             Self::Cuda(m) => m.gpu().info().ok(),
         }
     }
@@ -186,7 +212,7 @@ impl Engine {
     /// Free and total GPU memory in bytes; `None` on the CPU.
     pub fn gpu_memory(&self) -> Option<(u64, u64)> {
         match self {
-            Self::Cpu(_) => None,
+            Self::Cpu(_) | Self::Qwen35(_) => None,
             Self::Cuda(m) => {
                 let info = m.gpu().info().ok()?;
                 Some((
@@ -209,6 +235,9 @@ impl Engine {
                 m.forward_with(tokens, kv, None, &mut Probe::on(times))
             }
             (Self::Cuda(m), EngineCache::Cuda(kv)) => m.forward_with(tokens, kv, None, Some(times)),
+            (Self::Qwen35(_), _) => Err(ModelError::Unsupported(
+                "Qwen3.5 per-stage profiling is not supported yet".into(),
+            )),
             _ => Err(wrong_backend()),
         }
     }
@@ -222,6 +251,7 @@ impl Engine {
         match (self, cache) {
             (Self::Cpu(m), EngineCache::Cpu(kv)) => m.forward_observed(tokens, kv, observe),
             (Self::Cuda(m), EngineCache::Cuda(kv)) => m.forward_observed(tokens, kv, observe),
+            (Self::Qwen35(m), EngineCache::Qwen35(kv)) => m.forward_observed(tokens, kv, observe),
             _ => Err(wrong_backend()),
         }
     }
@@ -235,7 +265,7 @@ impl EngineCache {
     /// Physical GPU pages and bytes; CPU storage has no page table.
     pub fn kv_held(&self) -> Option<(usize, usize)> {
         match self {
-            Self::Cpu(_) => None,
+            Self::Cpu(_) | Self::Qwen35(_) => None,
             Self::Cuda(c) => Some(c.kv_held()),
         }
     }
@@ -243,6 +273,7 @@ impl EngineCache {
     pub fn kv_bytes_held(&self) -> usize {
         match self {
             Self::Cpu(c) => c.bytes_held(),
+            Self::Qwen35(c) => c.bytes_held(),
             Self::Cuda(c) => c.kv_held().1,
         }
     }
@@ -252,6 +283,7 @@ impl SequenceCache for EngineCache {
     fn used(&self) -> usize {
         match self {
             Self::Cpu(c) => SequenceCache::used(c),
+            Self::Qwen35(c) => c.used(),
             Self::Cuda(c) => c.used(),
         }
     }
@@ -259,6 +291,7 @@ impl SequenceCache for EngineCache {
     fn capacity(&self) -> usize {
         match self {
             Self::Cpu(c) => SequenceCache::capacity(c),
+            Self::Qwen35(c) => c.capacity(),
             Self::Cuda(c) => c.capacity(),
         }
     }
@@ -266,6 +299,7 @@ impl SequenceCache for EngineCache {
     fn clear(&mut self) {
         match self {
             Self::Cpu(c) => SequenceCache::clear(c),
+            Self::Qwen35(c) => c.clear(),
             Self::Cuda(c) => c.clear(),
         }
     }
@@ -273,6 +307,7 @@ impl SequenceCache for EngineCache {
     fn truncate(&mut self, len: usize) -> Result<(), RollbackError> {
         match self {
             Self::Cpu(c) => SequenceCache::truncate(c, len),
+            Self::Qwen35(c) => c.truncate(len),
             Self::Cuda(c) => c.truncate(len),
         }
     }
@@ -289,7 +324,7 @@ impl CausalLm for Engine {
     /// The GPU checks up to 8 tokens in one pass; the CPU has no such pass, so it never guesses ahead.
     fn max_rows(&self) -> usize {
         match self {
-            Self::Cpu(_) => 0,
+            Self::Cpu(_) | Self::Qwen35(_) => 0,
             Self::Cuda(m) => m.max_rows(),
         }
     }
@@ -302,6 +337,7 @@ impl CausalLm for Engine {
         match (self, cache) {
             (Self::Cuda(m), EngineCache::Cuda(kv)) => m.forward_rows(tokens, kv),
             (Self::Cpu(m), EngineCache::Cpu(kv)) => m.forward_rows(tokens, kv),
+            (Self::Qwen35(m), EngineCache::Qwen35(kv)) => m.forward_rows(tokens, kv),
             _ => Err(wrong_backend()),
         }
     }

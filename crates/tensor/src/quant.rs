@@ -234,6 +234,27 @@ fn quantize_rows(
 }
 
 impl Quantized {
+    pub fn validate_int8(&self) -> Result<(), TensorError> {
+        QuantScheme::new(self.scheme.bits, self.scheme.group)?;
+        if self.scheme.bits != QuantBits::Int8
+            || self.rows == 0
+            || self.cols == 0
+            || self.cols.checked_rem(self.scheme.group) != Some(0)
+            || self.rows.checked_mul(self.cols) != Some(self.codes.len())
+            || self
+                .rows
+                .checked_mul(self.cols.checked_div(self.scheme.group).unwrap_or(0))
+                != Some(self.scales.len())
+            || self.codes.contains(&128)
+            || self.scales.iter().any(|v| !v.is_finite() || *v < 0.0)
+        {
+            return Err(TensorError::Quantization(
+                "invalid packed INT8 matrix".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// The values of row `row` as the GPU kernels read them: code times scale.
     pub fn dequantize_row(&self, row: usize, out: &mut [f32]) -> Result<(), TensorError> {
         if out.len() != self.cols || row >= self.rows {

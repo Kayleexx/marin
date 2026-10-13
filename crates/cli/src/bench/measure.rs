@@ -189,7 +189,7 @@ fn phase(
 }
 
 pub fn clock_name(engine: &Engine) -> &'static str {
-    if matches!(engine, Engine::Cpu(_)) {
+    if matches!(engine, Engine::Cpu(_) | Engine::Qwen35(_)) {
         "CPU wall clock"
     } else {
         "GPU clock"

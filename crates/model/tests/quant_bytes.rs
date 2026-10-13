@@ -66,7 +66,7 @@ fn expected(all: &[(String, Vec<usize>)], layers: QuantScheme) -> Option<u64> {
     let mut total = 0_u64;
     for (name, shape) in all {
         let bytes = match shape.as_slice() {
-            [len] => u64::try_from(len.checked_mul(2)?).ok()?,
+            [len] => u64::try_from(len.checked_mul(4)?).ok()?,
             [rows, cols] if name.ends_with("proj.weight") => layers.matrix_bytes(*rows, *cols)?,
             [rows, cols] => table.matrix_bytes(*rows, *cols)?,
             _ => return None,

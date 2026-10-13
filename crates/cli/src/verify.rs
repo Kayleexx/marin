@@ -28,6 +28,8 @@ struct Case {
     prompt: String,
     prompt_ids: Vec<u32>,
     layer_norms: Vec<f64>,
+    #[serde(default)]
+    layer_values: Vec<Vec<f32>>,
     steps: Vec<Step>,
 }
 
@@ -35,6 +37,8 @@ struct Case {
 struct Step {
     token: u32,
     top: Vec<(u32, f64)>,
+    #[serde(default)]
+    logits: Vec<f32>,
 }
 
 #[derive(Debug)]
@@ -43,6 +47,8 @@ pub struct CaseReport {
     pub steps: usize,
     pub max_logit_diff: f64,
     pub max_norm_diff: f64,
+    pub max_tensor_normalized: f64,
+    pub max_tensor_rms: f64,
     pub failure: Option<String>,
 }
 
@@ -81,6 +87,8 @@ fn check_case(model: &Engine, tokenizer: &Tokenizer, case: &Case) -> Result<Case
         steps: 0,
         max_logit_diff: 0.0,
         max_norm_diff: 0.0,
+        max_tensor_normalized: 0.0,
+        max_tensor_rms: 0.0,
         failure: None,
     };
     let ids = tokenizer.encode(&case.prompt)?;
@@ -95,17 +103,40 @@ fn check_case(model: &Engine, tokenizer: &Tokenizer, case: &Case) -> Result<Case
     let mut kv: EngineCache = model.new_cache(capacity).map_err(CliError::Model)?;
     let layers = case.layer_norms.len();
     let mut norms = vec![0.0_f64; layers];
-    let mut logits = model
-        .forward_observed(
-            &ids,
-            &mut kv,
-            Some(&mut |index: usize, hidden: &[f32]| {
-                if let Some(slot) = norms.get_mut(index) {
-                    *slot = l2(hidden);
+    let hybrid = matches!(model, Engine::Qwen35(_));
+    let mut actual_layers = Vec::new();
+    let mut observer = |index: usize, hidden: &[f32]| {
+        if let Some(slot) = norms.get_mut(index) {
+            *slot = l2(hidden);
+        }
+        if hybrid {
+            actual_layers.push(hidden.to_vec());
+        }
+    };
+    let mut logits = match (model, &mut kv) {
+        (Engine::Qwen35(m), EngineCache::Qwen35(c)) => {
+            m.forward_full_observed(&ids, c, Some(&mut observer))?
+        }
+        _ => model.forward_observed(&ids, &mut kv, Some(&mut observer))?,
+    };
+    if hybrid {
+        if actual_layers.len() != case.layer_values.len() {
+            report.failure = Some("missing full hybrid layer references".into());
+            return Ok(report);
+        }
+        for (i, (actual, expected)) in actual_layers.iter().zip(&case.layer_values).enumerate() {
+            match crate::verify_hybrid::compare(actual, expected) {
+                Ok((_, normalized, rms)) => {
+                    report.max_tensor_normalized = report.max_tensor_normalized.max(normalized);
+                    report.max_tensor_rms = report.max_tensor_rms.max(rms);
                 }
-            }),
-        )
-        .map_err(CliError::Model)?;
+                Err(e) => {
+                    report.failure = Some(format!("first incorrect layer {i}: {e}"));
+                    return Ok(report);
+                }
+            }
+        }
+    }
     for (layer, (ours, theirs)) in norms.iter().zip(&case.layer_norms).enumerate() {
         let diff = (ours - theirs).abs() / theirs.abs().max(f64::EPSILON);
         report.max_norm_diff = report.max_norm_diff.max(diff);
@@ -130,6 +161,19 @@ fn check_case(model: &Engine, tokenizer: &Tokenizer, case: &Case) -> Result<Case
             logits = model
                 .forward(&[previous], &mut kv)
                 .map_err(CliError::Model)?;
+        }
+        if hybrid {
+            match crate::verify_hybrid::compare(&logits, &step.logits) {
+                Ok((max, normalized, rms)) => {
+                    report.max_logit_diff = report.max_logit_diff.max(max);
+                    report.max_tensor_normalized = report.max_tensor_normalized.max(normalized);
+                    report.max_tensor_rms = report.max_tensor_rms.max(rms);
+                }
+                Err(e) => {
+                    report.failure = Some(format!("step {index}: full logits: {e}"));
+                    break;
+                }
+            }
         }
         for (id, expected) in &step.top {
             let ours = logits.get(*id as usize).map_or(f64::NAN, |v| f64::from(*v));
@@ -208,6 +252,12 @@ pub fn run(
                 failed = true;
                 println!("  {} {label}\n      {why}", style.red("FAIL"));
             }
+        }
+        if matches!(loaded.model, Engine::Qwen35(_)) {
+            println!(
+                "      full tensors: max normalized {:.3e}, relative RMS {:.3e}",
+                report.max_tensor_normalized, report.max_tensor_rms
+            );
         }
     }
     if failed {

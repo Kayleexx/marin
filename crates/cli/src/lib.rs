@@ -41,3 +41,5 @@ pub fn report(error: &CliError, style: &Style) {
         eprintln!("{} {hint}", style.yellow("hint:"));
     }
 }
+
+mod verify_hybrid;

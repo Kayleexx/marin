@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use loader::ModelDir;
-use model::{Precision, Qwen3Config};
+use model::{Engine, Precision, Qwen3Config};
 
 use crate::CliError;
 use crate::load::model_name;
@@ -21,7 +21,7 @@ pub fn describe(
     ctx: usize,
     fp: &Footprint,
 ) -> String {
-    let params = cfg.parameter_count().map_or_else(
+    let params = fp.parameters.map_or_else(
         || "unknown".to_string(),
         |p| format!("{:.2} billion", p as f64 / 1e9),
     );
@@ -39,13 +39,22 @@ pub fn describe(
         (
             "weights",
             format!(
-                "{} stored as bf16 (16-bit numbers)",
-                units::bytes(fp.weights)
+                "{} ({})",
+                units::bytes(fp.weights),
+                fp.quant
+                    .map_or_else(|| "bf16 matrices, f32 norms".into(), |q| q.label())
             ),
         ),
         (
             "layers",
-            format!("{}   (each layer = attention + MLP)", cfg.layers),
+            if fp.recurrent > 0 {
+                format!(
+                    "{} hybrid recurrent/full-attention layers + MLP",
+                    cfg.layers
+                )
+            } else {
+                format!("{}   (each layer = attention + MLP)", cfg.layers)
+            },
         ),
         (
             "hidden size",
@@ -55,7 +64,11 @@ pub fn describe(
             ),
         ),
         (
-            "attention",
+            if fp.recurrent > 0 {
+                "full attention"
+            } else {
+                "attention"
+            },
             format!(
                 "{} query heads, {} key/value heads, head size {}\n{:16}each key/value head serves {share} query heads (grouped-query attention)",
                 cfg.heads, cfg.kv_heads, cfg.head_dim, ""
@@ -79,12 +92,24 @@ pub fn describe(
             ),
         ),
         (
-            "kv cache",
-            format!(
-                "up to {} for this context, {} before the first token on the GPU   (remembers earlier tokens so they are not recomputed)",
-                units::bytes(fp.kv),
-                units::bytes(fp.kv_startup)
-            ),
+            if fp.recurrent > 0 {
+                "hybrid state"
+            } else {
+                "kv cache"
+            },
+            if fp.recurrent > 0 {
+                format!(
+                    "up to {}: {} fixed recurrent/convolution state plus growable FP32 attention KV",
+                    units::bytes(fp.kv),
+                    units::bytes(fp.recurrent)
+                )
+            } else {
+                format!(
+                    "up to {} for this context, {} before the first token on the GPU   (remembers earlier tokens so they are not recomputed)",
+                    units::bytes(fp.kv),
+                    units::bytes(fp.kv_startup)
+                )
+            },
         ),
         (
             "output layer",
@@ -109,7 +134,7 @@ pub fn run(
     style: &Style,
 ) -> Result<(), CliError> {
     let dir = ModelDir::open(path)?;
-    let cfg = Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref())?;
+    let cfg = Engine::parse_config(&dir)?;
     let ctx = resolve_ctx(&cfg, ctx, DEFAULT_CTX)?;
     let fp = footprint(&dir, &cfg, ctx, precision)?;
     let name = model_name(path);
@@ -125,6 +150,13 @@ pub fn run(
             scheme.label(),
             units::bytes(fp.weights)
         );
+    }
+    if fp.recurrent > 0 {
+        println!(
+            "  CPU budget    text weights + recurrent/convolution state + attention KV + transaction/workspace + safety margin"
+        );
+    } else {
+        println!("  CPU budget    weights + full FP32 KV + full-prefill workspace + safety margin");
     }
     let needed = format!("about {}", units::bytes(fp.needed));
     match fp.available {

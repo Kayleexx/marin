@@ -1,0 +1,4339 @@
+{
+ "transformers": "5.17.0",
+ "source_sha256": "762feb6c7426a7f15b5bf830df54c07438bf9e7c27b8cdb23179045920412c3b",
+ "model_revision": "b1485b2fa6dfa1287294f269f5fb618e03d52d7c",
+ "weights_dtype": "float32",
+ "blocks": [
+  {
+   "config": {
+    "transformers_version": "5.17.0",
+    "architectures": null,
+    "output_hidden_states": false,
+    "return_dict": true,
+    "dtype": null,
+    "chunk_size_feed_forward": 0,
+    "is_encoder_decoder": false,
+    "id2label": {
+     "0": "LABEL_0",
+     "1": "LABEL_1"
+    },
+    "label2id": {
+     "LABEL_0": 0,
+     "LABEL_1": 1
+    },
+    "problem_type": null,
+    "vocab_size": 248320,
+    "hidden_size": 8,
+    "intermediate_size": 12,
+    "num_hidden_layers": 4,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 1,
+    "hidden_act": "silu",
+    "max_position_embeddings": 32768,
+    "initializer_range": 0.02,
+    "rms_norm_eps": 1e-06,
+    "use_cache": true,
+    "tie_word_embeddings": false,
+    "rope_parameters": {
+     "rope_type": "default",
+     "rope_theta": 10000000.0,
+     "partial_rotary_factor": 0.5,
+     "mrope_section": [
+      1,
+      1,
+      0
+     ]
+    },
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "head_dim": 8,
+    "linear_conv_kernel_dim": 4,
+    "linear_key_head_dim": 3,
+    "linear_value_head_dim": 4,
+    "linear_num_key_heads": 2,
+    "linear_num_value_heads": 2,
+    "layer_types": [
+     "linear_attention",
+     "linear_attention",
+     "linear_attention",
+     "full_attention"
+    ],
+    "pad_token_id": null,
+    "bos_token_id": null,
+    "eos_token_id": null,
+    "_name_or_path": "",
+    "partial_rotary_factor": 0.25,
+    "model_type": "qwen3_5_text",
+    "output_attentions": false
+   },
+   "kind": "linear_attention",
+   "weights": {
+    "linear_attn.dt_bias": {
+     "offset": 0,
+     "len": 2
+    },
+    "linear_attn.A_log": {
+     "offset": 8,
+     "len": 2
+    },
+    "linear_attn.conv1d.weight": {
+     "offset": 16,
+     "len": 80
+    },
+    "linear_attn.norm.weight": {
+     "offset": 336,
+     "len": 4
+    },
+    "linear_attn.out_proj.weight": {
+     "offset": 352,
+     "len": 64
+    },
+    "linear_attn.in_proj_qkv.weight": {
+     "offset": 608,
+     "len": 160
+    },
+    "linear_attn.in_proj_z.weight": {
+     "offset": 1248,
+     "len": 64
+    },
+    "linear_attn.in_proj_b.weight": {
+     "offset": 1504,
+     "len": 16
+    },
+    "linear_attn.in_proj_a.weight": {
+     "offset": 1568,
+     "len": 16
+    },
+    "mlp.gate_proj.weight": {
+     "offset": 1632,
+     "len": 96
+    },
+    "mlp.up_proj.weight": {
+     "offset": 2016,
+     "len": 96
+    },
+    "mlp.down_proj.weight": {
+     "offset": 2400,
+     "len": 96
+    },
+    "input_layernorm.weight": {
+     "offset": 2784,
+     "len": 8
+    },
+    "post_attention_layernorm.weight": {
+     "offset": 2816,
+     "len": 8
+    }
+   },
+   "cases": [
+    {
+     "prefix": {
+      "offset": 3552,
+      "len": 0
+     },
+     "input": {
+      "offset": 3552,
+      "len": 8
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 2848,
+       "len": 8
+      },
+      "qkv": {
+       "offset": 2880,
+       "len": 20
+      },
+      "z": {
+       "offset": 2960,
+       "len": 8
+      },
+      "b": {
+       "offset": 2992,
+       "len": 2
+      },
+      "a": {
+       "offset": 3000,
+       "len": 2
+      },
+      "conv": {
+       "offset": 3008,
+       "len": 20
+      },
+      "query": {
+       "offset": 3088,
+       "len": 6
+      },
+      "key": {
+       "offset": 3112,
+       "len": 6
+      },
+      "value": {
+       "offset": 3136,
+       "len": 8
+      },
+      "g": {
+       "offset": 3168,
+       "len": 2
+      },
+      "beta": {
+       "offset": 3176,
+       "len": 2
+      },
+      "core": {
+       "offset": 3184,
+       "len": 8
+      },
+      "gated": {
+       "offset": 3216,
+       "len": 8
+      },
+      "mixer": {
+       "offset": 3248,
+       "len": 8
+      },
+      "post_norm": {
+       "offset": 3280,
+       "len": 8
+      },
+      "mlp_gate": {
+       "offset": 3312,
+       "len": 12
+      },
+      "mlp_up": {
+       "offset": 3360,
+       "len": 12
+      },
+      "mlp_act": {
+       "offset": 3408,
+       "len": 12
+      },
+      "mlp": {
+       "offset": 3456,
+       "len": 8
+      },
+      "output": {
+       "offset": 3488,
+       "len": 8
+      },
+      "residual": {
+       "offset": 3520,
+       "len": 8
+      }
+     },
+     "conv_state": {
+      "offset": 3584,
+      "len": 80
+     },
+     "recurrent": {
+      "offset": 3904,
+      "len": 24
+     },
+     "keys": {
+      "offset": 4000,
+      "len": 0
+     },
+     "values": {
+      "offset": 4000,
+      "len": 0
+     }
+    },
+    {
+     "prefix": {
+      "offset": 5408,
+      "len": 32
+     },
+     "input": {
+      "offset": 5536,
+      "len": 16
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 4000,
+       "len": 16
+      },
+      "qkv": {
+       "offset": 4064,
+       "len": 40
+      },
+      "z": {
+       "offset": 4224,
+       "len": 16
+      },
+      "b": {
+       "offset": 4288,
+       "len": 4
+      },
+      "a": {
+       "offset": 4304,
+       "len": 4
+      },
+      "conv": {
+       "offset": 4320,
+       "len": 40
+      },
+      "query": {
+       "offset": 4480,
+       "len": 12
+      },
+      "key": {
+       "offset": 4528,
+       "len": 12
+      },
+      "value": {
+       "offset": 4576,
+       "len": 16
+      },
+      "g": {
+       "offset": 4640,
+       "len": 4
+      },
+      "beta": {
+       "offset": 4656,
+       "len": 4
+      },
+      "core": {
+       "offset": 4672,
+       "len": 16
+      },
+      "gated": {
+       "offset": 4736,
+       "len": 16
+      },
+      "mixer": {
+       "offset": 4800,
+       "len": 16
+      },
+      "post_norm": {
+       "offset": 4864,
+       "len": 16
+      },
+      "mlp_gate": {
+       "offset": 4928,
+       "len": 24
+      },
+      "mlp_up": {
+       "offset": 5024,
+       "len": 24
+      },
+      "mlp_act": {
+       "offset": 5120,
+       "len": 24
+      },
+      "mlp": {
+       "offset": 5216,
+       "len": 16
+      },
+      "output": {
+       "offset": 5280,
+       "len": 16
+      },
+      "residual": {
+       "offset": 5344,
+       "len": 16
+      }
+     },
+     "conv_state": {
+      "offset": 5600,
+      "len": 80
+     },
+     "recurrent": {
+      "offset": 5920,
+      "len": 24
+     },
+     "keys": {
+      "offset": 6016,
+      "len": 0
+     },
+     "values": {
+      "offset": 6016,
+      "len": 0
+     }
+    },
+    {
+     "prefix": {
+      "offset": 8832,
+      "len": 0
+     },
+     "input": {
+      "offset": 8832,
+      "len": 32
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 6016,
+       "len": 32
+      },
+      "qkv": {
+       "offset": 6144,
+       "len": 80
+      },
+      "z": {
+       "offset": 6464,
+       "len": 32
+      },
+      "b": {
+       "offset": 6592,
+       "len": 8
+      },
+      "a": {
+       "offset": 6624,
+       "len": 8
+      },
+      "conv": {
+       "offset": 6656,
+       "len": 80
+      },
+      "query": {
+       "offset": 6976,
+       "len": 24
+      },
+      "key": {
+       "offset": 7072,
+       "len": 24
+      },
+      "value": {
+       "offset": 7168,
+       "len": 32
+      },
+      "g": {
+       "offset": 7296,
+       "len": 8
+      },
+      "beta": {
+       "offset": 7328,
+       "len": 8
+      },
+      "core": {
+       "offset": 7360,
+       "len": 32
+      },
+      "gated": {
+       "offset": 7488,
+       "len": 32
+      },
+      "mixer": {
+       "offset": 7616,
+       "len": 32
+      },
+      "post_norm": {
+       "offset": 7744,
+       "len": 32
+      },
+      "mlp_gate": {
+       "offset": 7872,
+       "len": 48
+      },
+      "mlp_up": {
+       "offset": 8064,
+       "len": 48
+      },
+      "mlp_act": {
+       "offset": 8256,
+       "len": 48
+      },
+      "mlp": {
+       "offset": 8448,
+       "len": 32
+      },
+      "output": {
+       "offset": 8576,
+       "len": 32
+      },
+      "residual": {
+       "offset": 8704,
+       "len": 32
+      }
+     },
+     "conv_state": {
+      "offset": 8960,
+      "len": 80
+     },
+     "recurrent": {
+      "offset": 9280,
+      "len": 24
+     },
+     "keys": {
+      "offset": 9376,
+      "len": 0
+     },
+     "values": {
+      "offset": 9376,
+      "len": 0
+     }
+    },
+    {
+     "prefix": {
+      "offset": 20640,
+      "len": 0
+     },
+     "input": {
+      "offset": 20640,
+      "len": 128
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 9376,
+       "len": 128
+      },
+      "qkv": {
+       "offset": 9888,
+       "len": 320
+      },
+      "z": {
+       "offset": 11168,
+       "len": 128
+      },
+      "b": {
+       "offset": 11680,
+       "len": 32
+      },
+      "a": {
+       "offset": 11808,
+       "len": 32
+      },
+      "conv": {
+       "offset": 11936,
+       "len": 320
+      },
+      "query": {
+       "offset": 13216,
+       "len": 96
+      },
+      "key": {
+       "offset": 13600,
+       "len": 96
+      },
+      "value": {
+       "offset": 13984,
+       "len": 128
+      },
+      "g": {
+       "offset": 14496,
+       "len": 32
+      },
+      "beta": {
+       "offset": 14624,
+       "len": 32
+      },
+      "core": {
+       "offset": 14752,
+       "len": 128
+      },
+      "gated": {
+       "offset": 15264,
+       "len": 128
+      },
+      "mixer": {
+       "offset": 15776,
+       "len": 128
+      },
+      "post_norm": {
+       "offset": 16288,
+       "len": 128
+      },
+      "mlp_gate": {
+       "offset": 16800,
+       "len": 192
+      },
+      "mlp_up": {
+       "offset": 17568,
+       "len": 192
+      },
+      "mlp_act": {
+       "offset": 18336,
+       "len": 192
+      },
+      "mlp": {
+       "offset": 19104,
+       "len": 128
+      },
+      "output": {
+       "offset": 19616,
+       "len": 128
+      },
+      "residual": {
+       "offset": 20128,
+       "len": 128
+      }
+     },
+     "conv_state": {
+      "offset": 21152,
+      "len": 80
+     },
+     "recurrent": {
+      "offset": 21472,
+      "len": 24
+     },
+     "keys": {
+      "offset": 21568,
+      "len": 0
+     },
+     "values": {
+      "offset": 21568,
+      "len": 0
+     }
+    },
+    {
+     "prefix": {
+      "offset": 67328,
+      "len": 32
+     },
+     "input": {
+      "offset": 67456,
+      "len": 520
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 21568,
+       "len": 520
+      },
+      "qkv": {
+       "offset": 23648,
+       "len": 1300
+      },
+      "z": {
+       "offset": 28848,
+       "len": 520
+      },
+      "b": {
+       "offset": 30928,
+       "len": 130
+      },
+      "a": {
+       "offset": 31448,
+       "len": 130
+      },
+      "conv": {
+       "offset": 31968,
+       "len": 1300
+      },
+      "query": {
+       "offset": 37168,
+       "len": 390
+      },
+      "key": {
+       "offset": 38728,
+       "len": 390
+      },
+      "value": {
+       "offset": 40288,
+       "len": 520
+      },
+      "g": {
+       "offset": 42368,
+       "len": 130
+      },
+      "beta": {
+       "offset": 42888,
+       "len": 130
+      },
+      "core": {
+       "offset": 43408,
+       "len": 520
+      },
+      "gated": {
+       "offset": 45488,
+       "len": 520
+      },
+      "mixer": {
+       "offset": 47568,
+       "len": 520
+      },
+      "post_norm": {
+       "offset": 49648,
+       "len": 520
+      },
+      "mlp_gate": {
+       "offset": 51728,
+       "len": 780
+      },
+      "mlp_up": {
+       "offset": 54848,
+       "len": 780
+      },
+      "mlp_act": {
+       "offset": 57968,
+       "len": 780
+      },
+      "mlp": {
+       "offset": 61088,
+       "len": 520
+      },
+      "output": {
+       "offset": 63168,
+       "len": 520
+      },
+      "residual": {
+       "offset": 65248,
+       "len": 520
+      }
+     },
+     "conv_state": {
+      "offset": 69536,
+      "len": 80
+     },
+     "recurrent": {
+      "offset": 69856,
+      "len": 24
+     },
+     "keys": {
+      "offset": 69952,
+      "len": 0
+     },
+     "values": {
+      "offset": 69952,
+      "len": 0
+     }
+    },
+    {
+     "prefix": {
+      "offset": 160064,
+      "len": 0
+     },
+     "input": {
+      "offset": 160064,
+      "len": 1024
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 69952,
+       "len": 1024
+      },
+      "qkv": {
+       "offset": 74048,
+       "len": 2560
+      },
+      "z": {
+       "offset": 84288,
+       "len": 1024
+      },
+      "b": {
+       "offset": 88384,
+       "len": 256
+      },
+      "a": {
+       "offset": 89408,
+       "len": 256
+      },
+      "conv": {
+       "offset": 90432,
+       "len": 2560
+      },
+      "query": {
+       "offset": 100672,
+       "len": 768
+      },
+      "key": {
+       "offset": 103744,
+       "len": 768
+      },
+      "value": {
+       "offset": 106816,
+       "len": 1024
+      },
+      "g": {
+       "offset": 110912,
+       "len": 256
+      },
+      "beta": {
+       "offset": 111936,
+       "len": 256
+      },
+      "core": {
+       "offset": 112960,
+       "len": 1024
+      },
+      "gated": {
+       "offset": 117056,
+       "len": 1024
+      },
+      "mixer": {
+       "offset": 121152,
+       "len": 1024
+      },
+      "post_norm": {
+       "offset": 125248,
+       "len": 1024
+      },
+      "mlp_gate": {
+       "offset": 129344,
+       "len": 1536
+      },
+      "mlp_up": {
+       "offset": 135488,
+       "len": 1536
+      },
+      "mlp_act": {
+       "offset": 141632,
+       "len": 1536
+      },
+      "mlp": {
+       "offset": 147776,
+       "len": 1024
+      },
+      "output": {
+       "offset": 151872,
+       "len": 1024
+      },
+      "residual": {
+       "offset": 155968,
+       "len": 1024
+      }
+     },
+     "conv_state": {
+      "offset": 164160,
+      "len": 80
+     },
+     "recurrent": {
+      "offset": 164480,
+      "len": 24
+     },
+     "keys": {
+      "offset": 164576,
+      "len": 0
+     },
+     "values": {
+      "offset": 164576,
+      "len": 0
+     }
+    },
+    {
+     "prefix": {
+      "offset": 165280,
+      "len": 32
+     },
+     "input": {
+      "offset": 165408,
+      "len": 8
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 164576,
+       "len": 8
+      },
+      "qkv": {
+       "offset": 164608,
+       "len": 20
+      },
+      "z": {
+       "offset": 164688,
+       "len": 8
+      },
+      "b": {
+       "offset": 164720,
+       "len": 2
+      },
+      "a": {
+       "offset": 164728,
+       "len": 2
+      },
+      "conv": {
+       "offset": 164736,
+       "len": 20
+      },
+      "query": {
+       "offset": 164816,
+       "len": 6
+      },
+      "key": {
+       "offset": 164840,
+       "len": 6
+      },
+      "value": {
+       "offset": 164864,
+       "len": 8
+      },
+      "g": {
+       "offset": 164896,
+       "len": 2
+      },
+      "beta": {
+       "offset": 164904,
+       "len": 2
+      },
+      "core": {
+       "offset": 164912,
+       "len": 8
+      },
+      "gated": {
+       "offset": 164944,
+       "len": 8
+      },
+      "mixer": {
+       "offset": 164976,
+       "len": 8
+      },
+      "post_norm": {
+       "offset": 165008,
+       "len": 8
+      },
+      "mlp_gate": {
+       "offset": 165040,
+       "len": 12
+      },
+      "mlp_up": {
+       "offset": 165088,
+       "len": 12
+      },
+      "mlp_act": {
+       "offset": 165136,
+       "len": 12
+      },
+      "mlp": {
+       "offset": 165184,
+       "len": 8
+      },
+      "output": {
+       "offset": 165216,
+       "len": 8
+      },
+      "residual": {
+       "offset": 165248,
+       "len": 8
+      }
+     },
+     "conv_state": {
+      "offset": 165440,
+      "len": 80
+     },
+     "recurrent": {
+      "offset": 165760,
+      "len": 24
+     },
+     "keys": {
+      "offset": 165856,
+      "len": 0
+     },
+     "values": {
+      "offset": 165856,
+      "len": 0
+     }
+    }
+   ]
+  },
+  {
+   "config": {
+    "transformers_version": "5.17.0",
+    "architectures": null,
+    "output_hidden_states": false,
+    "return_dict": true,
+    "dtype": null,
+    "chunk_size_feed_forward": 0,
+    "is_encoder_decoder": false,
+    "id2label": {
+     "0": "LABEL_0",
+     "1": "LABEL_1"
+    },
+    "label2id": {
+     "LABEL_0": 0,
+     "LABEL_1": 1
+    },
+    "problem_type": null,
+    "vocab_size": 248320,
+    "hidden_size": 8,
+    "intermediate_size": 12,
+    "num_hidden_layers": 4,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 1,
+    "hidden_act": "silu",
+    "max_position_embeddings": 32768,
+    "initializer_range": 0.02,
+    "rms_norm_eps": 1e-06,
+    "use_cache": true,
+    "tie_word_embeddings": false,
+    "rope_parameters": {
+     "rope_type": "default",
+     "rope_theta": 10000000.0,
+     "partial_rotary_factor": 0.5,
+     "mrope_section": [
+      1,
+      1,
+      0
+     ]
+    },
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "head_dim": 8,
+    "linear_conv_kernel_dim": 4,
+    "linear_key_head_dim": 3,
+    "linear_value_head_dim": 4,
+    "linear_num_key_heads": 2,
+    "linear_num_value_heads": 2,
+    "layer_types": [
+     "linear_attention",
+     "linear_attention",
+     "linear_attention",
+     "full_attention"
+    ],
+    "pad_token_id": null,
+    "bos_token_id": null,
+    "eos_token_id": null,
+    "_name_or_path": "",
+    "partial_rotary_factor": 0.25,
+    "model_type": "qwen3_5_text",
+    "output_attentions": false
+   },
+   "kind": "full_attention",
+   "weights": {
+    "self_attn.q_proj.weight": {
+     "offset": 165856,
+     "len": 256
+    },
+    "self_attn.k_proj.weight": {
+     "offset": 166880,
+     "len": 64
+    },
+    "self_attn.v_proj.weight": {
+     "offset": 167136,
+     "len": 64
+    },
+    "self_attn.o_proj.weight": {
+     "offset": 167392,
+     "len": 128
+    },
+    "self_attn.q_norm.weight": {
+     "offset": 167904,
+     "len": 8
+    },
+    "self_attn.k_norm.weight": {
+     "offset": 167936,
+     "len": 8
+    },
+    "mlp.gate_proj.weight": {
+     "offset": 167968,
+     "len": 96
+    },
+    "mlp.up_proj.weight": {
+     "offset": 168352,
+     "len": 96
+    },
+    "mlp.down_proj.weight": {
+     "offset": 168736,
+     "len": 96
+    },
+    "input_layernorm.weight": {
+     "offset": 169120,
+     "len": 8
+    },
+    "post_attention_layernorm.weight": {
+     "offset": 169152,
+     "len": 8
+    }
+   },
+   "cases": [
+    {
+     "prefix": {
+      "offset": 170032,
+      "len": 0
+     },
+     "input": {
+      "offset": 170032,
+      "len": 8
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 169184,
+       "len": 8
+      },
+      "q_gate": {
+       "offset": 169216,
+       "len": 32
+      },
+      "q_norm": {
+       "offset": 169344,
+       "len": 16
+      },
+      "k_proj": {
+       "offset": 169408,
+       "len": 8
+      },
+      "k_norm": {
+       "offset": 169440,
+       "len": 8
+      },
+      "v_proj": {
+       "offset": 169472,
+       "len": 8
+      },
+      "q_rope": {
+       "offset": 169504,
+       "len": 16
+      },
+      "k_rope": {
+       "offset": 169568,
+       "len": 8
+      },
+      "core": {
+       "offset": 169600,
+       "len": 16
+      },
+      "gated": {
+       "offset": 169664,
+       "len": 16
+      },
+      "mixer": {
+       "offset": 169728,
+       "len": 8
+      },
+      "post_norm": {
+       "offset": 169760,
+       "len": 8
+      },
+      "mlp_gate": {
+       "offset": 169792,
+       "len": 12
+      },
+      "mlp_up": {
+       "offset": 169840,
+       "len": 12
+      },
+      "mlp_act": {
+       "offset": 169888,
+       "len": 12
+      },
+      "mlp": {
+       "offset": 169936,
+       "len": 8
+      },
+      "output": {
+       "offset": 169968,
+       "len": 8
+      },
+      "residual": {
+       "offset": 170000,
+       "len": 8
+      }
+     },
+     "conv_state": {
+      "offset": 170064,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 170064,
+      "len": 0
+     },
+     "keys": {
+      "offset": 170064,
+      "len": 8
+     },
+     "values": {
+      "offset": 170096,
+      "len": 8
+     }
+    },
+    {
+     "prefix": {
+      "offset": 171824,
+      "len": 32
+     },
+     "input": {
+      "offset": 171952,
+      "len": 16
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 170128,
+       "len": 16
+      },
+      "q_gate": {
+       "offset": 170192,
+       "len": 64
+      },
+      "q_norm": {
+       "offset": 170448,
+       "len": 32
+      },
+      "k_proj": {
+       "offset": 170576,
+       "len": 16
+      },
+      "k_norm": {
+       "offset": 170640,
+       "len": 16
+      },
+      "v_proj": {
+       "offset": 170704,
+       "len": 16
+      },
+      "q_rope": {
+       "offset": 170768,
+       "len": 32
+      },
+      "k_rope": {
+       "offset": 170896,
+       "len": 16
+      },
+      "core": {
+       "offset": 170960,
+       "len": 32
+      },
+      "gated": {
+       "offset": 171088,
+       "len": 32
+      },
+      "mixer": {
+       "offset": 171216,
+       "len": 16
+      },
+      "post_norm": {
+       "offset": 171280,
+       "len": 16
+      },
+      "mlp_gate": {
+       "offset": 171344,
+       "len": 24
+      },
+      "mlp_up": {
+       "offset": 171440,
+       "len": 24
+      },
+      "mlp_act": {
+       "offset": 171536,
+       "len": 24
+      },
+      "mlp": {
+       "offset": 171632,
+       "len": 16
+      },
+      "output": {
+       "offset": 171696,
+       "len": 16
+      },
+      "residual": {
+       "offset": 171760,
+       "len": 16
+      }
+     },
+     "conv_state": {
+      "offset": 172016,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 172016,
+      "len": 0
+     },
+     "keys": {
+      "offset": 172016,
+      "len": 48
+     },
+     "values": {
+      "offset": 172208,
+      "len": 48
+     }
+    },
+    {
+     "prefix": {
+      "offset": 175792,
+      "len": 0
+     },
+     "input": {
+      "offset": 175792,
+      "len": 32
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 172400,
+       "len": 32
+      },
+      "q_gate": {
+       "offset": 172528,
+       "len": 128
+      },
+      "q_norm": {
+       "offset": 173040,
+       "len": 64
+      },
+      "k_proj": {
+       "offset": 173296,
+       "len": 32
+      },
+      "k_norm": {
+       "offset": 173424,
+       "len": 32
+      },
+      "v_proj": {
+       "offset": 173552,
+       "len": 32
+      },
+      "q_rope": {
+       "offset": 173680,
+       "len": 64
+      },
+      "k_rope": {
+       "offset": 173936,
+       "len": 32
+      },
+      "core": {
+       "offset": 174064,
+       "len": 64
+      },
+      "gated": {
+       "offset": 174320,
+       "len": 64
+      },
+      "mixer": {
+       "offset": 174576,
+       "len": 32
+      },
+      "post_norm": {
+       "offset": 174704,
+       "len": 32
+      },
+      "mlp_gate": {
+       "offset": 174832,
+       "len": 48
+      },
+      "mlp_up": {
+       "offset": 175024,
+       "len": 48
+      },
+      "mlp_act": {
+       "offset": 175216,
+       "len": 48
+      },
+      "mlp": {
+       "offset": 175408,
+       "len": 32
+      },
+      "output": {
+       "offset": 175536,
+       "len": 32
+      },
+      "residual": {
+       "offset": 175664,
+       "len": 32
+      }
+     },
+     "conv_state": {
+      "offset": 175920,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 175920,
+      "len": 0
+     },
+     "keys": {
+      "offset": 175920,
+      "len": 32
+     },
+     "values": {
+      "offset": 176048,
+      "len": 32
+     }
+    },
+    {
+     "prefix": {
+      "offset": 189744,
+      "len": 0
+     },
+     "input": {
+      "offset": 189744,
+      "len": 128
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 176176,
+       "len": 128
+      },
+      "q_gate": {
+       "offset": 176688,
+       "len": 512
+      },
+      "q_norm": {
+       "offset": 178736,
+       "len": 256
+      },
+      "k_proj": {
+       "offset": 179760,
+       "len": 128
+      },
+      "k_norm": {
+       "offset": 180272,
+       "len": 128
+      },
+      "v_proj": {
+       "offset": 180784,
+       "len": 128
+      },
+      "q_rope": {
+       "offset": 181296,
+       "len": 256
+      },
+      "k_rope": {
+       "offset": 182320,
+       "len": 128
+      },
+      "core": {
+       "offset": 182832,
+       "len": 256
+      },
+      "gated": {
+       "offset": 183856,
+       "len": 256
+      },
+      "mixer": {
+       "offset": 184880,
+       "len": 128
+      },
+      "post_norm": {
+       "offset": 185392,
+       "len": 128
+      },
+      "mlp_gate": {
+       "offset": 185904,
+       "len": 192
+      },
+      "mlp_up": {
+       "offset": 186672,
+       "len": 192
+      },
+      "mlp_act": {
+       "offset": 187440,
+       "len": 192
+      },
+      "mlp": {
+       "offset": 188208,
+       "len": 128
+      },
+      "output": {
+       "offset": 188720,
+       "len": 128
+      },
+      "residual": {
+       "offset": 189232,
+       "len": 128
+      }
+     },
+     "conv_state": {
+      "offset": 190256,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 190256,
+      "len": 0
+     },
+     "keys": {
+      "offset": 190256,
+      "len": 128
+     },
+     "values": {
+      "offset": 190768,
+      "len": 128
+     }
+    },
+    {
+     "prefix": {
+      "offset": 246400,
+      "len": 32
+     },
+     "input": {
+      "offset": 246528,
+      "len": 520
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 191280,
+       "len": 520
+      },
+      "q_gate": {
+       "offset": 193360,
+       "len": 2080
+      },
+      "q_norm": {
+       "offset": 201680,
+       "len": 1040
+      },
+      "k_proj": {
+       "offset": 205840,
+       "len": 520
+      },
+      "k_norm": {
+       "offset": 207920,
+       "len": 520
+      },
+      "v_proj": {
+       "offset": 210000,
+       "len": 520
+      },
+      "q_rope": {
+       "offset": 212080,
+       "len": 1040
+      },
+      "k_rope": {
+       "offset": 216240,
+       "len": 520
+      },
+      "core": {
+       "offset": 218320,
+       "len": 1040
+      },
+      "gated": {
+       "offset": 222480,
+       "len": 1040
+      },
+      "mixer": {
+       "offset": 226640,
+       "len": 520
+      },
+      "post_norm": {
+       "offset": 228720,
+       "len": 520
+      },
+      "mlp_gate": {
+       "offset": 230800,
+       "len": 780
+      },
+      "mlp_up": {
+       "offset": 233920,
+       "len": 780
+      },
+      "mlp_act": {
+       "offset": 237040,
+       "len": 780
+      },
+      "mlp": {
+       "offset": 240160,
+       "len": 520
+      },
+      "output": {
+       "offset": 242240,
+       "len": 520
+      },
+      "residual": {
+       "offset": 244320,
+       "len": 520
+      }
+     },
+     "conv_state": {
+      "offset": 248608,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 248608,
+      "len": 0
+     },
+     "keys": {
+      "offset": 248608,
+      "len": 552
+     },
+     "values": {
+      "offset": 250816,
+      "len": 552
+     }
+    },
+    {
+     "prefix": {
+      "offset": 361568,
+      "len": 0
+     },
+     "input": {
+      "offset": 361568,
+      "len": 1024
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 253024,
+       "len": 1024
+      },
+      "q_gate": {
+       "offset": 257120,
+       "len": 4096
+      },
+      "q_norm": {
+       "offset": 273504,
+       "len": 2048
+      },
+      "k_proj": {
+       "offset": 281696,
+       "len": 1024
+      },
+      "k_norm": {
+       "offset": 285792,
+       "len": 1024
+      },
+      "v_proj": {
+       "offset": 289888,
+       "len": 1024
+      },
+      "q_rope": {
+       "offset": 293984,
+       "len": 2048
+      },
+      "k_rope": {
+       "offset": 302176,
+       "len": 1024
+      },
+      "core": {
+       "offset": 306272,
+       "len": 2048
+      },
+      "gated": {
+       "offset": 314464,
+       "len": 2048
+      },
+      "mixer": {
+       "offset": 322656,
+       "len": 1024
+      },
+      "post_norm": {
+       "offset": 326752,
+       "len": 1024
+      },
+      "mlp_gate": {
+       "offset": 330848,
+       "len": 1536
+      },
+      "mlp_up": {
+       "offset": 336992,
+       "len": 1536
+      },
+      "mlp_act": {
+       "offset": 343136,
+       "len": 1536
+      },
+      "mlp": {
+       "offset": 349280,
+       "len": 1024
+      },
+      "output": {
+       "offset": 353376,
+       "len": 1024
+      },
+      "residual": {
+       "offset": 357472,
+       "len": 1024
+      }
+     },
+     "conv_state": {
+      "offset": 365664,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 365664,
+      "len": 0
+     },
+     "keys": {
+      "offset": 365664,
+      "len": 1024
+     },
+     "values": {
+      "offset": 369760,
+      "len": 1024
+     }
+    },
+    {
+     "prefix": {
+      "offset": 374704,
+      "len": 32
+     },
+     "input": {
+      "offset": 374832,
+      "len": 8
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 373856,
+       "len": 8
+      },
+      "q_gate": {
+       "offset": 373888,
+       "len": 32
+      },
+      "q_norm": {
+       "offset": 374016,
+       "len": 16
+      },
+      "k_proj": {
+       "offset": 374080,
+       "len": 8
+      },
+      "k_norm": {
+       "offset": 374112,
+       "len": 8
+      },
+      "v_proj": {
+       "offset": 374144,
+       "len": 8
+      },
+      "q_rope": {
+       "offset": 374176,
+       "len": 16
+      },
+      "k_rope": {
+       "offset": 374240,
+       "len": 8
+      },
+      "core": {
+       "offset": 374272,
+       "len": 16
+      },
+      "gated": {
+       "offset": 374336,
+       "len": 16
+      },
+      "mixer": {
+       "offset": 374400,
+       "len": 8
+      },
+      "post_norm": {
+       "offset": 374432,
+       "len": 8
+      },
+      "mlp_gate": {
+       "offset": 374464,
+       "len": 12
+      },
+      "mlp_up": {
+       "offset": 374512,
+       "len": 12
+      },
+      "mlp_act": {
+       "offset": 374560,
+       "len": 12
+      },
+      "mlp": {
+       "offset": 374608,
+       "len": 8
+      },
+      "output": {
+       "offset": 374640,
+       "len": 8
+      },
+      "residual": {
+       "offset": 374672,
+       "len": 8
+      }
+     },
+     "conv_state": {
+      "offset": 374864,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 374864,
+      "len": 0
+     },
+     "keys": {
+      "offset": 374864,
+      "len": 40
+     },
+     "values": {
+      "offset": 375024,
+      "len": 40
+     }
+    }
+   ]
+  },
+  {
+   "config": {
+    "transformers_version": "5.17.0",
+    "architectures": null,
+    "output_hidden_states": false,
+    "return_dict": true,
+    "dtype": null,
+    "chunk_size_feed_forward": 0,
+    "is_encoder_decoder": false,
+    "id2label": {
+     "0": "LABEL_0",
+     "1": "LABEL_1"
+    },
+    "label2id": {
+     "LABEL_0": 0,
+     "LABEL_1": 1
+    },
+    "problem_type": null,
+    "vocab_size": 248320,
+    "hidden_size": 8,
+    "intermediate_size": 12,
+    "num_hidden_layers": 4,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 1,
+    "hidden_act": "silu",
+    "max_position_embeddings": 32768,
+    "initializer_range": 0.02,
+    "rms_norm_eps": 1e-06,
+    "use_cache": true,
+    "tie_word_embeddings": false,
+    "rope_parameters": {
+     "rope_type": "default",
+     "rope_theta": 10000000.0,
+     "partial_rotary_factor": 0.5,
+     "mrope_section": [
+      1,
+      1,
+      0
+     ]
+    },
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "head_dim": 8,
+    "linear_conv_kernel_dim": 4,
+    "linear_key_head_dim": 3,
+    "linear_value_head_dim": 4,
+    "linear_num_key_heads": 2,
+    "linear_num_value_heads": 4,
+    "layer_types": [
+     "linear_attention",
+     "linear_attention",
+     "linear_attention",
+     "full_attention"
+    ],
+    "pad_token_id": null,
+    "bos_token_id": null,
+    "eos_token_id": null,
+    "_name_or_path": "",
+    "partial_rotary_factor": 0.25,
+    "model_type": "qwen3_5_text",
+    "output_attentions": false
+   },
+   "kind": "linear_attention",
+   "weights": {
+    "linear_attn.dt_bias": {
+     "offset": 375184,
+     "len": 4
+    },
+    "linear_attn.A_log": {
+     "offset": 375200,
+     "len": 4
+    },
+    "linear_attn.conv1d.weight": {
+     "offset": 375216,
+     "len": 112
+    },
+    "linear_attn.norm.weight": {
+     "offset": 375664,
+     "len": 4
+    },
+    "linear_attn.out_proj.weight": {
+     "offset": 375680,
+     "len": 128
+    },
+    "linear_attn.in_proj_qkv.weight": {
+     "offset": 376192,
+     "len": 224
+    },
+    "linear_attn.in_proj_z.weight": {
+     "offset": 377088,
+     "len": 128
+    },
+    "linear_attn.in_proj_b.weight": {
+     "offset": 377600,
+     "len": 32
+    },
+    "linear_attn.in_proj_a.weight": {
+     "offset": 377728,
+     "len": 32
+    },
+    "mlp.gate_proj.weight": {
+     "offset": 377856,
+     "len": 96
+    },
+    "mlp.up_proj.weight": {
+     "offset": 378240,
+     "len": 96
+    },
+    "mlp.down_proj.weight": {
+     "offset": 378624,
+     "len": 96
+    },
+    "input_layernorm.weight": {
+     "offset": 379008,
+     "len": 8
+    },
+    "post_attention_layernorm.weight": {
+     "offset": 379040,
+     "len": 8
+    }
+   },
+   "cases": [
+    {
+     "prefix": {
+      "offset": 380000,
+      "len": 0
+     },
+     "input": {
+      "offset": 380000,
+      "len": 8
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 379072,
+       "len": 8
+      },
+      "qkv": {
+       "offset": 379104,
+       "len": 28
+      },
+      "z": {
+       "offset": 379216,
+       "len": 16
+      },
+      "b": {
+       "offset": 379280,
+       "len": 4
+      },
+      "a": {
+       "offset": 379296,
+       "len": 4
+      },
+      "conv": {
+       "offset": 379312,
+       "len": 28
+      },
+      "query": {
+       "offset": 379424,
+       "len": 6
+      },
+      "key": {
+       "offset": 379448,
+       "len": 6
+      },
+      "value": {
+       "offset": 379472,
+       "len": 16
+      },
+      "g": {
+       "offset": 379536,
+       "len": 4
+      },
+      "beta": {
+       "offset": 379552,
+       "len": 4
+      },
+      "core": {
+       "offset": 379568,
+       "len": 16
+      },
+      "gated": {
+       "offset": 379632,
+       "len": 16
+      },
+      "mixer": {
+       "offset": 379696,
+       "len": 8
+      },
+      "post_norm": {
+       "offset": 379728,
+       "len": 8
+      },
+      "mlp_gate": {
+       "offset": 379760,
+       "len": 12
+      },
+      "mlp_up": {
+       "offset": 379808,
+       "len": 12
+      },
+      "mlp_act": {
+       "offset": 379856,
+       "len": 12
+      },
+      "mlp": {
+       "offset": 379904,
+       "len": 8
+      },
+      "output": {
+       "offset": 379936,
+       "len": 8
+      },
+      "residual": {
+       "offset": 379968,
+       "len": 8
+      }
+     },
+     "conv_state": {
+      "offset": 380032,
+      "len": 112
+     },
+     "recurrent": {
+      "offset": 380480,
+      "len": 48
+     },
+     "keys": {
+      "offset": 380672,
+      "len": 0
+     },
+     "values": {
+      "offset": 380672,
+      "len": 0
+     }
+    },
+    {
+     "prefix": {
+      "offset": 382528,
+      "len": 32
+     },
+     "input": {
+      "offset": 382656,
+      "len": 16
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 380672,
+       "len": 16
+      },
+      "qkv": {
+       "offset": 380736,
+       "len": 56
+      },
+      "z": {
+       "offset": 380960,
+       "len": 32
+      },
+      "b": {
+       "offset": 381088,
+       "len": 8
+      },
+      "a": {
+       "offset": 381120,
+       "len": 8
+      },
+      "conv": {
+       "offset": 381152,
+       "len": 56
+      },
+      "query": {
+       "offset": 381376,
+       "len": 12
+      },
+      "key": {
+       "offset": 381424,
+       "len": 12
+      },
+      "value": {
+       "offset": 381472,
+       "len": 32
+      },
+      "g": {
+       "offset": 381600,
+       "len": 8
+      },
+      "beta": {
+       "offset": 381632,
+       "len": 8
+      },
+      "core": {
+       "offset": 381664,
+       "len": 32
+      },
+      "gated": {
+       "offset": 381792,
+       "len": 32
+      },
+      "mixer": {
+       "offset": 381920,
+       "len": 16
+      },
+      "post_norm": {
+       "offset": 381984,
+       "len": 16
+      },
+      "mlp_gate": {
+       "offset": 382048,
+       "len": 24
+      },
+      "mlp_up": {
+       "offset": 382144,
+       "len": 24
+      },
+      "mlp_act": {
+       "offset": 382240,
+       "len": 24
+      },
+      "mlp": {
+       "offset": 382336,
+       "len": 16
+      },
+      "output": {
+       "offset": 382400,
+       "len": 16
+      },
+      "residual": {
+       "offset": 382464,
+       "len": 16
+      }
+     },
+     "conv_state": {
+      "offset": 382720,
+      "len": 112
+     },
+     "recurrent": {
+      "offset": 383168,
+      "len": 48
+     },
+     "keys": {
+      "offset": 383360,
+      "len": 0
+     },
+     "values": {
+      "offset": 383360,
+      "len": 0
+     }
+    },
+    {
+     "prefix": {
+      "offset": 387072,
+      "len": 0
+     },
+     "input": {
+      "offset": 387072,
+      "len": 32
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 383360,
+       "len": 32
+      },
+      "qkv": {
+       "offset": 383488,
+       "len": 112
+      },
+      "z": {
+       "offset": 383936,
+       "len": 64
+      },
+      "b": {
+       "offset": 384192,
+       "len": 16
+      },
+      "a": {
+       "offset": 384256,
+       "len": 16
+      },
+      "conv": {
+       "offset": 384320,
+       "len": 112
+      },
+      "query": {
+       "offset": 384768,
+       "len": 24
+      },
+      "key": {
+       "offset": 384864,
+       "len": 24
+      },
+      "value": {
+       "offset": 384960,
+       "len": 64
+      },
+      "g": {
+       "offset": 385216,
+       "len": 16
+      },
+      "beta": {
+       "offset": 385280,
+       "len": 16
+      },
+      "core": {
+       "offset": 385344,
+       "len": 64
+      },
+      "gated": {
+       "offset": 385600,
+       "len": 64
+      },
+      "mixer": {
+       "offset": 385856,
+       "len": 32
+      },
+      "post_norm": {
+       "offset": 385984,
+       "len": 32
+      },
+      "mlp_gate": {
+       "offset": 386112,
+       "len": 48
+      },
+      "mlp_up": {
+       "offset": 386304,
+       "len": 48
+      },
+      "mlp_act": {
+       "offset": 386496,
+       "len": 48
+      },
+      "mlp": {
+       "offset": 386688,
+       "len": 32
+      },
+      "output": {
+       "offset": 386816,
+       "len": 32
+      },
+      "residual": {
+       "offset": 386944,
+       "len": 32
+      }
+     },
+     "conv_state": {
+      "offset": 387200,
+      "len": 112
+     },
+     "recurrent": {
+      "offset": 387648,
+      "len": 48
+     },
+     "keys": {
+      "offset": 387840,
+      "len": 0
+     },
+     "values": {
+      "offset": 387840,
+      "len": 0
+     }
+    },
+    {
+     "prefix": {
+      "offset": 402688,
+      "len": 0
+     },
+     "input": {
+      "offset": 402688,
+      "len": 128
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 387840,
+       "len": 128
+      },
+      "qkv": {
+       "offset": 388352,
+       "len": 448
+      },
+      "z": {
+       "offset": 390144,
+       "len": 256
+      },
+      "b": {
+       "offset": 391168,
+       "len": 64
+      },
+      "a": {
+       "offset": 391424,
+       "len": 64
+      },
+      "conv": {
+       "offset": 391680,
+       "len": 448
+      },
+      "query": {
+       "offset": 393472,
+       "len": 96
+      },
+      "key": {
+       "offset": 393856,
+       "len": 96
+      },
+      "value": {
+       "offset": 394240,
+       "len": 256
+      },
+      "g": {
+       "offset": 395264,
+       "len": 64
+      },
+      "beta": {
+       "offset": 395520,
+       "len": 64
+      },
+      "core": {
+       "offset": 395776,
+       "len": 256
+      },
+      "gated": {
+       "offset": 396800,
+       "len": 256
+      },
+      "mixer": {
+       "offset": 397824,
+       "len": 128
+      },
+      "post_norm": {
+       "offset": 398336,
+       "len": 128
+      },
+      "mlp_gate": {
+       "offset": 398848,
+       "len": 192
+      },
+      "mlp_up": {
+       "offset": 399616,
+       "len": 192
+      },
+      "mlp_act": {
+       "offset": 400384,
+       "len": 192
+      },
+      "mlp": {
+       "offset": 401152,
+       "len": 128
+      },
+      "output": {
+       "offset": 401664,
+       "len": 128
+      },
+      "residual": {
+       "offset": 402176,
+       "len": 128
+      }
+     },
+     "conv_state": {
+      "offset": 403200,
+      "len": 112
+     },
+     "recurrent": {
+      "offset": 403648,
+      "len": 48
+     },
+     "keys": {
+      "offset": 403840,
+      "len": 0
+     },
+     "values": {
+      "offset": 403840,
+      "len": 0
+     }
+    },
+    {
+     "prefix": {
+      "offset": 464160,
+      "len": 32
+     },
+     "input": {
+      "offset": 464288,
+      "len": 520
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 403840,
+       "len": 520
+      },
+      "qkv": {
+       "offset": 405920,
+       "len": 1820
+      },
+      "z": {
+       "offset": 413200,
+       "len": 1040
+      },
+      "b": {
+       "offset": 417360,
+       "len": 260
+      },
+      "a": {
+       "offset": 418400,
+       "len": 260
+      },
+      "conv": {
+       "offset": 419440,
+       "len": 1820
+      },
+      "query": {
+       "offset": 426720,
+       "len": 390
+      },
+      "key": {
+       "offset": 428280,
+       "len": 390
+      },
+      "value": {
+       "offset": 429840,
+       "len": 1040
+      },
+      "g": {
+       "offset": 434000,
+       "len": 260
+      },
+      "beta": {
+       "offset": 435040,
+       "len": 260
+      },
+      "core": {
+       "offset": 436080,
+       "len": 1040
+      },
+      "gated": {
+       "offset": 440240,
+       "len": 1040
+      },
+      "mixer": {
+       "offset": 444400,
+       "len": 520
+      },
+      "post_norm": {
+       "offset": 446480,
+       "len": 520
+      },
+      "mlp_gate": {
+       "offset": 448560,
+       "len": 780
+      },
+      "mlp_up": {
+       "offset": 451680,
+       "len": 780
+      },
+      "mlp_act": {
+       "offset": 454800,
+       "len": 780
+      },
+      "mlp": {
+       "offset": 457920,
+       "len": 520
+      },
+      "output": {
+       "offset": 460000,
+       "len": 520
+      },
+      "residual": {
+       "offset": 462080,
+       "len": 520
+      }
+     },
+     "conv_state": {
+      "offset": 466368,
+      "len": 112
+     },
+     "recurrent": {
+      "offset": 466816,
+      "len": 48
+     },
+     "keys": {
+      "offset": 467008,
+      "len": 0
+     },
+     "values": {
+      "offset": 467008,
+      "len": 0
+     }
+    },
+    {
+     "prefix": {
+      "offset": 585792,
+      "len": 0
+     },
+     "input": {
+      "offset": 585792,
+      "len": 1024
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 467008,
+       "len": 1024
+      },
+      "qkv": {
+       "offset": 471104,
+       "len": 3584
+      },
+      "z": {
+       "offset": 485440,
+       "len": 2048
+      },
+      "b": {
+       "offset": 493632,
+       "len": 512
+      },
+      "a": {
+       "offset": 495680,
+       "len": 512
+      },
+      "conv": {
+       "offset": 497728,
+       "len": 3584
+      },
+      "query": {
+       "offset": 512064,
+       "len": 768
+      },
+      "key": {
+       "offset": 515136,
+       "len": 768
+      },
+      "value": {
+       "offset": 518208,
+       "len": 2048
+      },
+      "g": {
+       "offset": 526400,
+       "len": 512
+      },
+      "beta": {
+       "offset": 528448,
+       "len": 512
+      },
+      "core": {
+       "offset": 530496,
+       "len": 2048
+      },
+      "gated": {
+       "offset": 538688,
+       "len": 2048
+      },
+      "mixer": {
+       "offset": 546880,
+       "len": 1024
+      },
+      "post_norm": {
+       "offset": 550976,
+       "len": 1024
+      },
+      "mlp_gate": {
+       "offset": 555072,
+       "len": 1536
+      },
+      "mlp_up": {
+       "offset": 561216,
+       "len": 1536
+      },
+      "mlp_act": {
+       "offset": 567360,
+       "len": 1536
+      },
+      "mlp": {
+       "offset": 573504,
+       "len": 1024
+      },
+      "output": {
+       "offset": 577600,
+       "len": 1024
+      },
+      "residual": {
+       "offset": 581696,
+       "len": 1024
+      }
+     },
+     "conv_state": {
+      "offset": 589888,
+      "len": 112
+     },
+     "recurrent": {
+      "offset": 590336,
+      "len": 48
+     },
+     "keys": {
+      "offset": 590528,
+      "len": 0
+     },
+     "values": {
+      "offset": 590528,
+      "len": 0
+     }
+    },
+    {
+     "prefix": {
+      "offset": 591456,
+      "len": 32
+     },
+     "input": {
+      "offset": 591584,
+      "len": 8
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 590528,
+       "len": 8
+      },
+      "qkv": {
+       "offset": 590560,
+       "len": 28
+      },
+      "z": {
+       "offset": 590672,
+       "len": 16
+      },
+      "b": {
+       "offset": 590736,
+       "len": 4
+      },
+      "a": {
+       "offset": 590752,
+       "len": 4
+      },
+      "conv": {
+       "offset": 590768,
+       "len": 28
+      },
+      "query": {
+       "offset": 590880,
+       "len": 6
+      },
+      "key": {
+       "offset": 590904,
+       "len": 6
+      },
+      "value": {
+       "offset": 590928,
+       "len": 16
+      },
+      "g": {
+       "offset": 590992,
+       "len": 4
+      },
+      "beta": {
+       "offset": 591008,
+       "len": 4
+      },
+      "core": {
+       "offset": 591024,
+       "len": 16
+      },
+      "gated": {
+       "offset": 591088,
+       "len": 16
+      },
+      "mixer": {
+       "offset": 591152,
+       "len": 8
+      },
+      "post_norm": {
+       "offset": 591184,
+       "len": 8
+      },
+      "mlp_gate": {
+       "offset": 591216,
+       "len": 12
+      },
+      "mlp_up": {
+       "offset": 591264,
+       "len": 12
+      },
+      "mlp_act": {
+       "offset": 591312,
+       "len": 12
+      },
+      "mlp": {
+       "offset": 591360,
+       "len": 8
+      },
+      "output": {
+       "offset": 591392,
+       "len": 8
+      },
+      "residual": {
+       "offset": 591424,
+       "len": 8
+      }
+     },
+     "conv_state": {
+      "offset": 591616,
+      "len": 112
+     },
+     "recurrent": {
+      "offset": 592064,
+      "len": 48
+     },
+     "keys": {
+      "offset": 592256,
+      "len": 0
+     },
+     "values": {
+      "offset": 592256,
+      "len": 0
+     }
+    }
+   ]
+  },
+  {
+   "config": {
+    "transformers_version": "5.17.0",
+    "architectures": null,
+    "output_hidden_states": false,
+    "return_dict": true,
+    "dtype": null,
+    "chunk_size_feed_forward": 0,
+    "is_encoder_decoder": false,
+    "id2label": {
+     "0": "LABEL_0",
+     "1": "LABEL_1"
+    },
+    "label2id": {
+     "LABEL_0": 0,
+     "LABEL_1": 1
+    },
+    "problem_type": null,
+    "vocab_size": 248320,
+    "hidden_size": 8,
+    "intermediate_size": 12,
+    "num_hidden_layers": 4,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 1,
+    "hidden_act": "silu",
+    "max_position_embeddings": 32768,
+    "initializer_range": 0.02,
+    "rms_norm_eps": 1e-06,
+    "use_cache": true,
+    "tie_word_embeddings": false,
+    "rope_parameters": {
+     "rope_type": "default",
+     "rope_theta": 10000000.0,
+     "partial_rotary_factor": 0.5,
+     "mrope_section": [
+      1,
+      1,
+      0
+     ]
+    },
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "head_dim": 8,
+    "linear_conv_kernel_dim": 4,
+    "linear_key_head_dim": 3,
+    "linear_value_head_dim": 4,
+    "linear_num_key_heads": 2,
+    "linear_num_value_heads": 4,
+    "layer_types": [
+     "linear_attention",
+     "linear_attention",
+     "linear_attention",
+     "full_attention"
+    ],
+    "pad_token_id": null,
+    "bos_token_id": null,
+    "eos_token_id": null,
+    "_name_or_path": "",
+    "partial_rotary_factor": 0.25,
+    "model_type": "qwen3_5_text",
+    "output_attentions": false
+   },
+   "kind": "full_attention",
+   "weights": {
+    "self_attn.q_proj.weight": {
+     "offset": 592256,
+     "len": 256
+    },
+    "self_attn.k_proj.weight": {
+     "offset": 593280,
+     "len": 64
+    },
+    "self_attn.v_proj.weight": {
+     "offset": 593536,
+     "len": 64
+    },
+    "self_attn.o_proj.weight": {
+     "offset": 593792,
+     "len": 128
+    },
+    "self_attn.q_norm.weight": {
+     "offset": 594304,
+     "len": 8
+    },
+    "self_attn.k_norm.weight": {
+     "offset": 594336,
+     "len": 8
+    },
+    "mlp.gate_proj.weight": {
+     "offset": 594368,
+     "len": 96
+    },
+    "mlp.up_proj.weight": {
+     "offset": 594752,
+     "len": 96
+    },
+    "mlp.down_proj.weight": {
+     "offset": 595136,
+     "len": 96
+    },
+    "input_layernorm.weight": {
+     "offset": 595520,
+     "len": 8
+    },
+    "post_attention_layernorm.weight": {
+     "offset": 595552,
+     "len": 8
+    }
+   },
+   "cases": [
+    {
+     "prefix": {
+      "offset": 596432,
+      "len": 0
+     },
+     "input": {
+      "offset": 596432,
+      "len": 8
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 595584,
+       "len": 8
+      },
+      "q_gate": {
+       "offset": 595616,
+       "len": 32
+      },
+      "q_norm": {
+       "offset": 595744,
+       "len": 16
+      },
+      "k_proj": {
+       "offset": 595808,
+       "len": 8
+      },
+      "k_norm": {
+       "offset": 595840,
+       "len": 8
+      },
+      "v_proj": {
+       "offset": 595872,
+       "len": 8
+      },
+      "q_rope": {
+       "offset": 595904,
+       "len": 16
+      },
+      "k_rope": {
+       "offset": 595968,
+       "len": 8
+      },
+      "core": {
+       "offset": 596000,
+       "len": 16
+      },
+      "gated": {
+       "offset": 596064,
+       "len": 16
+      },
+      "mixer": {
+       "offset": 596128,
+       "len": 8
+      },
+      "post_norm": {
+       "offset": 596160,
+       "len": 8
+      },
+      "mlp_gate": {
+       "offset": 596192,
+       "len": 12
+      },
+      "mlp_up": {
+       "offset": 596240,
+       "len": 12
+      },
+      "mlp_act": {
+       "offset": 596288,
+       "len": 12
+      },
+      "mlp": {
+       "offset": 596336,
+       "len": 8
+      },
+      "output": {
+       "offset": 596368,
+       "len": 8
+      },
+      "residual": {
+       "offset": 596400,
+       "len": 8
+      }
+     },
+     "conv_state": {
+      "offset": 596464,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 596464,
+      "len": 0
+     },
+     "keys": {
+      "offset": 596464,
+      "len": 8
+     },
+     "values": {
+      "offset": 596496,
+      "len": 8
+     }
+    },
+    {
+     "prefix": {
+      "offset": 598224,
+      "len": 32
+     },
+     "input": {
+      "offset": 598352,
+      "len": 16
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 596528,
+       "len": 16
+      },
+      "q_gate": {
+       "offset": 596592,
+       "len": 64
+      },
+      "q_norm": {
+       "offset": 596848,
+       "len": 32
+      },
+      "k_proj": {
+       "offset": 596976,
+       "len": 16
+      },
+      "k_norm": {
+       "offset": 597040,
+       "len": 16
+      },
+      "v_proj": {
+       "offset": 597104,
+       "len": 16
+      },
+      "q_rope": {
+       "offset": 597168,
+       "len": 32
+      },
+      "k_rope": {
+       "offset": 597296,
+       "len": 16
+      },
+      "core": {
+       "offset": 597360,
+       "len": 32
+      },
+      "gated": {
+       "offset": 597488,
+       "len": 32
+      },
+      "mixer": {
+       "offset": 597616,
+       "len": 16
+      },
+      "post_norm": {
+       "offset": 597680,
+       "len": 16
+      },
+      "mlp_gate": {
+       "offset": 597744,
+       "len": 24
+      },
+      "mlp_up": {
+       "offset": 597840,
+       "len": 24
+      },
+      "mlp_act": {
+       "offset": 597936,
+       "len": 24
+      },
+      "mlp": {
+       "offset": 598032,
+       "len": 16
+      },
+      "output": {
+       "offset": 598096,
+       "len": 16
+      },
+      "residual": {
+       "offset": 598160,
+       "len": 16
+      }
+     },
+     "conv_state": {
+      "offset": 598416,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 598416,
+      "len": 0
+     },
+     "keys": {
+      "offset": 598416,
+      "len": 48
+     },
+     "values": {
+      "offset": 598608,
+      "len": 48
+     }
+    },
+    {
+     "prefix": {
+      "offset": 602192,
+      "len": 0
+     },
+     "input": {
+      "offset": 602192,
+      "len": 32
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 598800,
+       "len": 32
+      },
+      "q_gate": {
+       "offset": 598928,
+       "len": 128
+      },
+      "q_norm": {
+       "offset": 599440,
+       "len": 64
+      },
+      "k_proj": {
+       "offset": 599696,
+       "len": 32
+      },
+      "k_norm": {
+       "offset": 599824,
+       "len": 32
+      },
+      "v_proj": {
+       "offset": 599952,
+       "len": 32
+      },
+      "q_rope": {
+       "offset": 600080,
+       "len": 64
+      },
+      "k_rope": {
+       "offset": 600336,
+       "len": 32
+      },
+      "core": {
+       "offset": 600464,
+       "len": 64
+      },
+      "gated": {
+       "offset": 600720,
+       "len": 64
+      },
+      "mixer": {
+       "offset": 600976,
+       "len": 32
+      },
+      "post_norm": {
+       "offset": 601104,
+       "len": 32
+      },
+      "mlp_gate": {
+       "offset": 601232,
+       "len": 48
+      },
+      "mlp_up": {
+       "offset": 601424,
+       "len": 48
+      },
+      "mlp_act": {
+       "offset": 601616,
+       "len": 48
+      },
+      "mlp": {
+       "offset": 601808,
+       "len": 32
+      },
+      "output": {
+       "offset": 601936,
+       "len": 32
+      },
+      "residual": {
+       "offset": 602064,
+       "len": 32
+      }
+     },
+     "conv_state": {
+      "offset": 602320,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 602320,
+      "len": 0
+     },
+     "keys": {
+      "offset": 602320,
+      "len": 32
+     },
+     "values": {
+      "offset": 602448,
+      "len": 32
+     }
+    },
+    {
+     "prefix": {
+      "offset": 616144,
+      "len": 0
+     },
+     "input": {
+      "offset": 616144,
+      "len": 128
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 602576,
+       "len": 128
+      },
+      "q_gate": {
+       "offset": 603088,
+       "len": 512
+      },
+      "q_norm": {
+       "offset": 605136,
+       "len": 256
+      },
+      "k_proj": {
+       "offset": 606160,
+       "len": 128
+      },
+      "k_norm": {
+       "offset": 606672,
+       "len": 128
+      },
+      "v_proj": {
+       "offset": 607184,
+       "len": 128
+      },
+      "q_rope": {
+       "offset": 607696,
+       "len": 256
+      },
+      "k_rope": {
+       "offset": 608720,
+       "len": 128
+      },
+      "core": {
+       "offset": 609232,
+       "len": 256
+      },
+      "gated": {
+       "offset": 610256,
+       "len": 256
+      },
+      "mixer": {
+       "offset": 611280,
+       "len": 128
+      },
+      "post_norm": {
+       "offset": 611792,
+       "len": 128
+      },
+      "mlp_gate": {
+       "offset": 612304,
+       "len": 192
+      },
+      "mlp_up": {
+       "offset": 613072,
+       "len": 192
+      },
+      "mlp_act": {
+       "offset": 613840,
+       "len": 192
+      },
+      "mlp": {
+       "offset": 614608,
+       "len": 128
+      },
+      "output": {
+       "offset": 615120,
+       "len": 128
+      },
+      "residual": {
+       "offset": 615632,
+       "len": 128
+      }
+     },
+     "conv_state": {
+      "offset": 616656,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 616656,
+      "len": 0
+     },
+     "keys": {
+      "offset": 616656,
+      "len": 128
+     },
+     "values": {
+      "offset": 617168,
+      "len": 128
+     }
+    },
+    {
+     "prefix": {
+      "offset": 672800,
+      "len": 32
+     },
+     "input": {
+      "offset": 672928,
+      "len": 520
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 617680,
+       "len": 520
+      },
+      "q_gate": {
+       "offset": 619760,
+       "len": 2080
+      },
+      "q_norm": {
+       "offset": 628080,
+       "len": 1040
+      },
+      "k_proj": {
+       "offset": 632240,
+       "len": 520
+      },
+      "k_norm": {
+       "offset": 634320,
+       "len": 520
+      },
+      "v_proj": {
+       "offset": 636400,
+       "len": 520
+      },
+      "q_rope": {
+       "offset": 638480,
+       "len": 1040
+      },
+      "k_rope": {
+       "offset": 642640,
+       "len": 520
+      },
+      "core": {
+       "offset": 644720,
+       "len": 1040
+      },
+      "gated": {
+       "offset": 648880,
+       "len": 1040
+      },
+      "mixer": {
+       "offset": 653040,
+       "len": 520
+      },
+      "post_norm": {
+       "offset": 655120,
+       "len": 520
+      },
+      "mlp_gate": {
+       "offset": 657200,
+       "len": 780
+      },
+      "mlp_up": {
+       "offset": 660320,
+       "len": 780
+      },
+      "mlp_act": {
+       "offset": 663440,
+       "len": 780
+      },
+      "mlp": {
+       "offset": 666560,
+       "len": 520
+      },
+      "output": {
+       "offset": 668640,
+       "len": 520
+      },
+      "residual": {
+       "offset": 670720,
+       "len": 520
+      }
+     },
+     "conv_state": {
+      "offset": 675008,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 675008,
+      "len": 0
+     },
+     "keys": {
+      "offset": 675008,
+      "len": 552
+     },
+     "values": {
+      "offset": 677216,
+      "len": 552
+     }
+    },
+    {
+     "prefix": {
+      "offset": 787968,
+      "len": 0
+     },
+     "input": {
+      "offset": 787968,
+      "len": 1024
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 679424,
+       "len": 1024
+      },
+      "q_gate": {
+       "offset": 683520,
+       "len": 4096
+      },
+      "q_norm": {
+       "offset": 699904,
+       "len": 2048
+      },
+      "k_proj": {
+       "offset": 708096,
+       "len": 1024
+      },
+      "k_norm": {
+       "offset": 712192,
+       "len": 1024
+      },
+      "v_proj": {
+       "offset": 716288,
+       "len": 1024
+      },
+      "q_rope": {
+       "offset": 720384,
+       "len": 2048
+      },
+      "k_rope": {
+       "offset": 728576,
+       "len": 1024
+      },
+      "core": {
+       "offset": 732672,
+       "len": 2048
+      },
+      "gated": {
+       "offset": 740864,
+       "len": 2048
+      },
+      "mixer": {
+       "offset": 749056,
+       "len": 1024
+      },
+      "post_norm": {
+       "offset": 753152,
+       "len": 1024
+      },
+      "mlp_gate": {
+       "offset": 757248,
+       "len": 1536
+      },
+      "mlp_up": {
+       "offset": 763392,
+       "len": 1536
+      },
+      "mlp_act": {
+       "offset": 769536,
+       "len": 1536
+      },
+      "mlp": {
+       "offset": 775680,
+       "len": 1024
+      },
+      "output": {
+       "offset": 779776,
+       "len": 1024
+      },
+      "residual": {
+       "offset": 783872,
+       "len": 1024
+      }
+     },
+     "conv_state": {
+      "offset": 792064,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 792064,
+      "len": 0
+     },
+     "keys": {
+      "offset": 792064,
+      "len": 1024
+     },
+     "values": {
+      "offset": 796160,
+      "len": 1024
+     }
+    },
+    {
+     "prefix": {
+      "offset": 801104,
+      "len": 32
+     },
+     "input": {
+      "offset": 801232,
+      "len": 8
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 800256,
+       "len": 8
+      },
+      "q_gate": {
+       "offset": 800288,
+       "len": 32
+      },
+      "q_norm": {
+       "offset": 800416,
+       "len": 16
+      },
+      "k_proj": {
+       "offset": 800480,
+       "len": 8
+      },
+      "k_norm": {
+       "offset": 800512,
+       "len": 8
+      },
+      "v_proj": {
+       "offset": 800544,
+       "len": 8
+      },
+      "q_rope": {
+       "offset": 800576,
+       "len": 16
+      },
+      "k_rope": {
+       "offset": 800640,
+       "len": 8
+      },
+      "core": {
+       "offset": 800672,
+       "len": 16
+      },
+      "gated": {
+       "offset": 800736,
+       "len": 16
+      },
+      "mixer": {
+       "offset": 800800,
+       "len": 8
+      },
+      "post_norm": {
+       "offset": 800832,
+       "len": 8
+      },
+      "mlp_gate": {
+       "offset": 800864,
+       "len": 12
+      },
+      "mlp_up": {
+       "offset": 800912,
+       "len": 12
+      },
+      "mlp_act": {
+       "offset": 800960,
+       "len": 12
+      },
+      "mlp": {
+       "offset": 801008,
+       "len": 8
+      },
+      "output": {
+       "offset": 801040,
+       "len": 8
+      },
+      "residual": {
+       "offset": 801072,
+       "len": 8
+      }
+     },
+     "conv_state": {
+      "offset": 801264,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 801264,
+      "len": 0
+     },
+     "keys": {
+      "offset": 801264,
+      "len": 40
+     },
+     "values": {
+      "offset": 801424,
+      "len": 40
+     }
+    }
+   ]
+  },
+  {
+   "config": {
+    "transformers_version": "5.17.0",
+    "architectures": null,
+    "output_hidden_states": false,
+    "return_dict": true,
+    "dtype": null,
+    "chunk_size_feed_forward": 0,
+    "is_encoder_decoder": false,
+    "id2label": {
+     "0": "LABEL_0",
+     "1": "LABEL_1"
+    },
+    "label2id": {
+     "LABEL_0": 0,
+     "LABEL_1": 1
+    },
+    "problem_type": null,
+    "vocab_size": 248320,
+    "hidden_size": 8,
+    "intermediate_size": 12,
+    "num_hidden_layers": 4,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 1,
+    "hidden_act": "silu",
+    "max_position_embeddings": 32768,
+    "initializer_range": 0.02,
+    "rms_norm_eps": 1e-06,
+    "use_cache": true,
+    "tie_word_embeddings": false,
+    "rope_parameters": {
+     "rope_type": "default",
+     "rope_theta": 10000000.0,
+     "partial_rotary_factor": 0.25,
+     "mrope_section": [
+      11,
+      11,
+      10
+     ]
+    },
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "head_dim": 256,
+    "linear_conv_kernel_dim": 4,
+    "linear_key_head_dim": 128,
+    "linear_value_head_dim": 128,
+    "linear_num_key_heads": 2,
+    "linear_num_value_heads": 2,
+    "layer_types": [
+     "linear_attention",
+     "linear_attention",
+     "linear_attention",
+     "full_attention"
+    ],
+    "pad_token_id": null,
+    "bos_token_id": null,
+    "eos_token_id": null,
+    "_name_or_path": "",
+    "partial_rotary_factor": 0.25,
+    "model_type": "qwen3_5_text",
+    "output_attentions": false
+   },
+   "kind": "linear_attention",
+   "weights": {
+    "linear_attn.dt_bias": {
+     "offset": 801584,
+     "len": 2
+    },
+    "linear_attn.A_log": {
+     "offset": 801592,
+     "len": 2
+    },
+    "linear_attn.conv1d.weight": {
+     "offset": 801600,
+     "len": 3072
+    },
+    "linear_attn.norm.weight": {
+     "offset": 813888,
+     "len": 128
+    },
+    "linear_attn.out_proj.weight": {
+     "offset": 814400,
+     "len": 2048
+    },
+    "linear_attn.in_proj_qkv.weight": {
+     "offset": 822592,
+     "len": 6144
+    },
+    "linear_attn.in_proj_z.weight": {
+     "offset": 847168,
+     "len": 2048
+    },
+    "linear_attn.in_proj_b.weight": {
+     "offset": 855360,
+     "len": 16
+    },
+    "linear_attn.in_proj_a.weight": {
+     "offset": 855424,
+     "len": 16
+    },
+    "mlp.gate_proj.weight": {
+     "offset": 855488,
+     "len": 96
+    },
+    "mlp.up_proj.weight": {
+     "offset": 855872,
+     "len": 96
+    },
+    "mlp.down_proj.weight": {
+     "offset": 856256,
+     "len": 96
+    },
+    "input_layernorm.weight": {
+     "offset": 856640,
+     "len": 8
+    },
+    "post_attention_layernorm.weight": {
+     "offset": 856672,
+     "len": 8
+    }
+   },
+   "cases": [
+    {
+     "prefix": {
+      "offset": 869360,
+      "len": 0
+     },
+     "input": {
+      "offset": 869360,
+      "len": 8
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 856704,
+       "len": 8
+      },
+      "qkv": {
+       "offset": 856736,
+       "len": 768
+      },
+      "z": {
+       "offset": 859808,
+       "len": 256
+      },
+      "b": {
+       "offset": 860832,
+       "len": 2
+      },
+      "a": {
+       "offset": 860840,
+       "len": 2
+      },
+      "conv": {
+       "offset": 860848,
+       "len": 768
+      },
+      "query": {
+       "offset": 863920,
+       "len": 256
+      },
+      "key": {
+       "offset": 864944,
+       "len": 256
+      },
+      "value": {
+       "offset": 865968,
+       "len": 256
+      },
+      "g": {
+       "offset": 866992,
+       "len": 2
+      },
+      "beta": {
+       "offset": 867000,
+       "len": 2
+      },
+      "core": {
+       "offset": 867008,
+       "len": 256
+      },
+      "gated": {
+       "offset": 868032,
+       "len": 256
+      },
+      "mixer": {
+       "offset": 869056,
+       "len": 8
+      },
+      "post_norm": {
+       "offset": 869088,
+       "len": 8
+      },
+      "mlp_gate": {
+       "offset": 869120,
+       "len": 12
+      },
+      "mlp_up": {
+       "offset": 869168,
+       "len": 12
+      },
+      "mlp_act": {
+       "offset": 869216,
+       "len": 12
+      },
+      "mlp": {
+       "offset": 869264,
+       "len": 8
+      },
+      "output": {
+       "offset": 869296,
+       "len": 8
+      },
+      "residual": {
+       "offset": 869328,
+       "len": 8
+      }
+     },
+     "conv_state": {
+      "offset": 869392,
+      "len": 3072
+     },
+     "recurrent": {
+      "offset": 881680,
+      "len": 32768
+     },
+     "keys": {
+      "offset": 1012752,
+      "len": 0
+     },
+     "values": {
+      "offset": 1012752,
+      "len": 0
+     }
+    },
+    {
+     "prefix": {
+      "offset": 1835392,
+      "len": 32
+     },
+     "input": {
+      "offset": 1835520,
+      "len": 520
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 1012752,
+       "len": 520
+      },
+      "qkv": {
+       "offset": 1014832,
+       "len": 49920
+      },
+      "z": {
+       "offset": 1214512,
+       "len": 16640
+      },
+      "b": {
+       "offset": 1281072,
+       "len": 130
+      },
+      "a": {
+       "offset": 1281592,
+       "len": 130
+      },
+      "conv": {
+       "offset": 1282112,
+       "len": 49920
+      },
+      "query": {
+       "offset": 1481792,
+       "len": 16640
+      },
+      "key": {
+       "offset": 1548352,
+       "len": 16640
+      },
+      "value": {
+       "offset": 1614912,
+       "len": 16640
+      },
+      "g": {
+       "offset": 1681472,
+       "len": 130
+      },
+      "beta": {
+       "offset": 1681992,
+       "len": 130
+      },
+      "core": {
+       "offset": 1682512,
+       "len": 16640
+      },
+      "gated": {
+       "offset": 1749072,
+       "len": 16640
+      },
+      "mixer": {
+       "offset": 1815632,
+       "len": 520
+      },
+      "post_norm": {
+       "offset": 1817712,
+       "len": 520
+      },
+      "mlp_gate": {
+       "offset": 1819792,
+       "len": 780
+      },
+      "mlp_up": {
+       "offset": 1822912,
+       "len": 780
+      },
+      "mlp_act": {
+       "offset": 1826032,
+       "len": 780
+      },
+      "mlp": {
+       "offset": 1829152,
+       "len": 520
+      },
+      "output": {
+       "offset": 1831232,
+       "len": 520
+      },
+      "residual": {
+       "offset": 1833312,
+       "len": 520
+      }
+     },
+     "conv_state": {
+      "offset": 1837600,
+      "len": 3072
+     },
+     "recurrent": {
+      "offset": 1849888,
+      "len": 32768
+     },
+     "keys": {
+      "offset": 1980960,
+      "len": 0
+     },
+     "values": {
+      "offset": 1980960,
+      "len": 0
+     }
+    },
+    {
+     "prefix": {
+      "offset": 1993616,
+      "len": 32
+     },
+     "input": {
+      "offset": 1993744,
+      "len": 8
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 1980960,
+       "len": 8
+      },
+      "qkv": {
+       "offset": 1980992,
+       "len": 768
+      },
+      "z": {
+       "offset": 1984064,
+       "len": 256
+      },
+      "b": {
+       "offset": 1985088,
+       "len": 2
+      },
+      "a": {
+       "offset": 1985096,
+       "len": 2
+      },
+      "conv": {
+       "offset": 1985104,
+       "len": 768
+      },
+      "query": {
+       "offset": 1988176,
+       "len": 256
+      },
+      "key": {
+       "offset": 1989200,
+       "len": 256
+      },
+      "value": {
+       "offset": 1990224,
+       "len": 256
+      },
+      "g": {
+       "offset": 1991248,
+       "len": 2
+      },
+      "beta": {
+       "offset": 1991256,
+       "len": 2
+      },
+      "core": {
+       "offset": 1991264,
+       "len": 256
+      },
+      "gated": {
+       "offset": 1992288,
+       "len": 256
+      },
+      "mixer": {
+       "offset": 1993312,
+       "len": 8
+      },
+      "post_norm": {
+       "offset": 1993344,
+       "len": 8
+      },
+      "mlp_gate": {
+       "offset": 1993376,
+       "len": 12
+      },
+      "mlp_up": {
+       "offset": 1993424,
+       "len": 12
+      },
+      "mlp_act": {
+       "offset": 1993472,
+       "len": 12
+      },
+      "mlp": {
+       "offset": 1993520,
+       "len": 8
+      },
+      "output": {
+       "offset": 1993552,
+       "len": 8
+      },
+      "residual": {
+       "offset": 1993584,
+       "len": 8
+      }
+     },
+     "conv_state": {
+      "offset": 1993776,
+      "len": 3072
+     },
+     "recurrent": {
+      "offset": 2006064,
+      "len": 32768
+     },
+     "keys": {
+      "offset": 2137136,
+      "len": 0
+     },
+     "values": {
+      "offset": 2137136,
+      "len": 0
+     }
+    }
+   ]
+  },
+  {
+   "config": {
+    "transformers_version": "5.17.0",
+    "architectures": null,
+    "output_hidden_states": false,
+    "return_dict": true,
+    "dtype": null,
+    "chunk_size_feed_forward": 0,
+    "is_encoder_decoder": false,
+    "id2label": {
+     "0": "LABEL_0",
+     "1": "LABEL_1"
+    },
+    "label2id": {
+     "LABEL_0": 0,
+     "LABEL_1": 1
+    },
+    "problem_type": null,
+    "vocab_size": 248320,
+    "hidden_size": 8,
+    "intermediate_size": 12,
+    "num_hidden_layers": 4,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 1,
+    "hidden_act": "silu",
+    "max_position_embeddings": 32768,
+    "initializer_range": 0.02,
+    "rms_norm_eps": 1e-06,
+    "use_cache": true,
+    "tie_word_embeddings": false,
+    "rope_parameters": {
+     "rope_type": "default",
+     "rope_theta": 10000000.0,
+     "partial_rotary_factor": 0.25,
+     "mrope_section": [
+      11,
+      11,
+      10
+     ]
+    },
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "head_dim": 256,
+    "linear_conv_kernel_dim": 4,
+    "linear_key_head_dim": 128,
+    "linear_value_head_dim": 128,
+    "linear_num_key_heads": 2,
+    "linear_num_value_heads": 2,
+    "layer_types": [
+     "linear_attention",
+     "linear_attention",
+     "linear_attention",
+     "full_attention"
+    ],
+    "pad_token_id": null,
+    "bos_token_id": null,
+    "eos_token_id": null,
+    "_name_or_path": "",
+    "partial_rotary_factor": 0.25,
+    "model_type": "qwen3_5_text",
+    "output_attentions": false
+   },
+   "kind": "full_attention",
+   "weights": {
+    "self_attn.q_proj.weight": {
+     "offset": 2137136,
+     "len": 8192
+    },
+    "self_attn.k_proj.weight": {
+     "offset": 2169904,
+     "len": 2048
+    },
+    "self_attn.v_proj.weight": {
+     "offset": 2178096,
+     "len": 2048
+    },
+    "self_attn.o_proj.weight": {
+     "offset": 2186288,
+     "len": 4096
+    },
+    "self_attn.q_norm.weight": {
+     "offset": 2202672,
+     "len": 256
+    },
+    "self_attn.k_norm.weight": {
+     "offset": 2203696,
+     "len": 256
+    },
+    "mlp.gate_proj.weight": {
+     "offset": 2204720,
+     "len": 96
+    },
+    "mlp.up_proj.weight": {
+     "offset": 2205104,
+     "len": 96
+    },
+    "mlp.down_proj.weight": {
+     "offset": 2205488,
+     "len": 96
+    },
+    "input_layernorm.weight": {
+     "offset": 2205872,
+     "len": 8
+    },
+    "post_attention_layernorm.weight": {
+     "offset": 2205904,
+     "len": 8
+    }
+   },
+   "cases": [
+    {
+     "prefix": {
+      "offset": 2222656,
+      "len": 0
+     },
+     "input": {
+      "offset": 2222656,
+      "len": 8
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 2205936,
+       "len": 8
+      },
+      "q_gate": {
+       "offset": 2205968,
+       "len": 1024
+      },
+      "q_norm": {
+       "offset": 2210064,
+       "len": 512
+      },
+      "k_proj": {
+       "offset": 2212112,
+       "len": 256
+      },
+      "k_norm": {
+       "offset": 2213136,
+       "len": 256
+      },
+      "v_proj": {
+       "offset": 2214160,
+       "len": 256
+      },
+      "q_rope": {
+       "offset": 2215184,
+       "len": 512
+      },
+      "k_rope": {
+       "offset": 2217232,
+       "len": 256
+      },
+      "core": {
+       "offset": 2218256,
+       "len": 512
+      },
+      "gated": {
+       "offset": 2220304,
+       "len": 512
+      },
+      "mixer": {
+       "offset": 2222352,
+       "len": 8
+      },
+      "post_norm": {
+       "offset": 2222384,
+       "len": 8
+      },
+      "mlp_gate": {
+       "offset": 2222416,
+       "len": 12
+      },
+      "mlp_up": {
+       "offset": 2222464,
+       "len": 12
+      },
+      "mlp_act": {
+       "offset": 2222512,
+       "len": 12
+      },
+      "mlp": {
+       "offset": 2222560,
+       "len": 8
+      },
+      "output": {
+       "offset": 2222592,
+       "len": 8
+      },
+      "residual": {
+       "offset": 2222624,
+       "len": 8
+      }
+     },
+     "conv_state": {
+      "offset": 2222688,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 2222688,
+      "len": 0
+     },
+     "keys": {
+      "offset": 2222688,
+      "len": 256
+     },
+     "values": {
+      "offset": 2223712,
+      "len": 256
+     }
+    },
+    {
+     "prefix": {
+      "offset": 3311536,
+      "len": 32
+     },
+     "input": {
+      "offset": 3311664,
+      "len": 520
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 2224736,
+       "len": 520
+      },
+      "q_gate": {
+       "offset": 2226816,
+       "len": 66560
+      },
+      "q_norm": {
+       "offset": 2493056,
+       "len": 33280
+      },
+      "k_proj": {
+       "offset": 2626176,
+       "len": 16640
+      },
+      "k_norm": {
+       "offset": 2692736,
+       "len": 16640
+      },
+      "v_proj": {
+       "offset": 2759296,
+       "len": 16640
+      },
+      "q_rope": {
+       "offset": 2825856,
+       "len": 33280
+      },
+      "k_rope": {
+       "offset": 2958976,
+       "len": 16640
+      },
+      "core": {
+       "offset": 3025536,
+       "len": 33280
+      },
+      "gated": {
+       "offset": 3158656,
+       "len": 33280
+      },
+      "mixer": {
+       "offset": 3291776,
+       "len": 520
+      },
+      "post_norm": {
+       "offset": 3293856,
+       "len": 520
+      },
+      "mlp_gate": {
+       "offset": 3295936,
+       "len": 780
+      },
+      "mlp_up": {
+       "offset": 3299056,
+       "len": 780
+      },
+      "mlp_act": {
+       "offset": 3302176,
+       "len": 780
+      },
+      "mlp": {
+       "offset": 3305296,
+       "len": 520
+      },
+      "output": {
+       "offset": 3307376,
+       "len": 520
+      },
+      "residual": {
+       "offset": 3309456,
+       "len": 520
+      }
+     },
+     "conv_state": {
+      "offset": 3313744,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 3313744,
+      "len": 0
+     },
+     "keys": {
+      "offset": 3313744,
+      "len": 17664
+     },
+     "values": {
+      "offset": 3384400,
+      "len": 17664
+     }
+    },
+    {
+     "prefix": {
+      "offset": 3471776,
+      "len": 32
+     },
+     "input": {
+      "offset": 3471904,
+      "len": 8
+     },
+     "expected": {
+      "input_norm": {
+       "offset": 3455056,
+       "len": 8
+      },
+      "q_gate": {
+       "offset": 3455088,
+       "len": 1024
+      },
+      "q_norm": {
+       "offset": 3459184,
+       "len": 512
+      },
+      "k_proj": {
+       "offset": 3461232,
+       "len": 256
+      },
+      "k_norm": {
+       "offset": 3462256,
+       "len": 256
+      },
+      "v_proj": {
+       "offset": 3463280,
+       "len": 256
+      },
+      "q_rope": {
+       "offset": 3464304,
+       "len": 512
+      },
+      "k_rope": {
+       "offset": 3466352,
+       "len": 256
+      },
+      "core": {
+       "offset": 3467376,
+       "len": 512
+      },
+      "gated": {
+       "offset": 3469424,
+       "len": 512
+      },
+      "mixer": {
+       "offset": 3471472,
+       "len": 8
+      },
+      "post_norm": {
+       "offset": 3471504,
+       "len": 8
+      },
+      "mlp_gate": {
+       "offset": 3471536,
+       "len": 12
+      },
+      "mlp_up": {
+       "offset": 3471584,
+       "len": 12
+      },
+      "mlp_act": {
+       "offset": 3471632,
+       "len": 12
+      },
+      "mlp": {
+       "offset": 3471680,
+       "len": 8
+      },
+      "output": {
+       "offset": 3471712,
+       "len": 8
+      },
+      "residual": {
+       "offset": 3471744,
+       "len": 8
+      }
+     },
+     "conv_state": {
+      "offset": 3471936,
+      "len": 0
+     },
+     "recurrent": {
+      "offset": 3471936,
+      "len": 0
+     },
+     "keys": {
+      "offset": 3471936,
+      "len": 1280
+     },
+     "values": {
+      "offset": 3477056,
+      "len": 1280
+     }
+    }
+   ]
+  }
+ ],
+ "hybrid": [
+  {
+   "offset": 3482176,
+   "len": 520
+  },
+  {
+   "offset": 3484256,
+   "len": 520
+  },
+  {
+   "offset": 3486336,
+   "len": 520
+  },
+  {
+   "offset": 3488416,
+   "len": 520
+  }
+ ],
+ "payload_sha256": "22f7852f49ecf97a4bf8980c93302d8e271a6d85daa20021cc66822b8780b54d"
+}

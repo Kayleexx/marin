@@ -28,10 +28,15 @@ impl Q8 {
             ));
         }
         let q = quantize(bits, rows, cols, scheme)?;
+        Self::packed(q)
+    }
+
+    pub(crate) fn packed(q: crate::Quantized) -> Result<Self, TensorError> {
+        q.validate_int8()?;
         Ok(Self {
-            rows,
-            cols,
-            group: scheme.group,
+            rows: q.rows,
+            cols: q.cols,
+            group: q.scheme.group,
             codes: q.codes,
             scales: q.scales,
         })

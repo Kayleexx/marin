@@ -69,6 +69,14 @@ impl Matrix {
         })
     }
 
+    pub fn from_int8(q: crate::Quantized) -> Result<Self, TensorError> {
+        Ok(Self {
+            rows: q.rows,
+            cols: q.cols,
+            data: Storage::Int8(crate::q8::Q8::packed(q)?),
+        })
+    }
+
     pub fn rows(&self) -> usize {
         self.rows
     }

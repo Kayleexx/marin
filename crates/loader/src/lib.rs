@@ -3,6 +3,8 @@
 mod content_hash;
 mod error;
 mod model_dir;
+pub mod packed;
+mod packed_read;
 mod safetensors;
 mod tokenizer;
 mod weights;

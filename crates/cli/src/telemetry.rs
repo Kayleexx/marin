@@ -85,14 +85,18 @@ pub fn request_lines(o: &Outcome) -> Vec<String> {
 /// Memory the model and this process hold right now.
 pub fn resource_lines(s: &Session) -> Vec<String> {
     let fp = &s.loaded.footprint;
-    let used = KvCache::bytes_for(
-        s.loaded.model.config().layers,
-        s.loaded.model.config().kv_heads,
-        s.loaded.model.config().head_dim,
-        s.kv().used(),
-    )
-    .and_then(|b| u64::try_from(b).ok())
-    .unwrap_or(0);
+    let used = if let model::EngineCache::Qwen35(c) = s.kv() {
+        c.bytes_in_use() as u64
+    } else {
+        KvCache::bytes_for(
+            s.loaded.model.config().layers,
+            s.loaded.model.config().kv_heads,
+            s.loaded.model.config().head_dim,
+            s.kv().used(),
+        )
+        .and_then(|b| u64::try_from(b).ok())
+        .unwrap_or(0)
+    };
     let held = match s.kv().kv_held() {
         Some((pages, bytes)) => format!(
             "{} held for {pages} pages, up to {}",
@@ -115,12 +119,18 @@ pub fn resource_lines(s: &Session) -> Vec<String> {
                 .map_or_else(|| "bf16 weights".to_string(), |q| q.label())
         ),
         format!(
-            "kv cache        {held} · {} in use ({} of {} positions)",
+            "{:<15} {held} · {} in use ({} of {} positions)",
+            if matches!(s.loaded.model, model::Engine::Qwen35(_)) {
+                "hybrid state"
+            } else {
+                "kv cache"
+            },
             units::bytes(used),
             units::count(s.kv().used() as u64),
             units::count(SequenceCache::capacity(s.kv()) as u64)
         ),
     ];
+    lines.push(format!("model load      {}", time(s.loaded.took)));
     if let Some(m) = process_memory() {
         lines.push(format!(
             "process memory  {} now · {} peak",

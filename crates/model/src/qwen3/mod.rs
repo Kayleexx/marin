@@ -2,6 +2,7 @@ mod attention;
 mod config;
 mod cpu_memory;
 mod engine;
+mod export;
 mod fit;
 mod gpu;
 mod gpu_probe;
@@ -10,7 +11,9 @@ mod layer;
 mod mlp;
 mod model;
 mod weight;
+mod weight_bytes;
 mod weights;
+pub use export::export_int8;
 mod workspace;
 
 pub use config::Qwen3Config;
@@ -31,5 +34,5 @@ pub fn weight_bytes(
     config: &Qwen3Config,
     quant: Option<tensor::QuantScheme>,
 ) -> Result<u64, crate::ModelError> {
-    weights::loaded_bytes(weights, config, quant)
+    weight_bytes::loaded_bytes(weights, config, quant)
 }

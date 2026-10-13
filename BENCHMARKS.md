@@ -3191,3 +3191,1009 @@ Cargo dependency proof and all check logs are in
 quantization experiment or 4B download/run. Older/non-Linux hardware and new
 loader gains remain unverified. This is a bounded execution/ownership audit,
 not a line-by-line proof of every CUDA instruction or terminal render path.
+
+
+## 32. Direct packed INT8 loading: gates fixed before implementation
+
+The clean starting revision is c99d38a. Contrary to the documentation-only
+claim, that commit includes loader dependency cleanup, CPU snapshot hash
+selection and its regression assertion. All three stashes are preserved.
+
+This milestone uses an explicitly exported standalone bundle; ordinary HF
+BF16 stays default, INT8 requires explicit selection. No inference kernels,
+Qwen3.5 implementation or automatic source-directory cache is in scope.
+
+| Area | Mandatory gate (unchanged from section 31) |
+|---|---|
+| Prerequisites | Verified 512 MiB inspection must report no fit, using cgroup-aware weights + FP32 KV + full-prefill workspace + safety; default threads respect affinity/quota; explicit overrides remain |
+| Data | Every INT8 code and FP32 scale/norm bit equals existing quantization; tied embeddings stored once |
+| Execution/quality | Bit-identical logits, greedy and seeded continuations on 0.6B/1.7B short/2k, 1/8 threads and scalar/SIMD; existing HF/BF16 thresholds unchanged |
+| Compatibility | CPU/CUDA, switching, KV reuse/rollback, snapshots and existing default/opt-in behavior preserved |
+| Safety | Reject malformed, foreign, truncated, NaN, group/shape/offset/checksum errors; atomic publication never exposes partial data or overwrites source; concurrent exporters must verify identical published result |
+| Ownership | Direct loads read no BF16 payload and do no quantization; one retained codes/scales allocation per tensor; no full decoded model |
+| Memory | Matched peak RSS <= old INT8 +16 MiB; steady target <= payload+128 MiB, peak target <= payload+192 MiB; record cgroup/OOM limitations |
+| Startup | >=20% lower warm process-to-first-output and >=10% lower fadvise-cold on both models, three fresh processes per condition with verified I/O/cache conditions |
+| Inference | Prefill/decode within 2% of old INT8 or demonstrably indistinguishable in interleaved runs |
+| Larger models | Memory estimates and Qwen3.5 research are not model support or numerical acceptance |
+
+Record conversion time/peak RSS, bundle size, focused inference/startup A/B
+and exact failures below. A failed performance gate remains failed; a
+missing measurement remains unverified. No multi-hour matrix.
+
+### Implementation and ownership
+
+`export-int8 SOURCE OUTPUT [--quant-group N]` exports the existing symmetric
+INT8 quantizer once. The standalone bundle contains config/tokenizer and
+optional generation/tokenizer config, `model.safetensors` and
+`marin-int8.json`. Matrices retain original names as I8 row-major signed
+codes; `<name>.scales` is FP32 `[rows, cols/group]`. Norms are exact promoted
+FP32 values. Tied embeddings have no duplicate head. Untied heads are tested
+separately. BF16 HF loading remains default; both CLIs require explicit
+INT8 and the original group for packed input. CUDA uploads these same codes
+and scales through its existing quantized path; no new inference kernels.
+
+The manifest identifies layout/quantizer revision, architecture, group,
+metadata SHA-256, source tensor SHA-256 provenance and each emitted tensor's
+SHA-256. Source identities cover converted tensor values, not unused HF
+extras or mutable source paths. There is no automatic source-directory cache,
+mtime shortcut, BF16 reread or hidden precision fallback. Integrity is checked
+as each typed payload is read. Descriptor bounds/types/shapes, duplicate
+keys, overlapping/gapped spans, extra payload/names, finite values, signed
+code range and group lengths are checked before execution. Metadata files
+are verified before tokenizer construction. New bundles reject symlinked
+files. Checksums detect corruption; this is not a signed model distribution.
+
+Weights owns paths/metadata only. On direct CPU load, I8/F32 vectors move
+into the existing Q8 owner. Read scratch is bounded to 1 MiB; there is no
+full encoded tensor clone or BF16 expansion. Norms remain FP32 on CPU/CUDA.
+All 310 source tensors on each real model were compared: every emitted code,
+scale bit and norm bit equals old on-load quantization. Identical parameter
+bits and identical native kernel/state paths establish unchanged quality;
+this milestone introduces no new quantization algorithm.
+
+Export holds one source tensor plus its quantized output, hashes/writes it,
+and discards both. A unique temporary sibling directory is created
+exclusively, files and directory are synced, then renamed and its parent
+synced. Existing output folders are refused. Concurrent exporters that both
+started before publication verify an identical winner's metadata and every
+payload rather than replacing it. Dropped/failed writers remove only their
+own temporary directory; stale hidden directories are not accepted as HF
+INT8 models. Final review found that a caller catching a short-write error
+could previously finish a partial bundle. Its red test reproduced that
+failure. A failed write now permanently blocks retry/publication; the green
+test and the full checks pass. The original source checkpoint is untouched.
+
+The only new dependency is `sha2` 0.10.9 for a stable digest, not the
+compiler-dependent snapshot hash. [RustCrypto API](https://docs.rs/sha2/0.10.9/sha2/)
+and [safetensors format](https://github.com/safetensors/safetensors#format)
+were checked. Existing snapshot hashing/identity is preserved; a GPU snapshot
+from an HF source conservatively rejects the packed artifact identity even
+when quantized values agree. CPU snapshots remain unsupported.
+
+### Prerequisites and admission
+
+Inspection now uses cgroup-aware available RAM and the same retained weights,
+full FP32 KV window, full-prefill workspace and CPU safety estimate as CPU
+admission. It labels the actual weight format instead of calling INT8 BF16.
+A verified 536870912-byte `memory.max`, no-swap child reports **does not fit**
+for 1.7B INT8 / 8192 context, with zero OOM events. This is a CPU budget
+estimate, not a complete CPU/GPU planner. The norm-byte estimate now counts
+actual FP32 storage; old accounting undercounted 131072 / 247808 bytes.
+
+Default CPU threads cap host physical cores by
+`std::thread::available_parallelism()`. Normal: available 16/default 8;
+one-CPU affinity: available 1/default 1; a real `CPUQuota=100%` child:
+available 1/default 1. Explicit 8 remains 8 in each restricted child.
+Defaults are resolved once per process, not a live scheduler. Workspace,
+KV growth/rollback guards and explicit overrides remain intact.
+[Resource limit semantics](https://doc.rust-lang.org/std/thread/fn.available_parallelism.html).
+
+### Measurements
+
+All CPU runs were serial, with no competing CPU benchmark. The reference is
+the current HF-to-INT8 path on identical files/group/prompt/backend. Old/new
+order alternates in fresh startup processes. The initial warm pilot had
+some physical reads and was rejected as warm evidence. Controlled warm
+measurements evict competing model pages and read the selected checkpoint;
+all final warm measured children report zero physical reads. Cold means
+per-file `POSIX_FADV_DONTNEED`, not a machine reboot or global cache flush.
+Physical reads were recorded; metadata/executable caches can remain warm.
+Three fresh processes per format/cache condition; medians below. Prompt:
+`The capital of France is`, greedy, one output token, CPU, one thread,
+2048 context. All replies equal ` Paris`.
+
+
+| Model | Warm HF → direct s | Improvement | Fadvise-cold HF → direct s | Improvement | Matched warm peak RSS HF → direct MB |
+|---|---:|---:|---:|---:|---:|
+| 0.6B | 1.424 → 0.916 | 35.69% | 1.915 → 1.015 | 46.98% | 704.95 → 675.14 |
+| 1.7B | 3.109 → 1.984 | 36.17% | 4.145 → 2.232 | 46.17% | 1898.67 → 1835.18 |
+
+| Model | Fadvise-cold export s | Export peak RSS MB | Physical read/write MB | Full bundle MB | Retained native payload MB |
+|---|---:|---:|---:|---:|---:|
+| 0.6B | 2.716 | 558.86 | 980.87 / 616.17 | 626.49 | 614.87 |
+| 1.7B | 6.177 | 1035.06 | 3071.77 / 1777.57 | 1786.33 | 1774.71 |
+
+Cold startup physical reads: approximately 978 → 615 MB (0.6B) and
+3069 → 1775 MB (1.7B). These are process I/O counters, not whole checkpoint
+sizes or a storage-bandwidth benchmark. HF files also contain unused tied
+heads. Direct peak is about payload +60 MB, below both +128 MiB steady and
++192 MiB peak targets; matched peak falls about 30 / 63 MB. This removes a
+transient tensor/conversion, **not another half of steady inference RAM**.
+The export figures precede the final failed-writer error guard; the emitted
+format, successful export result and direct loading path are identical.
+
+Inference pilot: both INT8 models resident only for timing (this is not the
+load-RSS experiment). Alternate old/new order; one warm-up pair; five pairs
+at 127 tokens / 1 and 8 threads, three pairs at 2047 / 8 threads; sixteen
+greedy decode steps per pass. Identical prompts and generated ids throughout.
+Existing opening comparison method regards overlapping min/max ranges as
+noise. No performance claim is drawn from correctness runs.
+
+| Model/prompt/threads | Prefill HF → direct s | Decode HF → direct tok/s |
+|---|---:|---:|
+| 0.6B / 127 / 1 | 1.0755 → 1.0726 | 37.555 → 37.560 |
+| 0.6B / 127 / 8 | 0.2483 → 0.2458 | 36.164 → 36.515 |
+| 0.6B / 2047 / 8 | 4.3828 → 4.3302 | 19.982 → 20.214 |
+| 1.7B / 127 / 1 | 3.6713 → 3.6555 | 12.479 → 12.406 |
+| 1.7B / 127 / 8 | 0.6349 → 0.6370 | 12.377 → 12.386 |
+| 1.7B / 2047 / 8 | 10.3767 → 10.4424 | 9.663 → 9.582 |
+
+One first-pass 1.7B long-prefill pair was +2.88%, so it was not accepted
+alone. Repeated interleaved 2k measurements give +0.63% prefill / -0.83%
+decode, within gates and overlapping ranges. An initial 0.6B short single-
+thread median was +2.007% decode with separate ranges; a targeted ten-pair
+confirmation gives +0.014% and overlapping ranges. It replaces that pilot
+as acceptance evidence; both raw records remain. No kernel change or
+inference speed improvement is claimed.
+
+Real logits and eight seeded continuations are bit-identical at 127/1,
+2047/1 and 2047/8 on both models; short forced-scalar real-model runs also
+match. Fixture tests cover 513-token reuse/truncation, 1/8 threads, untied
+heads, forced scalar panels and GPU upload. Complete bit equality for every
+real tensor, unchanged post-load native storage/kernels and those execution
+checks establish quality preservation. An exhaustive real-model scalar 2k
+Cartesian matrix, 8k timing and older physical CPUs were **not measured**.
+The 2047/1 runs are correctness observations, not a repeated speed gate.
+
+A verified 8 GiB/no-swap child runs 1.7B direct INT8, 2047 prompt / two output
+tokens / 2049 context / eight threads. Cgroup peak is **2677231616 bytes**;
+all memory.max/high/oom/oom_kill events are zero, swap.current is zero. The
+benchmark also records actual KV held **469762048 bytes**, versus full-window
+budget **469991424 bytes**. This is a process-budget proof on the 16 GB
+host, not proof that every 8 GB desktop has the same OS/other-app headroom.
+The legacy benchmark `precision` tag still describes baseline BF16 math;
+the separate `quantization` field and typed retained byte count describe
+INT8. `kv_reserved_bytes` is the window estimate, not proof of upfront CPU
+KV reservation. These existing schema names are not changed here.
+
+### Acceptance
+
+| Original gate | Decision | Evidence/limit |
+|---|---|---|
+| RAM inspection / thread restriction | PASS | Verified 512 MiB, one-CPU affinity and one-CPU quota; explicit overrides retained |
+| Code/scale/norm/tied storage | PASS | All 310 real tensors per model bit-exact; untied-head regression test |
+| Correctness / quality | PASS | Complete parameter equivalence with unchanged kernels; real short/2k and seeded checks, scalar fixture/short real checks; no new quality approximation |
+| Artifact safety / atomic publish | PASS | Corruption/version/group/metadata/NaN/negative/code/shape/overlap/duplicate/truncation, interrupted/concurrent publish and caught-write-error red/green coverage |
+| BF16/HF/defaults / CUDA / snapshots | PASS | Full CUDA-required suite and new packed CLI/GPU/snapshot regressions; strict reference thresholds unchanged |
+| Ownership | PASS | Direct typed I8/F32 path into existing Q8; standalone bundles contain no BF16 tensors or source path |
+| Memory | PASS | Lower matched RSS, targets met; 8 GiB/no-swap 2k zero OOM; no full-model BF16 mirror |
+| Startup | PASS | Warm -35.69/-36.17%, fadvise-cold -46.98/-46.17%; three processes/condition, I/O recorded |
+| Inference performance | PASS | Focused final interleaved pilot within 2% or overlapping ranges; initial misses preserved and targeted confirmation explained |
+| 4B / Qwen3.5 support | OUT OF SCOPE | Architecture research and estimates below only, no new model implementation or real weight inference |
+
+**GO for direct packed INT8 loading on the validated Linux/RTX 5050 setup.**
+BF16 remains default, INT8 opt-in. No new CPU snapshot, INT4, inference
+kernel, chunked prefill, planner, scheduler or streaming feature. Non-Linux
+directory-sync/publication and older GPUs/CPUs remain unverified. Checksums
+are paid during reading; pre-SHA-instruction CPU startup needs its own
+measurement before claiming the same startup gains.
+
+Growable FP32 KV remains independently GO. Bounded CPU prefill remains
+removed/NO-GO. Section 28's +10.48% TTFT and -3.28% decode misses remain
+unresolved; no Stage 4 gate was relaxed or closed by this loader milestone.
+
+Final checks: fmt, locked workspace/all-target check, all-feature/all-target
+clippy `-D warnings`, **603 workspace tests** with MARIN_REQUIRE_CUDA=1,
+**52 forced-scalar tensor tests**, **5 forced-scalar packed-model tests**,
+line limit and unsafe guards pass (zero failures/ignores). The full suite
+was rerun after the failed-writer regression fix. No commits, pushes or
+stash changes; original three stash hashes remain unchanged. Raw inputs,
+startup/conversion/cgroup/timing/parity data, research headers, intentional
+red/green logs and checks live in `bench-results/direct-int8/`.
+
+Additional production-model sanity checks on the final build: strict CPU HF
+verification passes on both original BF16 models (three prompts, sixteen
+steps each, all greedy choices matching). Maximum logit/layer differences:
+- 0.6B: 1.91e-05 / 6.28e-07.
+- 1.7B: 1.91e-05 / 5.21e-07.
+
+Fresh RTX 5050 processes also generate identical four-token greedy replies
+from HF-on-load INT8 and packed INT8 on each real model. These supplement
+the full CUDA/snapshot/switching regressions, not GPU performance gates.
+
+
+## 33. Qwen3.5 text-only architecture plan (research; no implementation)
+
+Qwen3.5-2B is the first architecture target, then 4B. This study fetched
+**configs and safetensors headers only**, not the weight payloads; no new
+model was loaded or benchmarked. Pin the HF revisions
+`15852e8c16360a2fea060d615a32b45270f8a8fc` / `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a` and Transformers
+`db2304e8694db3ecd6f39d353beba361688afe97`. The general Qwen repository now redirects to a
+newer family; the specific Qwen3.5 configs, tensor shapes and implementation
+are the basis here. Dense 2B/4B are in scope; flagship MoE claims are not.
+
+[Official 2B config](https://huggingface.co/Qwen/Qwen3.5-2B/blob/15852e8c16360a2fea060d615a32b45270f8a8fc/config.json),
+[official 4B config](https://huggingface.co/Qwen/Qwen3.5-4B/blob/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/config.json),
+[HF model implementation](https://github.com/huggingface/transformers/blob/db2304e8694db3ecd6f39d353beba361688afe97/src/transformers/models/qwen3_5/modeling_qwen3_5.py),
+[HF cache implementation](https://github.com/huggingface/transformers/blob/db2304e8694db3ecd6f39d353beba361688afe97/src/transformers/cache_utils.py),
+[Gated Delta Networks paper](https://arxiv.org/abs/2412.06464).
+
+### Architecture and state
+
+Both alternate three DeltaNet blocks with one full-attention block: 18+6
+layers on 2B, 24+8 on 4B. Hidden/MLP widths are 2048/6144 and 2560/9216.
+Vocabulary is 248320 with tied embeddings; full-attention head size is 256,
+query/KV heads 8/2 and 16/4. Rotary dimension is only 64. Ordinary RMSNorm
+uses `1 + weight`; gated recurrent output norm uses its weight directly.
+Full attention has a sigmoid output gate and a doubled query projection, with query/gate split per head.
+These details prevent treating Qwen3.5 as a Qwen3 config rename.
+
+DeltaNet projects Q/K/V, z, a and b; a depthwise length-4 causal convolution
+precedes Q/K/V splitting. Q/K use L2 normalization; beta is sigmoid(b),
+decay is exp(-exp(A_log)*softplus(a+dt_bias)). The state decays, receives a
+beta-scaled key/value residual update, and produces the query readout;
+SiLU(z) gates its normalized output. Recurrent head dimensions are 128×128,
+with 16 value heads on 2B, 32 on 4B and 16 key heads on both. Inspect the
+pinned implementation for exact casts and gate ordering before coding.
+
+Use separate **FP32 recurrent matrices**, **convolution history** and
+**ordinary attention KV**. A sequence can contain these separate owners
+with shared position bookkeeping; none should pretend recurrent state is
+paged, per-position KV. Recurrent state is constant-size, but it cannot be
+restored to an arbitrary earlier prefix by lowering a length counter. HF
+also marks initialized recurrent caches non-croppable. Do not retain an
+entire 20/50 MiB state at every token. Start with transactional forward
+commit and one before-pass checkpoint; define reset/replay behavior before
+connecting arbitrary prefix reuse. Speculation and snapshots remain disabled
+for the new architecture until their state contracts are independently
+validated; existing Qwen3 behavior is preserved.
+
+### Reuse and minimum additions
+
+Reuse ModelDir/tokenizer, the I8/F32 artifact codec, checked Q8 construction,
+CPU SIMD/scalar GEMM/GEMV, MLP/SiLU, sampler, metrics, thread selection,
+Linux memory guards and full-attention KV owners. RoPE math needs a separate
+rotary dimension/actual head stride; the old full-head call is insufficient.
+RMSNorm can reuse its primitive with explicitly prepared effective gamma.
+CPU attention already has general dimensions. CUDA accepts head_dim 256,
+but its head-128 tensor-core prefill fast path will not apply; first validate
+the existing general/split kernels before proposing any new attention kernel.
+
+Minimum new work: a specific nested text-config parser and expected tensor
+map; typed reads of existing HF FP32 side tensors (current `read_f32` is
+artifact-only); safe scalar depthwise convolution/history update, FP32
+DeltaNet recurrence and gate/L2/partial-RoPE handling; a separate hybrid
+state owner with checked dimensions and transactional errors. Add explicit
+architecture dispatch only when this model exists. No generic graph,
+device-tensor framework, all-family registry or planner is required.
+
+Keep I8 row layout/group/quantizer stable. A future explicit architecture
+profile/version may allow FP32 convolution/side tensors and text namespaces;
+v1 readers must reject it. Do not rewrite stored norms into a different
+convention without versioning that policy. The current v1 writer remains
+Qwen3-only. No Qwen3.5, FP32 matrix kernel or state implementation was added.
+
+### Header-based memory budgets (estimates, not measured support)
+
+All main text matrix input widths divide group 128. There are 320/426 text
+tensors; 297 vision and 15 MTP tensors in each checkpoint are excluded,
+verified against actual header names. There is no separate stored LM head.
+The proposed policy quantizes every 2D text weight, preserving all other
+weights as FP32. This includes FP32 A_log/dt_bias/norms and conservative FP32
+convolution weights. It is a memory estimate, not proof this all-matrix INT8
+policy is accurate enough. Retaining sensitive a/b matrices in FP32 would
+add approximately 3.5/11.7 MB; choose that only after quality evidence.
+
+| Model | Used text source bytes | Proposed native INT8 bytes | FP32 side weights within payload | Recurrent + convolution state | Full-attention FP32 KV at 2k |
+|---|---:|---:|---:|---:|---:|
+| 2B | 3,763,655,360 | 1,942,260,992 | 2,194,688 | 20,643,840 | 50,331,648 |
+| 4B | 8,411,510,272 | 4,340,035,584 | 3,846,144 | 53,477,376 | 134,217,728 |
+
+Persistent FP32 state estimate per linear layer is
+`4 * [value_heads*128*128 + (2*key_heads*128 + value_heads*128)*4]` bytes.
+KV estimate is `2*full_layers*kv_heads*256*context*4`. Conv state is budgeted
+at FP32 even if a future proven implementation keeps it at BF16.
+
+Workspace is a deliberately conservative O(context) live-buffer bound:
+`4*T*(6*H + 3*FFN + 2*Kdim + 3*Vdim + 2*full_query_heads*256) + 4*vocab`.
+It includes hidden/residual and projection/gating panels, rather than assuming
+constant-memory prefill. It does not allocate a T² attention score matrix.
+Measured implementation liveness may be smaller; no implementation exists
+to prove that yet. Add FP32 attention packing `8*T*256`, runtime 256 MiB,
+safety 256 MiB, a whole extra KV window for growth copies and one recurrent/
+conv before-pass checkpoint. This replaces the earlier illustrative 64 MiB
+growth allowance in the raw first estimate; it is more conservative.
+
+| Model/context | Workspace MiB | Attention KV MiB | Estimated total process GiB incl. all allowances |
+|---|---:|---:|---:|
+| 2B / 128 | 22.9 | 3.0 | 2.376 |
+| 2B / 2048 | 352.9 | 48.0 | 2.790 |
+| 2B / 4096 | 704.9 | 96.0 | 3.231 |
+| 2B / 8192 | 1408.9 | 192.0 | 4.114 |
+| 4B / 128 | 33.9 | 8.0 | 4.691 |
+| 4B / 2048 | 528.9 | 128.0 | 5.412 |
+| 4B / 4096 | 1056.9 | 256.0 | 6.182 |
+| 4B / 8192 | 2112.9 | 512.0 | 7.721 |
+
+On 8 GiB hardware with 2 GiB reserved for OS/other apps, 2B/2k has useful
+estimated room. 4B/2k is a candidate, but the conservative 5.412 GiB estimate
+leaves only 0.588 GiB beyond the 6 GiB process allowance: it **does not yet
+establish the 1 GiB measured headroom gate**. 4B/4k exceeds that allowance.
+On 4 GiB, 4B weights alone exceed RAM; NO-GO. 2B short/2k estimates fit only
+with a lean OS budget and remain tight, so no general 4 GiB support claim.
+Tokenizer peaks, allocator behavior, growth overlap and transactional state
+copies need real constrained-process measurements.
+
+The measured Qwen3 INT8 short-decode weight-payload×tok/s proxy is roughly
+22 GB/s; it is not an IMC counter or a measurement of DeltaNet bandwidth.
+Using 19–22 GB/s and one weight stream plus approximately four FP32 state
+passes gives optimistic short-context ceilings around 9–11 tok/s (2B) and
+4–5 tok/s (4B). These are **bandwidth ceilings, not performance forecasts**;
+KV rereads, recurrence arithmetic, exp/softplus, CPU ISA and serialized state
+updates only reduce them. Recurrent KV savings do not make 4B cheap to read.
+No CPU/GPU TTFT or throughput was measured for these models.
+
+### Smallest next milestone and proposed gates
+
+1. Pin a trusted HF FP32 eager text-only reference, promoted from the exact
+   checkpoint values, with TF32 disabled. Generate intermediates and state
+   after every token. Build a tiny four-layer hybrid fixture (three recurrent,
+   one full attention), plus real 2B reference samples. Reference generation
+   must use a machine that fits it; no bypass of RAM guards.
+2. Implement only the CPU reference block/state first. Compare convolution
+   history, normalized Q/K, beta/decay, recurrent matrix, gated output and
+   logits at 1/2/4/16/128 tokens. Before optimization require normalized
+   maximum absolute error <=1e-4, relative RMS <=1e-5 and exact greedy
+   continuations on the fixed reference prompts. Empty/full/error cases,
+   whole-prefill versus incremental execution, poisoned input and failed
+   transactions must preserve both attention and recurrent state correctly.
+   Long-prefix equivalence is a numerical tolerance comparison, not a demand
+   for bit identity between different accumulation algorithms.
+3. Validate full 2B text execution and source loading before wiring a
+   versioned INT8 artifact profile. Fix quantization gates before conversion:
+   >=95% teacher-forced top-1 agreement, perplexity increase <=3%, no extra
+   executable-code failures versus BF16 on identical fixed prompts. Native
+   artifact values must equal its approved exporter bit for bit.
+4. CPU INT8 pilot at short/2k and 1/8 threads: require >=1.25x BF16 decode,
+   <=10% TTFT regression, retained weights <=60% BF16, zero OOM/no swap in
+   8 GiB and >=1 GiB measured effective headroom. Test scalar behavior,
+   affinity/quota defaults and new state failure/replay semantics. Preserve
+   all existing Qwen3 gates. Do not claim 4 GiB support from an 8 GiB test.
+5. Only then implement the minimal CUDA recurrent/conv operations behind
+   safe checked APIs. Require the same trusted numerical gates with f32
+   state, no transfer/allocation per decode step after warm-up, no Qwen3
+   regressions, matched prefill/decode no worse than its accepted general
+   reference by >5%. Compare with official HF on RTX 5050 as an external
+   performance reference; report gaps rather than claiming parity untested.
+6. Finally run real 4B text weights at short/2k under 8 GiB/no swap with the
+   same numerical, quality and headroom gates. Revisit measured scratch
+   liveness if it does not fit; do not resurrect chunked prefill, lower KV
+   precision, INT4, offload or a planner to make an estimate look accepted.
+
+**GO to the next narrowly scoped CPU FP32 hybrid-block/state parity milestone
+on Qwen3.5-2B. NO-GO for claiming Qwen3.5 support today or 4B/8 GiB acceptance
+from these budgets.** Native packed INT8 loading is complete first. No
+Qwen3.5 implementation, SIMD kernel, MoE, SSD streaming, scheduler or hardware
+planner is part of this change.
+
+
+## 34. Qwen3.5-2B-Base CPU FP32 hybrid reference
+
+### Gates fixed before implementation (2026-10-13)
+
+First milestone is standalone CPU hybrid decoder blocks and explicit state,
+not CLI/model support. Existing Qwen3 execution is untouched. Compare
+deterministic FP32 inputs and weights against official HF CPU eager math,
+including HF chunked DeltaNet prefill and recurrent decode. No optimized
+DeltaNet or quantized Qwen3.5 path.
+
+| Area | Fixed acceptance gate |
+|---|---|
+| Numerical | For **each** named intermediate/output/state: max absolute error / max(1, max absolute reference) <=1e-4; RMS error / max(1e-6, RMS reference) <=1e-5; all values finite. These define section 33 tolerances, not weaker thresholds. |
+| Coverage | Linear + full-attention decoder blocks (norms, projections, gates, residual and MLP), sequence lengths 1/2/4/16/65/128, nonzero initial state, convolution boundaries, full-attention GQA and partial RoPE; HF chunked vs Rust recurrent equivalence. |
+| State | Zero initialization, reset/replay, repeated decode, whole prefill vs split passes vs tokenwise, independent sessions; input/shape/context/memory errors leave committed state unchanged. Recurrent state is separate from KV and has no arbitrary truncation API. |
+| Safety/memory | Checked sizes, fallible allocations, explicit byte budget for state/workspace/transaction copies before allocation; reject undersized budgets, malformed weights and nonfinite input; no partial state commit. |
+| Compatibility | Existing full workspace tests including required CUDA, forced-scalar reference checks, fmt/check/clippy -D warnings, line limit and unsafe checks pass; Qwen3/defaults/packed loader/snapshots unchanged. |
+| Real model (later in this session only if ready) | Actual Base text weights; strict HF logit/intermediate thresholds above and exact greedy tokens on fixed prompts; report peak RSS/TTFT/decode separately from estimates; refuse inadequate memory. Missing measurements mean unverified, not GO. |
+
+Source config/header captured **before coding** under
+`bench-results/qwen35-base-parity/`: Base revision
+`b1485b2fa6dfa1287294f269f5fb618e03d52d7c`. Scope reaches only a new
+model reference module, its fixtures/tests, public export and documentation;
+no existing CLI/backend dispatch or runtime cache contract is extended.
+
+### Actual Base architecture and reference scope
+
+Sources are the [pinned Base config](https://huggingface.co/Qwen/Qwen3.5-2B-Base/blob/b1485b2fa6dfa1287294f269f5fb618e03d52d7c/config.json),
+[pinned tensor index](https://huggingface.co/Qwen/Qwen3.5-2B-Base/blob/b1485b2fa6dfa1287294f269f5fb618e03d52d7c/model.safetensors.index.json),
+the remotely range-read safetensors header, and
+[official Transformers v5.17.0 implementation](https://github.com/huggingface/transformers/blob/v5.17.0/src/transformers/models/qwen3_5/modeling_qwen3_5.py).
+The installed reference source is byte-identical to the official release:
+SHA-256 `762feb6c7426a7f15b5bf830df54c07438bf9e7c27b8cdb23179045920412c3b`.
+PyTorch 2.13.0+cu130, Transformers 5.17.0, CPU eager, one thread, no FLA or
+causal-conv extension. This study uses **Base**, not the chat model from
+section 33. No full checkpoint payload was downloaded.
+
+The Base model is dense, tied embeddings, vocabulary 248320, hidden 2048,
+FFN 6144, epsilon 1e-6, max positions 262144. Its 24 layers are exactly
+`(linear, linear, linear, full) * 6`; ordinary norms use **1 + weight**,
+while the DeltaNet gated norm uses weight directly. Every block has
+pre-norm/mixer/residual, post-norm/SiLU-gated MLP/residual. Text tensor
+names are relative to `model.language_model.`; each block reference accepts
+exact names relative to `layers.N.`.
+
+| Block tensor / state | Actual Base shape / semantics |
+|---|---|
+| Delta `in_proj_qkv.weight` | [6144,2048], ordered Q=2048, K=2048, V=2048 |
+| Delta `in_proj_z.weight`, `out_proj.weight` | [2048,2048] each |
+| Delta `in_proj_a/b.weight` | [16,2048] each |
+| Delta `conv1d.weight` | [6144,1,4], biasless depthwise causal convolution then SiLU |
+| Delta `A_log`, `dt_bias`, `norm.weight` | [16], [16], [128]; A_log and gated norm are F32 on disk, dt_bias is BF16 |
+| Delta persistent state | convolution [6144,4]; recurrent [16,128,128], FP32, separate owners from attention KV |
+| Full `q_proj.weight` | [4096,2048]; query/gate split **within each** of 8 heads, 256 values each |
+| Full `k/v_proj.weight`, `o_proj.weight` | [512,2048] each; [2048,2048] |
+| Full `q/k_norm.weight` | [256], zero-centered RMSNorm |
+| Full attention | 8 query / 2 KV heads, head dimension 256, causal GQA, output multiplied by sigmoid(query gate) before output projection |
+| Text RoPE | theta 1e7; rotate first 64 of 256 values; text's three position axes coincide, so no vision mRoPE routing is needed |
+| MLP | gate/up [6144,2048], down [2048,6144]; SiLU(gate) * up |
+
+Q/K are L2-normalized with epsilon 1e-6; queries additionally divide by
+sqrt(key head dimension). Beta is sigmoid(b), decay log is
+`g = -exp(A_log) * softplus(a + dt_bias)`. For each head/token: decay
+S by exp(g), compute its key prediction, multiply the residual value by
+beta, add the key/delta outer product, then read updated S with Q.
+Gated RMSNorm applies per value head before SiLU(z) and output projection.
+The reference also handles repeated Q/K heads when value-head count is a
+multiple of key-head count; 2B itself has equal counts.
+
+`model::qwen35::ReferenceBlock` is deliberately **not** a `CausalLm`
+implementation. It owns genuine FP32 matrices and reuses Marin dot, RMSNorm,
+SiLU, attention, partial-prefix RoPE and ordinary growable KV. Its local
+state owner explicitly distinguishes recurrent/convolution buffers and a
+one-layer attention KV cache. No changes to Qwen3 modules, generation,
+packed artifacts, CLI selection, CUDA or snapshot contracts were needed.
+The only existing-code extension is the reference module export.
+
+Each block pass validates input, compatibility, context and additional
+byte budget before allocation. The budget covers a fallibly allocated
+transaction copy, returned output, conservative token workspace, KV window
+slack and 1 KiB allocation bookkeeping; cgroup-aware admission additionally
+retains the existing 256 MiB CPU margin. Already-owned weights/state are
+excluded from the *additional* budget and included in current available
+RAM. Caller must admit weight memory before constructing a reference block.
+No model-loading budget or full-model fit claim is made by this API.
+Commit occurs only after the entire block pass succeeds. Reset zeros Delta
+state or clears KV. There is no recurrent arbitrary-prefix truncate API.
+This is a correctness reference: full KV and recurrent state are copied
+on each pass for atomicity, and tokens are scanned serially. Production
+performance and multi-layer transaction ownership require later evidence.
+
+### HF fixtures and measured numerical evidence
+
+`tests/reference/qwen35/generate.py` executes actual HF decoder modules,
+not an independent Python reimplementation of Rust. It records projections,
+convolution/QKV, gates/decays, norm/RoPE, core attention, gated output,
+residuals, MLP stages and final state. Checked-in JSON descriptors plus
+`values.f32` retain exact little-endian FP32 bits (about 3.4 MiB payload),
+with reference source/payload SHA-256 provenance. No BF16 rounding of
+fixture weights and no regenerated expectations from Rust output.
+
+**34 cases** cover linear/full blocks; lengths 1/2/4/16/65/128; nonzero
+prefix state; direct HF recurrent single-token cached decode; HF chunked
+prefill across its 64-token boundary; 2:1 value/key heads; odd key dimension
+and real 128-value/key / 256-attention head dimensions with reduced test
+head counts/hidden width. A separate 65-token sequence through three
+DeltaNet blocks and one full-attention block matches HF layer outputs.
+These are small deterministic fixtures, **not actual 2B weight execution**.
+
+| Execution | Worst normalized max intermediate error | Worst relative RMS intermediate error | Gate |
+|---|---:|---:|---|
+| Default dispatch | 1.91079e-6 | 7.04187e-6 | <=1e-4 / <=1e-5: PASS |
+| Forced scalar (`MARIN_MATMUL_SCALAR=1`) | 1.91079e-6 | 5.57544e-6 | same gates: PASS |
+
+Every convolution/recurrent/KV final-state tensor separately passes these
+same tolerances. Returned outputs match the recorded intermediates. Rust
+whole-pass vs multi-token continuation + decode vs tokenwise results and
+final state are **bit-identical**. Reset/replay is identical; a second
+session stays unchanged while the first advances. Tests reject malformed,
+missing/extra/nonfinite weights, invalid dimensions/RoPE, ragged/empty/NaN
+input, wrong state kind, unsupported activation/bias/ungated/RoPE settings,
+overflowing sizes, zero Q/K/input, full context and insufficient
+budget. An overflow in MLP after the mixer has actually updated staged
+state leaves committed state unchanged. No tolerance was relaxed.
+
+Reproduce fixture/reference checks with:
+
+```bash
+OMP_NUM_THREADS=1 /home/mitali/miracles/ralph/.venv/bin/python tests/reference/qwen35/generate.py
+cargo test -p model --test qwen35 --locked -- --nocapture
+MARIN_MATMUL_SCALAR=1 cargo test -p model --test qwen35 --locked -- --nocapture
+```
+
+### Real-model memory: header arithmetic, not runtime measurements
+
+The actual Base header contains **320 text tensors**, 297 vision tensors
+and 15 MTP tensors. Text weights have 1,881,825,088 elements and
+3,763,655,360 source bytes. Promoting all text weights to FP32 would retain
+**7,527,300,352 bytes (7.010 GiB)**; tied embedding/head must be stored once.
+Persistent FP32 convolution/recurrent state is **20,643,840 bytes**.
+Full-attention FP32 KV is **24,576 bytes per token** across six layers:
+50,331,648 bytes at 2k and 201,326,592 at 8k, before allocation slack.
+Workspace, transactional state/KV copies, loader transients, runtime and
+safety must be added. These figures are distinct from section 33's future
+INT8 estimates; no Qwen3.5 quantizer exists.
+
+Full 2B loading/logits, peak RSS, TTFT and decode **remain unverified**.
+An apparent raw-weight fit is not admission, and the 8 GiB profile has
+limited headroom for a fully FP32 baseline or naive conversion transients.
+No memory limit was bypassed. This session stops at the validated block
+foundation instead of adding an incomplete full-model backend.
+
+### Remaining implementation before full-model acceptance
+
+1. Add strict text-backbone config/tensor validation and source F32 reads
+   (existing source reader supports BF16; its current F32 read is packed-
+   artifact-specific). Load only the 320 text tensors, skip vision/MTP,
+   and preserve tied embeddings. Budget retained FP32 weights and the
+   largest source/promoted tensor transient **before** allocation.
+2. Connect embeddings, the exact 24-block schedule, final zero-centered
+   norm and tied head into a text reference pass. Own recurrent and KV
+   state explicitly, with one **whole-model** atomic commit: per-block
+   atomicity here does not protect earlier layers if a later layer fails.
+3. Compare real Base HF intermediates/logits and greedy sequences on short
+   prose/code prompts, fresh prefill and cached decode, with unchanged
+   tolerances. Measure peak RSS, load cost, TTFT and decode serially; test
+   inadequate budgets without attempting an unsafe load.
+
+`CausalLm::Cache` currently requires `SequenceCache::truncate`, and prefix
+reuse assumes arbitrary retained-prefix rollback. DeltaNet cannot satisfy
+that by cropping attention KV. Keep the initial text reference separate
+from this contract; later runtime integration must explicitly choose
+checkpoint/replay or fresh-run/reset semantics, rather than claim reusable
+KV-only state. No scheduler or generic state framework is required now.
+No CUDA DeltaNet, Qwen3.5 INT8, vision, MoE, optimization or 4B expansion
+should precede real 2B FP32 parity.
+
+A separate compiled probe verifies actual RAM admission on the final
+implementation: both state types are admitted normally; a fresh systemd
+child with verified `memory.max=134217728` and `memory.swap.max=0` rejects
+both with `CpuMemory` before state allocation. Required additional bytes
+including the margin are 268436532 (Delta) / 268436480 (full); child
+available bytes are 133464064. Child memory peak is 2359296 bytes, with
+**zero max/OOM/OOM-kill events**. This probes rejection of the existing
+256 MiB safety floor, not real 2B memory usage. Explicit per-call budget
+boundary tests also pass, including a zero-byte initial-state budget.
+Probe source/output are under `bench-results/qwen35-base-parity/`.
+
+### Final acceptance
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Actual Base architecture audit | PASS | Pinned config/index/header; installed official HF source verified byte-for-byte; text/vision/MTP and dtype/layout distinctions recorded above |
+| Hybrid block numerical parity | PASS | 34 HF cases + four-block hybrid stack; every intermediate and final state passes unchanged 1e-4 normalized-max / 1e-5 relative-RMS gates |
+| State lifecycle and equivalence | PASS | Prefill/continuation/repeated decode/tokenwise, zero inputs, reset/replay, session isolation and errors after staged state mutation; exact Rust split-pass equality |
+| Reference memory admission | PASS | Checked/fallible major allocations, explicit budget boundary, overflow/context rejection; verified 128 MiB/no-swap refusal with zero OOM |
+| Qwen3/packed/CUDA compatibility | PASS | Final full workspace **609 tests / 70 suites**, zero failures/ignores, `MARIN_REQUIRE_CUDA=1` on RTX 5050; legacy BF16/INT8, threading, retained KV, rollback, switching and GPU snapshot fixtures pass |
+| Scalar and optimized-build reference | PASS | Six hybrid tests each in release/default and release/forced-scalar; scalar tensor suite **52 tests**, zero failures/ignores; numerical maxima unchanged from debug |
+| Source checks | PASS | fmt, workspace/all-targets check, workspace/all-targets/all-features clippy -D warnings, line-limit, unsafe and diff-whitespace checks |
+| Full real 2B weights/logits/greedy | UNVERIFIED | Text loader, full 24-layer execution and model-level transaction still require the next coherent increment |
+| Real 2B peak RSS/TTFT/decode | UNVERIFIED | No full model run; header-derived FP32/INT8 figures must not be substituted for measurements |
+
+**GO: standalone CPU FP32 hybrid-block/recurrent-state correctness
+foundation. NO-GO: full Qwen3.5-2B-Base inference/production acceptance,
+pending real-model integration and its original gates.** This is the
+user-authorized stopping point at a fully validated block/state milestone.
+No numerical tolerance, Qwen3 default, packed-loader format or existing
+production cache/backend behavior changed. No CUDA DeltaNet, Qwen3.5 INT8,
+vision, MoE, scheduler or optimized recurrent kernels were implemented.
+
+The final suite was rerun after tightening the initial-state bookkeeping
+budget and rejecting unsupported activation/bias/gate/RoPE settings. The
+first full run also passed; final evidence above uses the final sources.
+Raw references, revisions, header arithmetic, cgroup probe and all check
+logs are in `bench-results/qwen35-base-parity/`. Existing uncommitted
+implementation files are byte-preserved except the one new model-module
+export; README is updated and this section appended. HEAD and all three
+stash hashes are unchanged. No commit, push, stash manipulation, discarded
+work or remaining benchmark/background job.
+
+
+## 35. End-to-end Qwen3.5-2B text inference
+
+### Gates fixed before implementation
+
+Official Qwen3.5-2B-Base, revision b1485b2fa6dfa1287294f269f5fb618e03d52d7c,
+CPU FP32 math with exact source BF16 matrices and source FP32 auxiliary
+tensors. Existing BF16 SIMD matmul is reused; no Qwen3.5 quantization.
+
+| Area | Acceptance gate |
+|---|---|
+| Real execution | Official weights, full 24-layer hybrid text backbone and tied output head generate text through existing CLI; no vision/MTP execution |
+| Numerical | Every full layer output and full logit vector: normalized max absolute <=1e-4 and relative RMS <=1e-5, as defined in section 34; exact greedy ids for at least two prose/code prompts, eight steps each; fresh and cached HF FP32 math |
+| State | Whole-model error rollback, reset, independent sessions, incremental vs fresh execution; retained prefixes remain mathematically correct (reset/replay allowed), no fake KV-only truncation |
+| Memory | Pre-load retained weights + largest transient + state + workspace + 256 MiB safety admission; per-pass full workspace/transaction/KV growth checked; reject inadequate actual cgroup limit without OOM |
+| CLI | Existing marin-run completion/verify/bench and normal Marin load dispatch; CPU-only explicit rejection of CUDA/quantization/FP16 for Qwen3.5; Qwen3 defaults unchanged |
+| Measurements | Actual load/TTFT/prefill/decode and peak RSS on two short prompts; serialized CPU runs; report bottlenecks and measurement limits, no long-context sweep |
+| Compatibility | Full workspace CUDA-required tests, scalar regression, fmt/check/clippy -D warnings, line-limit and unsafe checks pass; packed loading, Qwen3 threading/cache/snapshots preserved |
+
+No optimization acceptance claim; correctness and usable real inference are
+the gates. Gates are not weakened following numerical failures.
+
+### Complete execution and ownership
+
+The official **Qwen3.5-2B-Base** checkpoint is now executable by `marin-run`.
+All 24 configured layers, embedding lookup, final zero-centered RMSNorm,
+tied output head, tokenizer, sampler and prefill/decode run through Marin.
+This supersedes section 34's full-model NO-GO. No vision or MTP tensor is
+loaded into execution. The original checkpoint remains intact on disk.
+
+`TextConfig` validates the dense text layout, dimensions, SiLU/default
+partial RoPE, biasless/gated attention, layer list, context/vocabulary and
+tied head. Per-tensor names, exact dimensions and BF16/F32 dtypes are
+validated against the real safetensors metadata. Extra/missing text tensors
+are rejected. Source FP32 reads now use bounded chunks and reject nonfinite
+values; native packed reads retain their checksum/format validation.
+
+Real matrices retain their **original BF16 values** in existing CPU
+`Matrix` storage, with SIMD/scalar GEMV and FP32 math. The existing FP32
+fixture path remains unchanged. FP32 auxiliaries stay FP32; BF16 norms,
+conv weights and small auxiliaries promote exactly. The source contains
+320 text tensors, 297 vision and 15 MTP tensors; only text is executed.
+Retained text parameters are 1,881,825,088; weights use **3,764,747,520
+bytes**, including promoted auxiliary tensors. There is no full FP32
+model copy, no Qwen3.5 quantization, and tied embeddings are owned once.
+
+The model-specific cache owns 24 per-layer states and a token ledger.
+Appending tokens reuses both recurrent/convolution state and ordinary
+attention KV. A pass stages state **once for the whole model**, executes
+blocks in place, checks logits, then commits. This removes the block-level
+second copy. A last-layer error leaves every earlier layer, KV and token
+ledger unchanged. Independent models have explicit cache-owner checks;
+independent sessions share only immutable weights. Reset zeros recurrence
+and clears KV. Prefix truncation retains token ids and resets state; the
+next pass replays that prefix before the suffix. This is correct replay,
+not an impossible KV-only recurrent rollback. Edited-prefix reuse counters
+reflect logical retained ids, not saved computation. No state framework,
+scheduler or checkpoint-per-token history was introduced.
+
+CLI dispatch adds one concrete CPU model/cache variant. Qwen3 CPU/CUDA and
+packed INT8 paths retain their original execution. Auto selects CPU for
+Qwen3.5; explicit CUDA, quantization and lower KV precision are rejected.
+Normal `marin` loading is regression-tested using a tiny ChatML hybrid
+fixture. **Base models still use `marin-run`; `marin`'s existing base-model
+chat refusal is preserved.** The actual instruct/chat checkpoint has not
+been validated in this milestone.
+
+### Real HF parity and diagnosed failures
+
+Checkpoint revision and official source are pinned in section 34.
+`tests/reference/qwen35/full.py` loads the exact text tensors into the
+official Transformers 5.17.0 `Qwen3_5ForCausalLM`, uses exact BF16 source
+values with FP32 embedding/linear/conv math, CPU eager attention, eight
+threads and no FLA/causal-conv extension. Tied weights are shared; loading
+checks all expected text parameters. This is **HF FP32 math parity**, not
+a comparison with default HF BF16 arithmetic.
+
+The first reference attempt exposed HF buffers left on the meta device by
+meta construction + `assign=True`. Cached/fresh output differed at the
+first full-attention layer while all three preceding DeltaNet layers
+agreed; its RoPE cosine values varied between identical calls. Recreating
+the official rotary module on CPU and asserting that no buffer remains
+meta fixes the harness. No model weight, inference equation or tolerance
+changed. A stale pre-build binary also produced a norm-only verification
+failure against the new full-tensor reference; final rebuilt verification
+below checks full tensors. A shared-budget helper compile typo was fixed
+and all checks rerun; none of these failures was suppressed.
+
+The verifier now requires **all embedding/layer output values and every
+logit**, rather than allowing top-5-only checks for the hybrid model. It
+identifies the first incorrect layer and rejects missing/nonfinite/malformed
+full references. Qwen3's existing verification gates remain unchanged.
+
+| Real prompt / execution | Greedy steps | Max absolute logit difference | Max normalized tensor error | Max relative tensor RMS |
+|---|---:|---:|---:|---:|
+| France, default dispatch | 8/8 exact | 2.10e-5 | 1.194e-6 | 1.993e-6 |
+| Fibonacci, default dispatch | 8/8 exact | 1.53e-5 | 1.309e-6 | 1.480e-6 |
+| France, forced scalar | 8/8 exact | 3.05e-5 | 2.074e-6 | 3.025e-6 |
+| Fibonacci, forced scalar | 8/8 exact | 2.15e-5 | 3.869e-6 | 2.271e-6 |
+
+All 24 layer outputs at every prompt position, initial embeddings and full
+248320-element logits meet the original **1e-4 normalized maximum /
+1e-5 relative RMS** gates. HF cached-vs-fresh logits and greedy choices
+are independently checked at each step with those same gates. Whole-model
+fixture tests additionally prove exact native incremental/fresh equality,
+reset/replay, edited prefixes, session isolation, foreign-cache rejection,
+context/token errors and last-layer failure rollback. Existing 34 hybrid
+fixture cases remain passing.
+
+### Actual short-prompt performance and RAM
+
+Ryzen 7 260, Linux, CPU, eight requested threads, context 128, greedy eight
+output tokens. Three fresh processes per prompt, serial alternating prose
+and code, no competing CPU benchmark. These are ordinary file-cache runs
+without controlled eviction; **not a cold-start speedup claim**. Peak RSS
+is collected with `wait4`, and load/TTFT/throughput from CLI metrics.
+The final shared admission helper only unifies the pre-existing load
+estimate with inspection; matrix/math/state execution is unchanged.
+
+| Prompt | Tokens | Model load s | TTFT s | Prefill tok/s | Decode tok/s | Peak RSS GB |
+|---|---:|---:|---:|---:|---:|---:|
+| prose | 5 | 3.18 | 0.6646 | 7.5 | 6.07 | 3.898 |
+| code | 4 | 3.23 | 0.5451 | 7.3 | 5.92 | 3.898 |
+
+Peak RSS is about **3.90 GB / 3.63 GiB**, distinct from section 34's
+7.01 GiB fully promoted FP32 weight estimate. Fixed FP32 recurrent/conv
+state is 20,643,840 bytes; six full-attention caches add 24,576 bytes per
+active token. At context 128, physical state storage holds 23,789,568 bytes.
+Telemetry/inspection label hybrid state explicitly and report actual text
+parameters, rather than using Qwen3's KV/parameter formulas.
+
+Admission retains the existing 256 MiB safety floor. Before loading it
+checks retained weights + conservative largest-tensor transient + initial
+state/workspace; inspection uses the greater of that peak and the full
+context execution budget. The short-window conservative budget is
+**5,072,758,024 bytes**, above measured RSS; it must not be called actual
+RAM usage. Per-pass checks include staged state, KV growth, full input/
+output workspace and ledger allocation. Fallible major allocations are
+retained. No memory cap was bypassed.
+
+Verified systemd children: `memory.max=536870912` / swap 0 rejects before
+weights are read, with zero OOM/OOM-kill events. `memory.max=8589934592` /
+swap 0 loads the real model and generates the exact France continuation,
+with zero OOM events. These short, cached-file 8 GiB checks do not prove
+4 GiB fit or cold-page-cache peak behavior.
+
+Decode streams BF16 matrices; effective weight traffic inferred from
+retained bytes * observed decode rate is about 22 GB/s, **not a hardware
+counter measurement**. Prefill currently scans tokens through GEMV inside
+each block, rather than batching projections into existing GEMM. This
+explains its low prefill rate and means extra requested CPU threads do not
+currently accelerate this Qwen3.5 path. Qwen3 multithreaded prefill is
+preserved. Loader parsing/finite validation and weight reads contribute
+to the measured load time; their individual shares are unprofiled.
+Per-stage `--profile`/`trace`, long contexts, instruct/chat model parity,
+untied heads, FP16 state, Qwen3.5 INT8 and CUDA DeltaNet remain unsupported
+or unverified. CPU snapshots remain unsupported as before.
+
+### Working commands and actual output
+
+```bash
+cargo build --release -p cli --bins --locked
+target/release/marin-run /home/mitali/models/Qwen3.5-2B-Base \
+  --backend cpu --threads 8 --ctx 128 --temp 0 --max-tokens 8 --metrics \
+  -p "The capital of France is"
+```
+
+Actual base-model continuation (all three runs, also HF):
+
+```text
+ Paris.
+A. True
+B
+```
+
+For `-p "def fibonacci(n):"`, eight-token output is:
+
+```text
+
+    if n == 0:
+```
+
+These are truncated continuations from a base model, not instruction/chat
+answers or an executable-code-quality claim. Strict real verification:
+
+```bash
+target/release/marin-run verify /home/mitali/models/Qwen3.5-2B-Base \
+  --backend cpu --reference bench-results/qwen35-end-to-end/hf-reference.json
+MARIN_MATMUL_SCALAR=1 target/release/marin-run verify \
+  /home/mitali/models/Qwen3.5-2B-Base --backend cpu \
+  --reference bench-results/qwen35-end-to-end/hf-reference.json
+```
+
+Regenerate the real/tiny references with `tests/reference/qwen35/full.py`
+in the existing HF environment. Raw source revision, full vectors, parity
+logs, timing/resource rows and verified cgroup probes are retained under
+`bench-results/qwen35-end-to-end/`.
+
+### Final acceptance decision
+
+| Gate | Status | Exact evidence |
+|---|---|---|
+| Real full backbone / existing CLI | PASS | Official Base checkpoint, all 24 layers and tied head; actual France/Fibonacci generation shown above |
+| HF full layer/logit numerical parity | PASS | Every prompt-position layer value and full logits; original normalized-max/RMS gates; default and scalar; 16/16 greedy ids per dispatch |
+| State correctness and atomicity | PASS | Whole-model incremental/fresh, prefix replay, reset, session isolation, foreign-model cache, context/token errors and failure after earlier layers updated staged state |
+| RAM admission | PASS | Shared inspection/load peak estimate, per-pass guards, verified 512 MiB refusal / 8 GiB real generation with swap disabled and zero OOM |
+| Short performance / RAM measurement | PASS | Three serialized fresh processes per real prompt, actual model load/TTFT/prefill/decode/wait4 peak RSS; no speedup or cold-cache claim |
+| Existing Qwen3 / CUDA / INT8 / KV / snapshots | PASS | Final **615 workspace tests / 71 suites**, **zero failures/ignores**, `MARIN_REQUIRE_CUDA=1` on RTX 5050; packed artifact, switching, thread invariance, retained KV, GPU snapshot regressions included |
+| Scalar / block regressions | PASS | Real model full-vector verification; **52 scalar tensor tests**, six scalar hybrid reference tests; original hybrid fixtures preserved |
+| Source quality checks | PASS | fmt, workspace/all-targets check, workspace/all-targets/all-features clippy -D warnings, line-limit, unsafe and whitespace guards |
+| CUDA DeltaNet / Qwen3.5 quantization / multimodal / MoE | OUT OF SCOPE | Explicitly unsupported, no implementation or changed defaults |
+| Long context / real instruct checkpoint / cold cache | UNVERIFIED | No claims from short Base-model measurements |
+
+**GO: real end-to-end Qwen3.5-2B-Base text inference on CPU, BF16
+source matrices with FP32 math/state.** This is a complete model and
+existing CLI path, not an isolated-block acceptance. Keep the measured
+reference as the baseline before attempting batched prefill projections
+using existing GEMM. No new SIMD/CUDA DeltaNet kernel or quantization
+should be inferred from this GO.
+
+HEAD and all three stash hashes are unchanged; no commit or push. Prior
+uncommitted work is retained, with necessary source-reader/block/CLI
+integration extensions. No unrelated refactor or discarded work. All
+benchmark/check jobs completed. README links this acceptance and gives
+the working model command.
+
+## 36. Qwen3.5 CPU batched prefill (2026-10-13)
+
+### Acceptance gates recorded before implementation
+
+Same official 2B-Base checkpoint and pinned HF FP32-math reference as §35.
+Serial release-build comparisons on Ryzen 7 260, eight threads, identical
+5/128/512-token inputs, eight greedy output tokens. No cache eviction claim.
+
+| Gate | Requirement |
+|---|---|
+| Correctness | Existing normalized maximum ≤1e-4 and relative RMS ≤1e-5 for full layer/logit vectors; exact greedy ids; existing block/state, rollback/reset/isolation and prefill→decode tests preserved |
+| Prefill | At least 2× throughput and 50% lower TTFT on both 128 and 512 tokens versus measured tokenwise baseline |
+| Short/decode | No >5% median TTFT or decode regression on the five-token reference, three serialized runs; long-prompt decode reported separately |
+| Memory | Peak RSS increase ≤128 MiB at 512 tokens; explicit admission covers live batched workspace and attention packing; no full-context reservation or unbounded chunking |
+| Compatibility | Full workspace checks, scalar reference, Qwen3 CPU/CUDA/INT8/KV/snapshot regressions pass |
+
+Profile first, batch existing matrix projections/MLP across the whole prompt,
+retain sequential convolution/DeltaNet updates and one whole-model transaction.
+No bounded prefill, quantization or new kernel is part of this experiment.
+
+### Implementation and controlled measurements
+
+Dense BF16 source projections and MLP now call the existing Matrix batched
+SIMD/blocked GEMM and thread dispatch for passes of at least 16 tokens.
+FP32 fixtures and smaller passes retain tokenwise GEMV, preserving the
+existing exact reference/session tests. This conservative dispatch boundary
+is not a measured optimum. Whole-input norms/activations reuse the norm
+buffer; MLP up is released before down projection. Delta projections and
+output projection batch across tokens; causal convolution and delta-rule
+updates remain sequential. Full-attention projection, normalization, RoPE
+and causal attention use the existing batched attention path. One staged
+whole-model transaction remains; edited prefixes still reset/replay.
+There are no new inference kernels or bounded-prefill chunks.
+
+A first fully batched reference experiment changed the rounding of batched
+attention/GEMM relative to tokenwise execution and failed an existing exact
+fixture assertion. It was rejected for reference/small passes; no existing
+test or HF tolerance was changed. New batched BF16 tests compare state and
+logits under the original numerical gates, require exact greedy agreement,
+and cover prefill→decode, session isolation and a last-layer failure after
+staged earlier layers have executed.
+
+Serial fresh-process release runs, eight threads, context capacity 1,024,
+eight greedy output tokens; same official weights and hardware as §35.
+Five-token France prompt: three runs per implementation, median below.
+128/512-token ` hello` repetitions: one uninstrumented pair each, plus
+separate instrumented runs. These are controlled length probes, not a
+representative long-form quality corpus. The before 512-token run briefly
+overlapped a focused test build; its 62.12 s result agrees with the isolated
+instrumented 62.69 s result. No CPU benchmarks ran concurrently.
+
+| Prompt tokens | TTFT before → after | Prefill tok/s before → after | Decode tok/s before → after | Peak RSS bytes before → after |
+|---|---:|---:|---:|---:|
+| 5 (median of 3) | 0.6658 → 0.6634 s | 7.5 → 7.5 | 6.00 → 6.11 | 3,898,847,232 → 3,899,002,880 |
+| 128 | 15.74 → 1.41 s | 8.1 → 90.6 | 6.08 → 6.03 | 3,906,420,736 → 3,922,337,792 |
+| 512 | 62.12 → 5.48 s | 8.2 → 93.5 | 5.96 → 5.86 | 3,931,742,208 → 3,966,226,432 |
+
+128/512 prefill improves **11.19× / 11.40×**; TTFT falls **91.04% / 91.18%**.
+512 peak increases **32.89 MiB**, below the predeclared 128 MiB ceiling.
+Warm-file-cache process load is 3.03–3.53 s before and 2.71–3.15 s after;
+this is neither a cold-cache result nor an intended loader improvement.
+The France output remains ` Paris.\nA. True\nB`; both length probes emit
+exactly eight ` hello` tokens in both implementations.
+
+### Profile and memory accounting
+
+An observer-timestamp build, retained separately from the final binary,
+measured stage intervals on the actual model. Temporary profiling edits
+were restored; normal CLI stage profiling remains unsupported for Qwen3.5.
+Timers include allocation/copy costs within each interval; they do not
+separately count allocator calls or hardware memory traffic. `perf` is not
+installed, so cache misses, cycles and measured bandwidth are unavailable.
+
+| Stage group | 5 tokens baseline | 128 before → after | 512 before → after |
+|---|---:|---:|---:|
+| MLP gate/up/down projections | 401.7 ms | 10.011 → 0.508 s | 39.976 → 1.903 s |
+| Delta/full mixer projections including output | 194.4 ms | 4.837 → 0.265 s | 19.777 → 1.050 s |
+| Delta recurrence | 14.0 ms | 0.345 → 0.307 s | 1.416 → 1.274 s |
+| Delta convolution and associated row movement | 9.3 ms | 0.221 → 0.214 s | 0.883 → 0.810 s |
+
+At 512, batched full attention including KV write/read took 72.7 ms;
+Delta gated normalization took 107.2 ms. Other intervals and LM head,
+embedding, transaction staging/admission are included in end-to-end TTFT.
+Recurrence plus convolution now consumes about **38%** of the instrumented
+5.50 s TTFT; MLP about 35%. These are the next measured bottlenecks,
+not a reason to add another kernel in this milestone.
+
+Retained model weights are unchanged at 3,764,747,520 bytes. Persistent
+state remains 20,643,840 bytes plus 24,576 bytes per active attention
+position. Workspace admission now includes eight widest FP32 activation
+rows per input token, conservative GEMM panels per configured worker,
+logits/token bookkeeping and packed attention for the entire visible
+prefix, including padding. Whole-model staging/KV growth and the existing
+256 MiB safety margin remain separate. No complete FP32/BF16 duplicate
+model and no maximum-context KV reservation are introduced. New admission
+tests check batched/prefix workspace growth and overflow.
+
+### Numerical validation (fixed gates)
+
+Original 16 short-prompt greedy steps and all layer/logit values still pass;
+scalar dispatch also passes the original 16 steps. New HF length probes
+compare all embedding/24-layer values for every prompt position plus full
+248,320-element logits for prefill and one cached decode:
+
+| Tokens | Max logit absolute error | Max layer absolute error | Worst normalized max / relative RMS | Greedy |
+|---|---:|---:|---:|---:|
+| 128 | 1.29e-5 | 9.06e-6 | 1.395e-6 / 1.840e-6 | 2/2 |
+| 512 | 2.03e-5 | 5.40e-5 | 2.125e-6 / 2.603e-6 | 2/2 |
+
+HF uses pinned Transformers 5.17.0, official checkpoint, FP32 math on BF16
+source values, rebuilt real rotary buffers and official cached/fresh state
+validation. Reference generation keeps only last-position head logits,
+without changing their calculation. Full vectors and serial timing/profile
+logs are retained in `bench-results/qwen35-prefill/`.
+
+A separate real engineering-prose prompt, truncated/re-encoded to exactly
+128 tokens, improves **15.15 → 1.40 s** TTFT and **8.5 → 91.3 tok/s**
+prefill. Decode **6.01 → 6.00 tok/s**; RSS **3,906,945,024 → 3,921,969,152
+bytes**. Both implementations produce the same eight greedy tokens. Its
+HF full-vector comparison passes two steps: maximum logit error 2.12e-5,
+maximum layer error 4.36e-6, normalized maximum 9.687e-7 and relative RMS
+1.108e-6. Scalar real 128-token verification also passes two greedy steps
+and full vectors (2.590e-6 normalized maximum / 3.081e-6 relative RMS).
+
+Real 512-token generation under an enforced **8 GiB memory.max**, zero
+swap, succeeds with cgroup memory.peak **3,976,540,160 bytes** and zero OOM/
+OOM-kill events. A verified **512 MiB** cap refuses the conservative 5.07 GB
+load budget before loading weights; cgroup peak **130,551,808 bytes**, zero
+OOM events. Cgroup usage is distinct from process RSS and includes page
+cache. One-thread prefill is measured separately below; it is not an
+exhaustive thread matrix. Long-context quality, latency tails, cold-cache
+loading, allocation counts and hardware bandwidth/counters remain
+unverified. Ordinary desktop background activity was not disabled.
+
+The optimized one-thread 128-token probe measured **4.07 s TTFT,
+31.4 tok/s prefill, 6.12 tok/s decode**. Eight-thread prefill is 2.89×
+faster on this probe. No one-thread tokenwise A/B or exhaustive thread/
+context sweep was run.
+
+### Final acceptance
+
+| Gate | Status | Evidence |
+|---|---|---|
+| HF intermediate/logit and greedy parity | PASS | 22/22 default greedy steps across short, controlled 128/512 and real 128-token prose; original full-vector tolerances unchanged; 18/18 scalar steps including real 128-token prefill |
+| State/reset/reuse/rollback/isolation | PASS | Existing exact fixture tests retained; new BF16 whole-vs-tokenwise/split-prefill, cached append, reset, edited-prefix replay and last-layer failure tests; 29 focused model/reference tests per dispatch |
+| ≥2× prefill / ≥50% TTFT reduction | PASS | 128/512: 11.19×/11.40× throughput, 91.04%/91.18% lower TTFT; real prose independently 15.15→1.40 s |
+| Short TTFT / decode ≤5% regression | PASS | Three-run medians: TTFT 0.6658→0.6634 s; decode 6.00→6.11 tok/s; measured long-probe decode within 2% |
+| Peak-RSS increase ≤128 MiB | PASS | 512-token increase 32.89 MiB; unchanged retained weight ownership; explicit workspace/packing admission |
+| Low-RAM admission / OOM | PASS | Enforced 8 GiB/no-swap real 512-token success; 512 MiB refusal before weight load; both zero OOM/OOM-kill |
+| Qwen3 / CUDA / packed INT8 / KV / snapshots | PASS | Full workspace **618 tests / 71 suites**, zero failures/ignores, `MARIN_REQUIRE_CUDA=1` on RTX 5050; no changes to those execution paths |
+| Scalar fallback | PASS | Real short and 128-token full-vector HF parity, **29** focused model tests and **52** tensor tests under `MARIN_MATMUL_SCALAR=1` |
+| Source checks | PASS | fmt, workspace/all-targets check, all-targets/all-features clippy -D warnings, line-limit, unsafe and whitespace checks |
+| Beyond 512 / cold cache / hardware counters | UNVERIFIED | Focused pilot only; no latency-tail, cache-miss or measured bandwidth claim |
+| INT8 Qwen3.5 / CUDA DeltaNet / scheduler / multimodal / MoE | OUT OF SCOPE | No implementation |
+
+**GO: the validated batched CPU prefill path for Qwen3.5-2B-Base.**
+The strongest speed evidence is at 128/512 tokens; smaller passes preserve
+reference/GEMV behavior. The next measured bottleneck is sequential
+DeltaNet recurrence/convolution, alongside remaining dense MLP work.
+Investigate those only in a subsequent measured milestone. No more kernels,
+quantization paths or prefill planners were added here.
+
+All benchmark/validation jobs completed. HEAD and all three stash hashes
+remain unchanged. Existing uncommitted work is preserved; no commit/push.

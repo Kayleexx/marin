@@ -34,7 +34,7 @@ impl Qwen3 {
             ));
         }
         let config = Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref())?;
-        let bytes = super::weights::loaded_bytes(&dir.weights, &config, quant)?;
+        let bytes = super::weight_bytes::loaded_bytes(&dir.weights, &config, quant)?;
         ensure_available(
             bytes
                 .checked_add(CPU_SLACK_BYTES)

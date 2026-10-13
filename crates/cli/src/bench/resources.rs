@@ -43,7 +43,7 @@ impl GpuWatch {
         if !requested {
             return Self::Off;
         }
-        if matches!(engine, Engine::Cpu(_)) {
+        if matches!(engine, Engine::Cpu(_) | Engine::Qwen35(_)) {
             return Self::Unavailable("this run uses the CPU".into());
         }
         Self::watching()

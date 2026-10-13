@@ -37,7 +37,7 @@ pub fn physical_cores() -> usize {
         .collect::<Vec<_>>();
     match count_cores(&lists) {
         0 => std::thread::available_parallelism().map_or(1, usize::from),
-        cores => cores,
+        cores => cores.min(std::thread::available_parallelism().map_or(1, usize::from)),
     }
 }
 
@@ -183,5 +183,6 @@ mod tests {
         assert_eq!(count_cores(&lists), 2);
         assert_eq!(count_cores(&[]), 0);
         assert!(physical_cores() >= 1);
+        assert!(physical_cores() <= std::thread::available_parallelism().map_or(1, usize::from));
     }
 }

@@ -72,8 +72,8 @@ fn only_the_tensors_that_are_loaded_are_counted_not_unused_extras() {
     );
     assert_eq!(
         needed,
-        file_data_bytes - extra_bytes,
-        "tied models do not load lm_head"
+        file_data_bytes - extra_bytes + 64,
+        "tied models do not load lm_head; norms retain FP32 (32 values)"
     );
 
     let missing = tensors(&[])

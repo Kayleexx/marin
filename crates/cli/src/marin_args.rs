@@ -90,7 +90,7 @@ pub struct Options {
     /// Never use colors (also honors NO_COLOR)
     #[arg(long, global = true)]
     pub no_color: bool,
-    /// CPU threads for prompt passes (default: one per physical core; 1 runs on a single thread)
+    /// CPU threads for prompt passes (default: physical cores capped by affinity/quota; explicit N overrides this)
     #[arg(long, global = true, value_name = "N")]
     pub threads: Option<usize>,
 }

@@ -39,6 +39,7 @@ impl ModelDir {
                 files: missing,
             });
         }
+        let weights = Weights::open(path)?;
         let generation_path = path.join(GENERATION_CONFIG);
         let generation_config_json = generation_path
             .is_file()
@@ -54,7 +55,7 @@ impl ModelDir {
             generation_config_json,
             tokenizer_config_json,
             tokenizer: Tokenizer::from_file(&path.join(TOKENIZER))?,
-            weights: Weights::open(path)?,
+            weights,
             path: path.to_path_buf(),
         })
     }

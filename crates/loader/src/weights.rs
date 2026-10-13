@@ -13,8 +13,9 @@ pub const INDEX_FILE: &str = "model.safetensors.index.json";
 /// All tensors of a model, from one file or from the shards named by the index.
 #[derive(Debug)]
 pub struct Weights {
-    files: Vec<SafetensorsFile>,
-    owner: BTreeMap<String, usize>,
+    pub(crate) files: Vec<SafetensorsFile>,
+    pub(crate) packed: Option<crate::packed::Manifest>,
+    pub(crate) owner: BTreeMap<String, usize>,
 }
 
 #[derive(Deserialize)]
@@ -28,6 +29,12 @@ impl Weights {
     }
 
     pub fn open(dir: &Path) -> Result<Self, LoaderError> {
+        let packed = dir
+            .join(crate::packed::MANIFEST)
+            .try_exists()
+            .map_err(|e| crate::packed::io(dir, e))?
+            .then(|| crate::packed::Manifest::open(dir))
+            .transpose()?;
         let single = dir.join(SINGLE_FILE);
         let paths = if single.is_file() {
             vec![single]
@@ -45,7 +52,13 @@ impl Weights {
             }
             files.push(file);
         }
-        Ok(Self { files, owner })
+        let result = Self {
+            files,
+            owner,
+            packed,
+        };
+        result.validate_packed()?;
+        Ok(result)
     }
 
     /// Hashes every weight file on another thread, so it can overlap loading the weights. Join it before trusting

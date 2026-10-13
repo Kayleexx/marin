@@ -40,6 +40,16 @@ fn interrupt() -> Result<Interrupt, CliError> {
 
 fn run(cli: Cli, style: &Style) -> Result<ExitCode, CliError> {
     match cli.command {
+        Some(Command::ExportInt8 {
+            model_dir,
+            output,
+            quant_group,
+        }) => {
+            let dir = loader::ModelDir::open(&model_dir)?;
+            model::export_int8(&dir, &output, quant_group)?;
+            println!("packed INT8 model written to {}", output.display());
+            Ok(ExitCode::SUCCESS)
+        }
         Some(Command::Inspect {
             model_dir,
             quant,

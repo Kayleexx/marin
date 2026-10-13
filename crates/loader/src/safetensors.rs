@@ -13,6 +13,8 @@ const READ_CHUNK_BYTES: usize = 1 << 22;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dtype {
     Bf16,
+    I8,
+    F32,
     Other,
 }
 
@@ -21,8 +23,8 @@ pub struct TensorInfo {
     pub dtype: Dtype,
     dtype_name: String,
     pub shape: Vec<usize>,
-    begin: u64,
-    end: u64,
+    pub(crate) begin: u64,
+    pub(crate) end: u64,
 }
 
 impl TensorInfo {
@@ -77,7 +79,14 @@ impl SafetensorsFile {
         let mut header = vec![0_u8; usize::try_from(header_len).map_err(|e| bad(e.to_string()))?];
         file.read_exact(&mut header).map_err(io)?;
         let raw: BTreeMap<String, serde_json::Value> =
-            serde_json::from_slice(&header).map_err(|e| bad(format!("bad header JSON: {e}")))?;
+            crate::packed_read::parse(&header).map_err(|e| bad(format!("bad header JSON: {e}")))?;
+        if path
+            .parent()
+            .is_some_and(|dir| dir.join(crate::packed::MANIFEST).exists())
+        {
+            let _: BTreeMap<String, RawTensor> = crate::packed_read::parse(&header)
+                .map_err(|e| bad(format!("bad packed header: {e}")))?;
+        }
         let data_len = file_len.saturating_sub(data_start);
         let mut tensors = BTreeMap::new();
         for (name, value) in raw {
@@ -96,8 +105,70 @@ impl SafetensorsFile {
         })
     }
 
+    pub(crate) fn data_len(&self) -> Result<u64, LoaderError> {
+        Ok(std::fs::metadata(&self.path)
+            .map_err(|e| crate::packed::io(&self.path, e))?
+            .len()
+            .saturating_sub(self.data_start))
+    }
+
     pub fn tensors(&self) -> &BTreeMap<String, TensorInfo> {
         &self.tensors
+    }
+
+    pub(crate) fn reader(&self, name: &str) -> Result<File, LoaderError> {
+        let info = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| LoaderError::UnknownTensor(name.into()))?;
+        let mut file = File::open(&self.path).map_err(|e| crate::packed::io(&self.path, e))?;
+        file.seek(SeekFrom::Start(self.data_start.saturating_add(info.begin)))
+            .map_err(|e| crate::packed::io(&self.path, e))?;
+        Ok(file)
+    }
+
+    pub fn read_f32(&self, name: &str) -> Result<Vec<f32>, LoaderError> {
+        let info = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| LoaderError::UnknownTensor(name.into()))?;
+        if info.dtype != Dtype::F32 {
+            return Err(LoaderError::UnsupportedDtype {
+                name: name.into(),
+                found: info.dtype_name.clone(),
+            });
+        }
+        let bad = |reason: String| LoaderError::Safetensors {
+            path: self.path.clone(),
+            reason,
+        };
+        let n = usize::try_from(info.byte_len() / 4).map_err(|e| bad(e.to_string()))?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(n).map_err(|e| bad(e.to_string()))?;
+        let mut reader = self.reader(name)?;
+        let mut scratch = vec![0_u8; READ_CHUNK_BYTES.min(n.saturating_mul(4))];
+        while out.len() < n {
+            let bytes = scratch
+                .get_mut(
+                    ..n.saturating_sub(out.len())
+                        .saturating_mul(4)
+                        .min(READ_CHUNK_BYTES),
+                )
+                .ok_or_else(|| bad("invalid FP32 chunk".into()))?;
+            reader.read_exact(bytes).map_err(|source| LoaderError::Io {
+                path: self.path.clone(),
+                source,
+            })?;
+            for chunk in bytes.chunks_exact(4) {
+                let value =
+                    f32::from_le_bytes(chunk.try_into().map_err(|_| bad("invalid float".into()))?);
+                if !value.is_finite() {
+                    return Err(bad(format!("nonfinite {name}")));
+                }
+                out.push(value);
+            }
+        }
+        Ok(out)
     }
 
     pub fn read_bf16(&self, name: &str) -> Result<Vec<u16>, LoaderError> {
@@ -155,7 +226,8 @@ fn validate(name: &str, tensor: RawTensor, data_len: u64) -> Result<TensorInfo, 
     let (dtype, width) = match tensor.dtype.as_str() {
         "BF16" => (Dtype::Bf16, 2_u64),
         "F16" => (Dtype::Other, 2),
-        "F32" => (Dtype::Other, 4),
+        "F32" => (Dtype::F32, 4),
+        "I8" => (Dtype::I8, 1),
         _ => (Dtype::Other, 0),
     };
     if width > 0 {
