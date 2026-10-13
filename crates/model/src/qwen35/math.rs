@@ -50,7 +50,7 @@ pub(super) struct Linear {
 }
 enum LinearData {
     F32(Vec<f32>),
-    Bf16(tensor::Matrix),
+    Matrix(tensor::Matrix),
 }
 impl Linear {
     pub(super) fn new(data: Vec<f32>, cols: usize) -> Self {
@@ -59,14 +59,14 @@ impl Linear {
             cols,
         }
     }
-    pub(super) fn bf16(rows: usize, cols: usize, data: Vec<u16>) -> Result<Self, ModelError> {
-        Ok(Self {
-            data: LinearData::Bf16(tensor::Matrix::new(rows, cols, data)?),
-            cols,
-        })
+    pub(super) fn stored(matrix: tensor::Matrix) -> Self {
+        Self {
+            cols: matrix.cols(),
+            data: LinearData::Matrix(matrix),
+        }
     }
-    pub(super) fn is_bf16(&self) -> bool {
-        matches!(self.data, LinearData::Bf16(_))
+    pub(super) fn is_matrix(&self) -> bool {
+        matches!(self.data, LinearData::Matrix(_))
     }
     pub(super) fn apply(&self, x: &[f32]) -> Result<Vec<f32>, ModelError> {
         if x.is_empty() || self.cols == 0 || !x.len().is_multiple_of(self.cols) {
@@ -74,7 +74,7 @@ impl Linear {
         }
         let tokens = x.len().checked_div(self.cols).unwrap_or(0);
         let data = match &self.data {
-            LinearData::Bf16(matrix) => {
+            LinearData::Matrix(matrix) => {
                 let mut out = zeros(size(tokens, matrix.rows())?)?;
                 matrix.matmul(x, &mut out)?;
                 tensor::ensure_finite(&out, "Qwen3.5 projection")?;

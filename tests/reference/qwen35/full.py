@@ -35,11 +35,19 @@ def load(path):
     with torch.device("meta"):
         model = Qwen3_5ForCausalLM(text)
     weights = {}
+    manifest_path = path / "marin-int8.json"
+    group = json.loads(manifest_path.read_text())["group"] if manifest_path.exists() else None
     for file in sorted(path.glob("*.safetensors")):
         with safe_open(file, framework="pt", device="cpu") as src:
             for name in src.keys():
-                if name.startswith("model.language_model."):
-                    weights[name.replace("model.language_model.", "model.", 1)] = src.get_tensor(name)
+                if name.startswith("model.language_model.") and not name.endswith(".scales"):
+                    value = src.get_tensor(name)
+                    if value.dtype == torch.int8:
+                        rows, cols = value.shape
+                        scales = src.get_tensor(name + ".scales")
+                        assert group and scales.shape == (rows, cols // group)
+                        value = (value.float().reshape(rows, cols // group, group) * scales[..., None]).reshape(rows, cols)
+                    weights[name.replace("model.language_model.", "model.", 1)] = value
     weights["lm_head.weight"] = weights["model.embed_tokens.weight"]
     result = model.load_state_dict(weights, strict=True, assign=True)
     assert not result.missing_keys and not result.unexpected_keys
@@ -50,13 +58,13 @@ def load(path):
     return float_math(model)
 
 
-def tiny(path):
+def tiny(path, quantizable=False):
     path.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(350)
-    text = Qwen3_5TextConfig(vocab_size=320, hidden_size=8, intermediate_size=12,
-        num_hidden_layers=4, num_attention_heads=2, num_key_value_heads=1, head_dim=8,
-        linear_num_key_heads=2, linear_num_value_heads=2, linear_key_head_dim=3,
-        linear_value_head_dim=4, linear_conv_kernel_dim=4, max_position_embeddings=1024,
+    text = Qwen3_5TextConfig(vocab_size=320, hidden_size=32 if quantizable else 8, intermediate_size=64 if quantizable else 12,
+        num_hidden_layers=4, num_attention_heads=2, num_key_value_heads=1, head_dim=16 if quantizable else 8,
+        linear_num_key_heads=2, linear_num_value_heads=2, linear_key_head_dim=8 if quantizable else 3,
+        linear_value_head_dim=16 if quantizable else 4, linear_conv_kernel_dim=4, max_position_embeddings=1024,
         layer_types=["linear_attention"]*3+["full_attention"], tie_word_embeddings=True,
         eos_token_id=0, rope_parameters={"rope_type":"default","rope_theta":1e7,
             "partial_rotary_factor":.5,"mrope_section":[1,1,0]})
@@ -112,7 +120,8 @@ def reference(path, out, prompts, steps):
                 result = model(torch.tensor([[token]]),past_key_values=cache,use_cache=True, logits_to_keep=1)
         print(prompt, "=>", tokenizer.decode([x['token'] for x in case['steps']]),flush=True)
         cases.append(case)
-    out.write_text(json.dumps({"format":1,"weights":"bfloat16","math":"float32","transformers":__version__,"cases":cases},separators=(",",":")))
+    with out.open("w") as file:
+        json.dump({"format":1,"weights":"int8-dequantized" if (path/"marin-int8.json").exists() else "bfloat16","math":"float32","transformers":__version__,"cases":cases},file,separators=(",",":"))
 
 
 def main():

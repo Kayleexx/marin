@@ -51,16 +51,11 @@ pub fn footprint(
         });
     }
     if model::qwen35::is_qwen35(&dir.config_json) {
-        if precision.weights.is_some() {
-            return Err(CliError::BadOption(
-                "Qwen3.5 quantization is unsupported".into(),
-            ));
-        }
         let c = model::qwen35::TextConfig::parse(
             &dir.config_json,
             dir.generation_config_json.as_deref(),
         )?;
-        let weights = model::qwen35::weight_bytes(&dir.weights)?;
+        let weights = model::qwen35::weight_bytes(&dir.weights, precision.weights)?;
         let kv = c.state_bytes(ctx)? as u64;
         let needed = weights
             .checked_add(kv.saturating_mul(2))
@@ -72,7 +67,7 @@ pub fn footprint(
             parameters: dir
                 .weights
                 .names()
-                .filter(|n| n.starts_with("model.language_model."))
+                .filter(|n| n.starts_with("model.language_model.") && !n.ends_with(".scales"))
                 .try_fold(0_u64, |count, name| {
                     let i = dir.weights.info(name)?;
                     let elements = i
@@ -82,12 +77,12 @@ pub fn footprint(
                     count.checked_add(elements)
                 }),
             recurrent: c.state_bytes(0)? as u64,
-            quant: None,
+            quant: precision.weights,
             kv,
             kv_window: kv,
             kv_startup: c.state_bytes(0)? as u64,
             needed: needed.max(
-                model::qwen35::load_bytes(&dir.weights, &c)?
+                model::qwen35::load_bytes(&dir.weights, &c, precision.weights)?
                     .checked_add(model::CPU_SLACK_BYTES)
                     .ok_or_else(|| CliError::BadOption("load memory overflow".into()))?,
             ),

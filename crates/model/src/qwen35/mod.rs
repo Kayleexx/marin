@@ -3,6 +3,7 @@ mod cache;
 mod config;
 mod delta;
 mod full;
+pub(crate) mod layout;
 mod math;
 mod model;
 mod model_config;
@@ -167,7 +168,7 @@ impl ReferenceBlock {
             .checked_add(input.len().checked_div(c.hidden_size).unwrap_or(0))
             .ok_or_else(|| invalid("context overflow"))?;
         // Small passes retain GEMV: avoid GEMM packing/thread startup on decode and short prompts.
-        let width = if !self.common.gate.is_bf16()
+        let width = if !self.common.gate.is_matrix()
             || input.len().checked_div(c.hidden_size).unwrap_or(0) < 16
         {
             c.hidden_size

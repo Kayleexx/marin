@@ -74,15 +74,32 @@ marin-run ~/models/Qwen3.5-2B-Base --backend cpu --threads 8 --ctx 128 \
   --temp 0 --max-tokens 8 --metrics -p "The capital of France is"
 ```
 
-The complete 24-layer hybrid backbone retains official BF16 matrices and
+The complete 24-layer hybrid backbone retains official BF16 matrices by default and
 uses FP32 math, recurrent/convolution state and growable attention KV.
 It matches HF's FP32 layer/logit reference and greedy tokens on real prose
 and code prompts. Measured short-prompt peak RAM is about **3.90 GB**,
 TTFT **0.55–0.66 s**, and decode **5.9–6.1 tok/s** on the reference CPU.
 [Exact gates, measurements and limitations](BENCHMARKS.md#35-end-to-end-qwen35-2b-text-inference).
 
-CPU only; Qwen3.5 quantization, vision, MoE, untied heads and stage profiling
-are unsupported. Prefill of at least 16 tokens batches dense projections and
+CPU only. BF16 remains default; opt-in CPU INT8 reuses the same Q8 kernels
+and packed loader as Qwen3. On the reference CPU, short-prompt decode rises
+from **5.52 to 9.30 tok/s**, peak RSS falls from **3.90 to 2.08 GB**, and warm
+load falls from **3.86 to 1.90 s**. Convolution, norms, decay/beta projections,
+recurrent state and attention KV keep FP32 values/math. Vision, MoE, untied
+heads, CUDA DeltaNet and stage profiling remain unsupported.
+
+```bash
+marin-run export-int8 ~/models/Qwen3.5-2B-Base ~/models/Qwen3.5-2B-Base-Q8 --quant-group 128
+marin-run ~/models/Qwen3.5-2B-Base-Q8 --backend cpu --quantize int8 --quant-group 128 \
+  --threads 8 --ctx 1152 --temp 0 --max-tokens 8 -p "The capital of France is"
+```
+
+The artifact requires matching opt-in INT8/group flags. Original BF16 folders
+also accept `--quantize int8`; exporting once avoids conversion on subsequent
+loads. Export refuses an existing destination and publishes atomically.
+[Quality, strict matched-HF parity, 4 GiB evidence and limits](BENCHMARKS.md#37-qwen35-cpu-packed-int8-2026-10-13).
+
+Prefill of at least 16 tokens batches dense projections and
 MLP through existing CPU GEMM/threading, with sequential recurrent updates.
 At 128/512 tokens, measured prefill rose from 8.1/8.2 to **90.6/93.5 tok/s**
 and TTFT fell from 15.74/62.12 to **1.41/5.48 s**, with a **33 MiB** peak-RAM

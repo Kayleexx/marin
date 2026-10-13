@@ -123,14 +123,14 @@ impl Engine {
         progress: impl FnMut(u64, u64),
     ) -> Result<Self, ModelError> {
         if crate::qwen35::is_qwen35(&dir.config_json) {
-            if quant.is_some() || !matches!(backend, Backend::Cpu) {
+            if !matches!(backend, Backend::Cpu) {
                 return Err(ModelError::Unsupported(
-                    "Qwen3.5 supports CPU BF16 weights / FP32 math only".into(),
+                    "Qwen3.5 supports CPU inference only".into(),
                 ));
             }
-            return Ok(Self::Qwen35(Box::new(crate::qwen35::Qwen35::load(
-                dir, progress,
-            )?)));
+            return Ok(Self::Qwen35(Box::new(
+                crate::qwen35::Qwen35::load_quantized(dir, quant, progress)?,
+            )));
         }
         Ok(match backend {
             Backend::Cpu => Self::Cpu(Box::new(Qwen3::load_quantized(dir, quant, progress)?)),
@@ -161,7 +161,7 @@ impl Engine {
     pub fn quantization(&self) -> Option<QuantScheme> {
         match self {
             Self::Cpu(m) => m.quantization(),
-            Self::Qwen35(_) => None,
+            Self::Qwen35(m) => m.quantization(),
             Self::Cuda(m) => m.quantization(),
         }
     }

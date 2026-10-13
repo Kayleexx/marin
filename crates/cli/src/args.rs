@@ -326,7 +326,7 @@ pub enum Command {
         #[arg(long, value_enum, default_value_t = BackendArg::Auto)]
         backend: BackendArg,
         #[command(flatten)]
-        kv: KvArgs,
+        quant: QuantArgs,
     },
 }
 

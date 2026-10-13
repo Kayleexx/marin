@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use loader::Tokenizer;
-use model::{BackendChoice, Engine, EngineCache, KvFormat, Precision};
+use model::{BackendChoice, Engine, EngineCache, Precision};
 use runtime::CausalLm;
 use serde::Deserialize;
 
@@ -202,7 +202,7 @@ pub fn run(
     model_dir: &Path,
     reference_path: &Path,
     backend: BackendChoice,
-    kv: KvFormat,
+    precision: Precision,
     style: &Style,
 ) -> Result<(), CliError> {
     let reference = read_reference(reference_path)?;
@@ -222,14 +222,17 @@ pub fn run(
         Some(ctx),
         DEFAULT_CTX,
         backend,
-        Precision { weights: None, kv },
+        precision,
         style,
         true,
     )?;
     println!(
-        "verifying {} on {} against float32 reference output (bf16 weights, float32 math)\n",
+        "verifying {} on {} against float32 reference output ({}, float32 math)\n",
         style.bold(&loaded.name),
-        loaded.model.backend_name()
+        loaded.model.backend_name(),
+        precision
+            .weights
+            .map_or_else(|| "bf16 weights".into(), |q| q.label())
     );
     let mut failed = false;
     for (n, case) in reference.cases.iter().enumerate() {

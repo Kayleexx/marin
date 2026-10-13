@@ -184,3 +184,60 @@ fn batched_last_layer_failure_preserves_the_entire_transaction() {
     assert_eq!(contents(&c), before);
     assert_eq!(c.tokens, ids);
 }
+
+#[test]
+fn int8_batched_state_replay_reset_and_late_failure_are_atomic() {
+    let dir = loader::ModelDir::open(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-qwen35-int8"),
+    )
+    .unwrap();
+    let scheme = tensor::QuantScheme::new(tensor::QuantBits::Int8, 32).unwrap();
+    let mut m = Qwen35::load_quantized(&dir, Some(scheme), |_, _| {}).unwrap();
+    let mut batch = m.new_cache(128).unwrap();
+    let mut single = m.new_cache(128).unwrap();
+    let untouched = m.new_cache(128).unwrap();
+    let original = contents(&untouched);
+    let ids: Vec<_> = (1..66).collect();
+    let a = m.forward(&ids, &mut batch).unwrap();
+    let mut b = Vec::new();
+    for token in &ids {
+        b = m.forward(&[*token], &mut single).unwrap();
+    }
+    close(&a, &b);
+    close(&contents(&batch), &contents(&single));
+    assert_eq!(greedy(&a), greedy(&b));
+    close(
+        &m.forward(&[5], &mut batch).unwrap(),
+        &m.forward(&[5], &mut single).unwrap(),
+    );
+    batch.truncate(17).unwrap();
+    let a = m.forward(&[36; 16], &mut batch).unwrap();
+    single.clear();
+    let mut edited = ids[..17].to_vec();
+    edited.extend_from_slice(&[36; 16]);
+    assert_eq!(a, m.forward(&edited, &mut single).unwrap());
+    assert_eq!(contents(&batch), contents(&single));
+    batch.clear();
+    single.clear();
+    assert_eq!(
+        m.forward(&ids, &mut batch).unwrap(),
+        m.forward(&ids, &mut single).unwrap()
+    );
+    assert_eq!(contents(&untouched), original);
+    let before = contents(&batch);
+    let ledger = batch.tokens.clone();
+    let h = m.config().hidden_size;
+    let ff = m.config().intermediate_size;
+    let last = m.blocks.last_mut().unwrap();
+    last.common.gate = Linear::new(vec![1000.0; h * ff], h);
+    last.common.up = Linear::new(vec![1000.0; h * ff], h);
+    last.common.down = Linear::new(vec![f32::MAX; h * ff], ff);
+    let mut reached = 0;
+    assert!(
+        m.forward_observed(&[29; 17], &mut batch, Some(&mut |i, _| reached = i))
+            .is_err()
+    );
+    assert_eq!(reached, 3);
+    assert_eq!(contents(&batch), before);
+    assert_eq!(batch.tokens, ledger);
+}

@@ -4197,3 +4197,165 @@ quantization paths or prefill planners were added here.
 
 All benchmark/validation jobs completed. HEAD and all three stash hashes
 remain unchanged. Existing uncommitted work is preserved; no commit/push.
+
+## 37. Qwen3.5 CPU packed INT8 (2026-10-13)
+
+### Gates fixed before implementation
+
+BF16 remains default. INT8 uses the existing symmetric max-abs quantizer,
+Q8 kernels and immutable packed format. Decay/beta projections (a/b),
+convolution, norms, A_log/dt_bias, recurrent state and attention KV retain
+validated FP32 values/math; source BF16 values are promoted exactly.
+
+| Gate | Requirement |
+|---|---|
+| Kernel correctness | Against HF using the exact dequantized artifact values: original full layer/logit normalized maximum ≤1e-4 and relative RMS ≤1e-5; exact greedy ids. BF16 verification unchanged |
+| Quantization quality | ≥95% teacher-forced top-1 agreement with BF16 across ≥256 prose/code positions; mean loss increase ≤0.03 nats and perplexity increase ≤3%; independent greedy differences reported separately |
+| RAM | ≥35% reduction in fresh-process peak RSS on short and 512-token probes; packed weights remain packed, no full BF16 inference copy; safe enforced budget/refusal |
+| Decode | ≥20% median improvement at short prompts, three serialized pairs |
+| Prefill/TTFT | No >5% TTFT regression at 128/512/1024, identical ids and eight threads; one focused pair per longer length, investigate failures |
+| Startup | Warm-file-cache direct load no slower than BF16; report one-off conversion time/RSS and artifact size separately; no cold-cache claim without controlled eviction |
+| State/compatibility | Reset/replay/rollback/isolation, split prefill→decode, scalar/threads, packed corruption/incompatibility/partial publication and existing Qwen3/CUDA/snapshot regressions pass |
+| Source checks | fmt/check/clippy -D warnings/full workspace/line-limit/unsafe checks pass |
+
+Quantization error against original BF16 is a quality measurement, not a
+relaxation of the numerical implementation gates. Group 128 is the initial
+pilot (existing default); a smaller existing group is permitted only as a
+measured quality tradeoff, with the same acceptance thresholds. No new
+kernels, precision changes to state, chunking or generic model framework.
+
+### Implementation and ownership
+
+The official `Qwen3.5-2B-Base` checkpoint (revision
+`b1485b2fa6dfa1287294f269f5fb618e03d52d7c`) has 24 text blocks: 18
+DeltaNet and six full-attention. The export quantizes 151 dense matrices,
+including embedding/tied output, QKV, Z, output, attention and MLP projections.
+It stores 151 scale tensors and 169 protected FP32 tensors (471 tensors total).
+The protected values include a/b projections, convolution, norms, A_log and
+dt_bias; recurrent and attention state stay FP32. Existing Q8 GEMV/GEMM and
+batched prefill operate on the packed matrices. The loader validates every
+text tensor, shape, dtype, scale and group size, and binds the packed manifest
+to the model architecture. The direct path constructs Q8 matrices from INT8
+codes and scales; it never loads or retains a full BF16 weight model. BF16
+remains the default and source folders still allow opt-in inline quantization.
+The original Qwen3 packed format and atomic publication procedure are reused.
+
+The retained BF16 source weights occupy **3,764,747,520 bytes**; retained Q8
+tensor payload occupies **1,945,763,072 bytes**. The exported
+`model.safetensors` is **1,945,824,752 bytes**, including its header; the full
+bundle with config, tokenizer and metadata is **1,958,790,217 bytes**. The
+one-off export took **8.242 s** and peaked at **1,655,894,016 bytes RSS**
+with source files already in the OS page cache. These figures are measured
+separately from warm direct loading. Export rejects an existing destination
+and publishes only a complete, validated temporary artifact.
+
+### End-to-end performance and memory
+
+Ryzen 7 260, eight threads, CPU backend, group 128, `--temp 0`, eight
+generated tokens, `--ctx 1152`. Each entry uses the same token IDs for BF16
+and INT8; 128/512/1024-token prompts repeat ` hello`. Three serialized
+fresh-process BF16/INT8 pairs give the short-prompt medians; each longer
+length is one serialized pair. OS file cache was warm. Times below are seconds,
+throughput is tokens/s, and RSS is fresh-process peak bytes.
+
+| Prompt tokens | BF16 → INT8 TTFT | BF16 → INT8 prefill | BF16 → INT8 decode | BF16 → INT8 peak RSS | BF16 → INT8 model load |
+|---:|---:|---:|---:|---:|---:|
+| 5 | 0.730 → **0.438** | 6.9 → **11.4** | 5.52 → **9.30** | 3,898,724,352 → **2,079,879,168** | 3.86 → **1.90** |
+| 128 | 1.55 → **1.47** | 82.7 → **86.8** | 5.50 → **9.68** | 3,921,551,360 → **2,092,797,952** | 3.88 → **1.94** |
+| 512 | 6.01 → **5.41** | 85.1 → **94.7** | 5.38 → **9.45** | 3,966,111,744 → **2,138,320,896** | 3.98 → **1.98** |
+| 1024 | 11.61 → **10.47** | 88.2 → **97.8** | 5.39 → **9.00** | 4,030,210,048 → **2,205,065,216** | 3.87 → **1.98** |
+
+Short decode improves **68.5%** and peak RSS falls **46.7%**. The longer
+TTFT changes are **−5.2%, −10.0%, −9.8%**, respectively, with no 5%
+regression. The short-prompt generated text is identical for BF16 and INT8:
+` Paris.\nA. True\nB`. Older §35–36 figures used different runs and are
+historical baselines, not the paired comparison for these gates.
+
+Under an enforced **4 GiB `memory.max`**, zero swap, the real 1024-token
+INT8 run generates eight tokens, has cgroup `memory.peak` **2,213,138,432
+bytes**, and records zero OOM/OOM-kill events. A separate **512 MiB** cap
+rejects the estimated **2.57 GB** execution budget before loading weights;
+cgroup peak is **128,700,416 bytes**, with zero OOM/OOM-kill events. Cgroup
+usage and process RSS are different measures; resident file-cache charging
+depends on the host's cache state. This is an enforced process budget test,
+not a claim that a complete desktop fits in 4 GiB.
+
+### Numerical and quality validation
+
+The official HF Transformers 5.17.0 implementation receives the *same*
+packed INT8 codes dequantized to FP32 for reference execution, with protected
+FP32 tensors unchanged. This tests Marin's Q8 computation and hybrid state,
+while the following teacher-forced comparison separately tests quantization
+loss against the original BF16 checkpoint. HF cached/fresh transitions were
+checked, and the original normalized maximum **1e-4**, relative RMS
+**1e-5**, and exact greedy gates were unchanged. Every embedding, all 24
+layer outputs at every prefill position, and all 248,320 output logits were
+compared:
+
+| Prompt | Greedy matches | Max logit absolute error | Max layer absolute error | Worst normalized max / relative RMS |
+|---|---:|---:|---:|---:|
+| Short prose + code | 16/16 | 1.72e-5 | 5.09e-7 | 1.473e-6 / 1.770e-6 |
+| 128 tokens | 2/2 | 1.19e-5 | 8.09e-6 | 1.927e-6 / 1.969e-6 |
+| 512 tokens | 2/2 | 1.34e-5 | 3.30e-5 | 2.250e-6 / 2.371e-6 |
+| 1024 tokens | 2/2 | 1.57e-5 | 7.35e-5 | 2.713e-6 / 2.708e-6 |
+
+All **22/22** default-dispatch greedy choices match. Forced scalar Q8
+matches **16/16** short greedy choices, worst normalized maximum **2.798e-6**
+and relative RMS **2.867e-6**. The original BF16 short-prompt HF run still
+matches **16/16**. A deterministic 32-wide hybrid fixture compares direct
+packed with inline Q8 at one and eight threads and checks repeated decode,
+split prefill, prefix replay, reset, session isolation and late whole-model
+rollback. Both CLIs select packed INT8 only when requested; the CLI `verify`
+command accepts the matching quantization flags. Tests reject corrupted,
+mislabelled, missing and wrong-group artifacts, as well as bare INT8 tensors
+without a packed manifest.
+
+Teacher forcing uses identical checkpoint/tokenizer, the same 64-token
+prompt and next 128 scored tokens for each prose and code sample. The
+top-1 agreement is **128/128** prose and **126/128** code, **254/256 =
+99.22%** overall. Relative to BF16, mean loss changes by **−0.002147** and
+**−0.000267 nats**, and perplexity by **−0.214%** and **−0.027%**,
+respectively. These small samples pass the preset 95%, +0.03-nat and +3%
+gates; they do not establish broad instruction or executable-code quality.
+No real-model group-size change was needed.
+
+### Checks, failures and decision
+
+The first quantized CLI verification exposed that `verify` did not parse
+weight quantization flags; it now uses the existing quantization argument
+set. An initial combined long HF-reference job ended with SIGTERM before
+publishing a result; its cause was not established. Streaming JSON output
+and separate 128/512/1024-token reference jobs then completed and passed.
+No acceptance threshold was changed. Warm-cache startup was measured;
+controlled cold-disk startup, latency tails, hardware memory-bandwidth
+counters and broad quality/code-execution evaluation remain unverified.
+
+`cargo fmt --all --check`, workspace/all-targets `cargo check`, and
+workspace/all-targets/all-features `cargo clippy -- -D warnings` pass.
+`MARIN_REQUIRE_CUDA=1 cargo test --workspace --all-features --locked`
+passes **622 tests across 73 suites**, zero failed/ignored, on the available
+RTX 5050. Focused final all-features model tests and forced-scalar model/
+tensor tests pass; the tensor scalar suite has **52 tests**. Rust line-limit,
+unsafe-code and `git diff --check` checks pass. Existing Qwen3 CPU/CUDA,
+packed loader, KV and snapshot regressions are included in the workspace
+suite. Raw commands, measurements, HF outputs and check logs are retained in
+ignored `bench-results/qwen35-int8/`.
+
+| Original gate | Decision | Evidence |
+|---|---|---|
+| Matched-HF numerical/greedy correctness | **PASS** | 22/22 real-model steps, maximum normalized 2.713e-6 and RMS 2.708e-6; BF16 and scalar checks pass |
+| BF16 quality ≥95%, loss/PPL bounds | **PASS** | 254/256 top-1; both corpus loss and PPL changes below bounds |
+| Peak RSS ≥35% lower and safe admission | **PASS** | 46.7% short and 46.1% 512-token reductions; 4 GiB execution, 512 MiB early refusal, zero OOM |
+| Short decode ≥20% faster | **PASS** | 5.52 → 9.30 tok/s median, +68.5% |
+| 128/512/1024 TTFT regression ≤5% | **PASS** | −5.2% / −10.0% / −9.8% in focused paired runs |
+| Warm direct startup ≤BF16 | **PASS** | 1.90 vs 3.86 s short median; one-off 8.242 s export reported separately |
+| State, format, scalar, thread, CLI and Qwen3/CUDA compatibility | **PASS** | Fixture/CLI tests, strict scalar HF, RTX 5050 workspace suite |
+| Source and full test checks | **PASS** | fmt, check, clippy, 622 workspace tests, scalar suites, line and unsafe checks |
+| Controlled cold-disk startup and broad quality | **UNVERIFIED** | Outside fixed gate; warm cache and two 128-position corpora only |
+
+**GO: opt-in packed CPU INT8 for Qwen3.5-2B-Base, group 128.** BF16 stays
+default. The larger remaining prefill cost is sequential DeltaNet recurrence/
+convolution and dense work; §36 profiled those before INT8. No new bottleneck
+profile is claimed from these end-to-end measurements. Qwen3.5 CUDA DeltaNet,
+vision, Instruct checkpoints and CPU snapshots were not validated here.
+No commit, push or stash change was made.

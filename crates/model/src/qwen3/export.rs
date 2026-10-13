@@ -15,33 +15,65 @@ pub fn export_int8(dir: &ModelDir, destination: &Path, group: usize) -> Result<(
             "export requires original BF16 weights".into(),
         ));
     }
-    let config = Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref())?;
     let scheme = QuantScheme::new(QuantBits::Int8, group)?;
-    let expected = expected_tensors(&config)?;
-    validate(&dir.weights, &expected)?;
+    let expected = if crate::qwen35::is_qwen35(&dir.config_json) {
+        let config = crate::qwen35::TextConfig::parse(
+            &dir.config_json,
+            dir.generation_config_json.as_deref(),
+        )?;
+        crate::qwen35::layout::validate(&dir.weights, &config)?;
+        crate::qwen35::layout::tensors(&config)?
+    } else {
+        let config = Qwen3Config::parse(&dir.config_json, dir.generation_config_json.as_deref())?;
+        let expected = expected_tensors(&config)?;
+        validate(&dir.weights, &expected)?;
+        expected
+            .into_iter()
+            .map(|w| (w.name, w.shape.clone(), w.shape.len() == 2))
+            .collect()
+    };
     let mut descriptors = Vec::new();
-    for want in &expected {
-        descriptors.push((want.name.clone(), want.shape.clone(), want.shape.len() == 2));
-        if let [rows, cols] = want.shape.as_slice() {
+    for (name, shape, codes) in &expected {
+        descriptors.push((name.clone(), shape.clone(), *codes));
+        if *codes {
+            let [rows, cols] = shape.as_slice() else {
+                return Err(ModelError::Unsupported("quantized matrix shape".into()));
+            };
             if cols.checked_rem(group) != Some(0) {
                 return Err(ModelError::Unsupported(
                     "matrix columns are not divisible by quantization group".into(),
                 ));
             }
             descriptors.push((
-                format!("{}.scales", want.name),
+                format!("{name}.scales"),
                 vec![*rows, cols.checked_div(group).unwrap_or(0)],
                 false,
             ));
         }
     }
     let mut writer = PackedWriter::new(&dir.path, destination, group, descriptors)?;
-    for want in expected {
-        let bytes = dir.weights.info(&want.name).map_or(0, |i| i.byte_len());
+    for (name, shape, codes) in expected {
+        let bytes = dir.weights.info(&name).map_or(0, |i| i.byte_len());
         super::cpu_memory::ensure_available(bytes.saturating_mul(2).saturating_add(64 << 20))?;
-        let bits = dir.weights.read_bf16(&want.name)?;
+        let f32_source = dir
+            .weights
+            .info(&name)
+            .is_some_and(|i| i.dtype == loader::Dtype::F32);
+        if f32_source {
+            if codes {
+                return Err(ModelError::Unsupported(
+                    "quantization requires BF16 matrix source".into(),
+                ));
+            }
+            let values = dir.weights.read_f32(&name)?;
+            let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            writer.source_digest(&name, [&bytes]);
+            writer.write(&name, [&bytes])?;
+            continue;
+        }
+        let bits = dir.weights.read_bf16(&name)?;
         writer.source_digest(
-            &want.name,
+            &name,
             bits.chunks(1 << 18).map(|chunk| {
                 chunk
                     .iter()
@@ -49,11 +81,14 @@ pub fn export_int8(dir: &ModelDir, destination: &Path, group: usize) -> Result<(
                     .collect::<Vec<_>>()
             }),
         );
-        if let [rows, cols] = want.shape.as_slice() {
+        if codes {
+            let [rows, cols] = shape.as_slice() else {
+                return Err(ModelError::Unsupported("matrix shape".into()));
+            };
             let q = quantize(&bits, *rows, *cols, scheme)?;
-            writer.write(&want.name, [&q.codes])?;
+            writer.write(&name, [&q.codes])?;
             writer.write(
-                &format!("{}.scales", want.name),
+                &format!("{}.scales", name),
                 q.scales.chunks(1 << 16).map(|chunk| {
                     chunk
                         .iter()
@@ -66,7 +101,7 @@ pub fn export_int8(dir: &ModelDir, destination: &Path, group: usize) -> Result<(
                 return Err(ModelError::Unsupported("nonfinite norm tensor".into()));
             }
             writer.write(
-                &want.name,
+                &name,
                 bits.chunks(1 << 16).map(|chunk| {
                     chunk
                         .iter()

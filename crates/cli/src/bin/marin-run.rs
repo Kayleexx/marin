@@ -306,12 +306,12 @@ fn run(cli: Cli, style: &Style) -> Result<ExitCode, CliError> {
             model_dir,
             reference,
             backend,
-            kv,
+            quant,
         }) => verify::run(
             &model_dir,
             &reference,
             backend_choice(backend),
-            kv.format(),
+            quant.precision()?,
             style,
         )
         .map(|()| ExitCode::SUCCESS),

@@ -9,14 +9,20 @@ pub(super) enum Reader<'a> {
         weights: &'a Weights,
         prefix: String,
         used: BTreeSet<String>,
+        quant: Option<tensor::QuantScheme>,
     },
 }
 impl<'a> Reader<'a> {
-    pub(super) fn source(weights: &'a Weights, prefix: String) -> Self {
+    pub(super) fn source(
+        weights: &'a Weights,
+        prefix: String,
+        quant: Option<tensor::QuantScheme>,
+    ) -> Self {
         Self::Source {
             weights,
             prefix,
             used: BTreeSet::new(),
+            quant,
         }
     }
     fn check(&mut self, name: &str, shape: &[usize]) -> Result<String, ModelError> {
@@ -24,6 +30,7 @@ impl<'a> Reader<'a> {
             weights,
             prefix,
             used,
+            ..
         } = self
         else {
             return Ok(name.into());
@@ -32,7 +39,17 @@ impl<'a> Reader<'a> {
         let info = weights
             .info(&key)
             .ok_or_else(|| invalid(format!("missing {key}")))?;
-        if info.shape != shape || !matches!(info.dtype, Dtype::Bf16 | Dtype::F32) {
+        let valid_dtype = if weights.packed_group().is_some() {
+            info.dtype
+                == if super::layout::quantized(&key) {
+                    Dtype::I8
+                } else {
+                    Dtype::F32
+                }
+        } else {
+            matches!(info.dtype, Dtype::Bf16 | Dtype::F32)
+        };
+        if info.shape != shape || !valid_dtype {
             return Err(invalid(format!(
                 "{key}: wrong shape/dtype {:?} {} expected {shape:?}",
                 info.shape,
@@ -89,14 +106,21 @@ impl<'a> Reader<'a> {
         cols: usize,
     ) -> Result<Linear, ModelError> {
         let key = self.check(name, &[rows, cols])?;
-        if let Self::Source { weights, .. } = self
-            && weights.info(&key).is_some_and(|i| i.dtype == Dtype::Bf16)
+        if let Self::Source {
+            weights,
+            quant,
+            used,
+            ..
+        } = self
+            && (super::layout::quantized(&key)
+                || (quant.is_none() && weights.packed_group().is_none()))
+            && (weights.packed_group().is_some()
+                || weights.info(&key).is_some_and(|i| i.dtype == Dtype::Bf16))
         {
-            let data = weights.read_bf16(&key)?;
-            if data.iter().any(|v| !tensor::bf16_to_f32(*v).is_finite()) {
-                return Err(invalid(format!("nonfinite {key}")));
+            if weights.packed_group().is_some() {
+                used.insert(format!("{key}.scales"));
             }
-            return Linear::bf16(rows, cols, data);
+            return Ok(Linear::stored(matrix(weights, &key, rows, cols, *quant)?));
         }
         Ok(Linear::new(self.vector_shape(name, &[rows, cols])?, cols))
     }
@@ -107,6 +131,7 @@ impl<'a> Reader<'a> {
                 weights,
                 prefix,
                 used,
+                ..
             } => weights
                 .names()
                 .filter(|n| n.starts_with(&prefix) && !used.contains(*n))
@@ -118,4 +143,30 @@ impl<'a> Reader<'a> {
         }
         Ok(())
     }
+}
+
+pub(super) fn matrix(
+    weights: &Weights,
+    name: &str,
+    rows: usize,
+    cols: usize,
+    quant: Option<tensor::QuantScheme>,
+) -> Result<tensor::Matrix, ModelError> {
+    if let Some(group) = weights.packed_group() {
+        return Ok(tensor::Matrix::from_int8(tensor::Quantized {
+            rows,
+            cols,
+            scheme: tensor::QuantScheme::new(tensor::QuantBits::Int8, group)?,
+            codes: weights.read_i8(name)?,
+            scales: weights.read_f32(&format!("{name}.scales"))?,
+        })?);
+    }
+    let bits = weights.read_bf16(name)?;
+    if let Some(q) = quant {
+        return Ok(tensor::Matrix::quantized(rows, cols, bits, q)?);
+    }
+    if bits.iter().any(|v| !tensor::bf16_to_f32(*v).is_finite()) {
+        return Err(invalid(format!("nonfinite {name}")));
+    }
+    Ok(tensor::Matrix::new(rows, cols, bits)?)
 }

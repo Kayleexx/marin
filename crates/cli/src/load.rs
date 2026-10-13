@@ -163,10 +163,8 @@ fn open(request: Request<'_>) -> Result<Loaded, CliError> {
     let mut ctx = resolve_ctx(&config, ctx, default_ctx)?;
     let mut footprint = footprint(&dir, &config, ctx, precision)?;
     let selected = if hybrid {
-        if backend == BackendChoice::Cuda || precision.weights.is_some() {
-            return Err(CliError::BadOption(
-                "Qwen3.5 requires CPU BF16 weights with FP32 math".into(),
-            ));
+        if backend == BackendChoice::Cuda {
+            return Err(CliError::BadOption("Qwen3.5 requires CPU inference".into()));
         }
         Selected {
             backend: Backend::Cpu,

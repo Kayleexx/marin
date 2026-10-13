@@ -77,7 +77,7 @@ impl Manifest {
         let result: Self = serde_json::from_reader(file).map_err(|e| bad(e.to_string()))?;
         if result.format != FORMAT
             || result.quantizer != QUANTIZER
-            || result.architecture != "qwen3"
+            || !matches!(result.architecture.as_str(), "qwen3" | "qwen3_5")
             || result.group == 0
             || result.group.checked_rem(32) != Some(0)
         {
@@ -121,6 +121,12 @@ impl Manifest {
                 ))
         {
             return Err(bad("unknown metadata file"));
+        }
+        let config: serde_json::Value =
+            serde_json::from_reader(File::open(dir.join("config.json")).map_err(|e| io(dir, e))?)
+                .map_err(|e| bad(e.to_string()))?;
+        if config.get("model_type").and_then(|v| v.as_str()) != Some(result.architecture.as_str()) {
+            return Err(bad("artifact/config architecture mismatch"));
         }
         Ok(result)
     }
@@ -167,6 +173,15 @@ impl PackedWriter {
             .map_err(|e| bad(e.to_string()))?
             .as_nanos();
         let temp = parent.join(format!(".marin-q8-{}-{stamp}", std::process::id()));
+        let config: serde_json::Value = serde_json::from_reader(
+            File::open(source.join("config.json")).map_err(|e| io(source, e))?,
+        )
+        .map_err(|e| bad(e.to_string()))?;
+        let architecture = config
+            .get("model_type")
+            .and_then(|v| v.as_str())
+            .filter(|s| matches!(*s, "qwen3" | "qwen3_5"))
+            .ok_or_else(|| bad("unsupported architecture"))?;
         fs::create_dir(&temp).map_err(|e| io(&temp, e))?;
         // Construct the guard before any fallible writes so failed exports clean up too.
         let path = temp.join("model.safetensors");
@@ -184,7 +199,7 @@ impl PackedWriter {
             manifest: Manifest {
                 format: FORMAT.into(),
                 quantizer: QUANTIZER.into(),
-                architecture: "qwen3".into(),
+                architecture: architecture.into(),
                 group,
                 files: BTreeMap::new(),
                 tensors: BTreeMap::new(),

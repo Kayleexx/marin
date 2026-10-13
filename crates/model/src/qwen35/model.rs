@@ -15,8 +15,27 @@ pub struct Qwen35 {
     embed: Matrix,
     norm: Vec<f32>,
     owner: u64,
+    quant: Option<tensor::QuantScheme>,
 }
-pub fn weight_bytes(weights: &Weights) -> Result<u64, ModelError> {
+pub fn weight_bytes(
+    weights: &Weights,
+    quant: Option<tensor::QuantScheme>,
+) -> Result<u64, ModelError> {
+    let quant = quant
+        .map(|q| tensor::QuantScheme::new(q.bits, q.group))
+        .transpose()?;
+    if let Some(q) = quant
+        && q.bits != tensor::QuantBits::Int8
+    {
+        return Err(invalid("CPU Qwen3.5 supports INT8 only"));
+    }
+    if let Some(group) = weights.packed_group()
+        && quant != Some(tensor::QuantScheme::new(tensor::QuantBits::Int8, group)?)
+    {
+        return Err(invalid(
+            "packed artifact requires matching opt-in INT8/group",
+        ));
+    }
     weights
         .names()
         .filter(|n| n.starts_with("model.language_model."))
@@ -24,22 +43,37 @@ pub fn weight_bytes(weights: &Weights) -> Result<u64, ModelError> {
             let i = weights
                 .info(name)
                 .ok_or_else(|| invalid("missing tensor metadata"))?;
-            if !matches!(i.dtype, Dtype::Bf16 | Dtype::F32) {
+            if !(matches!(i.dtype, Dtype::Bf16 | Dtype::F32)
+                || (weights.packed_group().is_some() && i.dtype == Dtype::I8))
+            {
                 return Err(invalid("unsupported text dtype"));
             }
-            let bytes = if i.shape.len() == 2 {
+            let bytes = if weights.packed_group().is_some() {
+                i.byte_len()
+            } else if let (Some(q), [rows, cols]) = (quant, i.shape.as_slice()) {
+                if super::layout::quantized(name) {
+                    if i.dtype != Dtype::Bf16 || cols.checked_rem(q.group) != Some(0) {
+                        return Err(invalid(format!("incompatible quantized matrix {name}")));
+                    }
+                    q.matrix_bytes(*rows, *cols)
+                        .ok_or_else(|| invalid("Q8 size overflow"))?
+                } else {
+                    size(size(*rows, *cols)?, 4)? as u64
+                }
+            } else if i.shape.len() == 2 {
                 i.byte_len()
             } else {
-                i.shape
-                    .iter()
-                    .try_fold(1_usize, |n, x| size(n, *x))
-                    .and_then(|n| size(n, 4))? as u64
+                size(i.shape.iter().try_fold(1_usize, |n, x| size(n, *x))?, 4)? as u64
             };
             n.checked_add(bytes)
                 .ok_or_else(|| invalid("weights overflow"))
         })
 }
-pub fn load_bytes(weights: &Weights, config: &TextConfig) -> Result<u64, ModelError> {
+pub fn load_bytes(
+    weights: &Weights,
+    config: &TextConfig,
+    quant: Option<tensor::QuantScheme>,
+) -> Result<u64, ModelError> {
     let transient = weights
         .names()
         .filter(|n| n.starts_with("model.language_model."))
@@ -47,7 +81,12 @@ pub fn load_bytes(weights: &Weights, config: &TextConfig) -> Result<u64, ModelEr
         .map(|i| i.byte_len())
         .max()
         .unwrap_or(0);
-    let needed = weight_bytes(weights)?
+    let transient = if weights.packed_group().is_some() {
+        1 << 20
+    } else {
+        transient
+    };
+    let needed = weight_bytes(weights, quant)?
         .checked_add(transient)
         .and_then(|n| n.checked_add(config.state_bytes(0).ok()? as u64))
         .and_then(|n| n.checked_add(config.workspace_bytes(1, 1).ok()? as u64))
@@ -56,54 +95,41 @@ pub fn load_bytes(weights: &Weights, config: &TextConfig) -> Result<u64, ModelEr
 }
 impl Qwen35 {
     pub fn load(dir: &ModelDir, mut progress: impl FnMut(u64, u64)) -> Result<Self, ModelError> {
-        if dir.weights.packed_group().is_some() {
-            return Err(invalid("Qwen3.5 packed quantization is unsupported"));
-        }
+        Self::load_quantized(dir, None, &mut progress)
+    }
+    pub fn load_quantized(
+        dir: &ModelDir,
+        quant: Option<tensor::QuantScheme>,
+        mut progress: impl FnMut(u64, u64),
+    ) -> Result<Self, ModelError> {
         let config = TextConfig::parse(&dir.config_json, dir.generation_config_json.as_deref())?;
+        super::layout::validate(&dir.weights, &config)?;
         let summary = config.summary();
-        let bytes = weight_bytes(&dir.weights)?;
-        let needed = load_bytes(&dir.weights, &config)?;
+        let bytes = weight_bytes(&dir.weights, quant)?;
+        let needed = load_bytes(&dir.weights, &config, quant)?;
         admit(
             usize::try_from(needed).map_err(|_| invalid("weights exceed address space"))?,
             usize::MAX,
         )?;
-        let mut root = Reader::source(&dir.weights, "model.language_model.".into());
-        // The full text namespace is validated by per-block readers plus the two root tensors.
-        let name = "model.language_model.embed_tokens.weight";
-        let info = dir
-            .weights
-            .info(name)
-            .ok_or_else(|| invalid("missing embeddings"))?;
-        if info.shape != [summary.vocab_size, summary.hidden_size] || info.dtype != Dtype::Bf16 {
-            return Err(invalid("expected BF16 tied text embeddings"));
-        }
-        let bits = dir.weights.read_bf16(name)?;
-        if bits.iter().any(|v| !tensor::bf16_to_f32(*v).is_finite()) {
-            return Err(invalid("nonfinite embeddings"));
-        }
-        let embed = Matrix::new(summary.vocab_size, summary.hidden_size, bits)?;
+        let mut root = Reader::source(&dir.weights, "model.language_model.".into(), quant);
+        let embed = super::read::matrix(
+            &dir.weights,
+            "model.language_model.embed_tokens.weight",
+            summary.vocab_size,
+            summary.hidden_size,
+            quant,
+        )?;
         let norm = root.norm("norm.weight", summary.hidden_size)?;
-        let expected = config.layer_types.iter().fold(2_usize, |n, k| {
-            n.saturating_add(match k {
-                super::LayerKind::LinearAttention => 14,
-                super::LayerKind::FullAttention => 11,
-            })
-        });
-        if dir
-            .weights
-            .names()
-            .filter(|n| n.starts_with("model.language_model."))
-            .count()
-            != expected
-        {
-            return Err(invalid("unexpected/missing text tensors"));
-        }
         let mut blocks = Vec::new();
         blocks
             .try_reserve_exact(config.layer_types.len())
             .map_err(|e| invalid(e.to_string()))?;
         for (i, kind) in config.layer_types.iter().enumerate() {
-            let reader = Reader::source(&dir.weights, format!("model.language_model.layers.{i}."));
+            let reader = Reader::source(
+                &dir.weights,
+                format!("model.language_model.layers.{i}."),
+                quant,
+            );
             let (common, mixer) = super::weights::load_reader(&config.block, *kind, reader)?;
             blocks.push(ReferenceBlock {
                 config: config.block.clone(),
@@ -127,7 +153,11 @@ impl Qwen35 {
             embed,
             norm,
             owner: NEXT_OWNER.fetch_add(1, Ordering::Relaxed),
+            quant,
         })
+    }
+    pub fn quantization(&self) -> Option<tensor::QuantScheme> {
+        self.quant
     }
     pub fn config(&self) -> &Qwen3Config {
         &self.summary
