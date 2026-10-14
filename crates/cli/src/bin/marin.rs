@@ -25,7 +25,7 @@ use cli::term::menu::Item;
 use cli::term::picker;
 use cli::term::screen;
 use cli::term::splash;
-use cli::{load, report, show};
+use cli::{load, plan, report, show};
 
 /// Chat keeps more history than a one-off completion, so it gets a larger window by default.
 const CHAT_CTX: usize = 4096;
@@ -48,6 +48,17 @@ fn run(cli: MarinCli, style: Style) -> Result<ExitCode, CliError> {
     let home = Home::detect();
     match cli.command {
         Some(MarinCommand::Model { path }) => model_command(path.as_deref(), home.as_ref()),
+        Some(MarinCommand::Plan) => {
+            let path = choose_model(&cli.options, home.as_ref(), false, style)?;
+            plan::run_chat(
+                &path,
+                cli.options.ctx,
+                CHAT_CTX,
+                backend_choice(cli.options.backend),
+                chat_precision(&cli.options)?,
+            )
+            .map(|()| ExitCode::SUCCESS)
+        }
         Some(MarinCommand::Show { path, kind }) => {
             show::run(path.as_deref(), kind.as_deref(), cli.options.no_color)
                 .map(|()| ExitCode::SUCCESS)

@@ -33,6 +33,8 @@ pub struct MarinCli {
 pub enum MarinCommand {
     /// Ask one question and print only the reply (question from the arguments or stdin)
     Run { prompt: Vec<String> },
+    /// Show the selected backend and memory budget without loading weights
+    Plan,
     /// Show a file (or text piped in) in the terminal: markdown, code, json, diffs, tables and logs, nicely
     Show {
         /// File to show; `-` or nothing reads standard input as it arrives

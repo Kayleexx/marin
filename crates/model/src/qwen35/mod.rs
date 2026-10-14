@@ -3,6 +3,11 @@ mod cache;
 mod config;
 mod delta;
 mod full;
+mod gpu;
+mod gpu_budget;
+mod gpu_cache;
+mod gpu_forward;
+mod gpu_weights;
 pub(crate) mod layout;
 mod math;
 mod model;
@@ -11,6 +16,9 @@ mod read;
 mod state;
 mod weights;
 pub use cache::Cache;
+pub use gpu::Qwen35Gpu;
+pub use gpu_budget::bytes as gpu_budget_bytes;
+pub use gpu_cache::GpuCache;
 pub use model::{Qwen35, load_bytes, weight_bytes};
 pub use model_config::{TextConfig, is_qwen35};
 
@@ -230,5 +238,7 @@ fn allocation_bytes(floats: usize) -> Result<usize, ModelError> {
         .ok_or_else(|| invalid("allocation budget overflow"))
 }
 
+#[cfg(test)]
+mod gpu_tests;
 #[cfg(test)]
 mod model_tests;

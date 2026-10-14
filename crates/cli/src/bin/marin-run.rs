@@ -14,7 +14,9 @@ use cli::memory::DEFAULT_CTX;
 use cli::session::{Session, Settings};
 use cli::signal::{self, Interrupt};
 use cli::style::{self, Style};
-use cli::{bench, guess, inspect, load, probe, quality, repl, report, telemetry, trace, verify};
+use cli::{
+    bench, guess, inspect, load, plan, probe, quality, repl, report, telemetry, trace, verify,
+};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -57,6 +59,19 @@ fn run(cli: Cli, style: &Style) -> Result<ExitCode, CliError> {
         }) => {
             inspect::run(&model_dir, ctx.ctx, quant.precision()?, style).map(|()| ExitCode::SUCCESS)
         }
+        Some(Command::Plan {
+            model_dir,
+            backend,
+            quant,
+            ctx,
+        }) => plan::run(
+            &model_dir,
+            ctx.ctx,
+            DEFAULT_CTX,
+            backend_choice(backend),
+            quant.precision()?,
+        )
+        .map(|()| ExitCode::SUCCESS),
         Some(Command::Bench {
             model_dir,
             backend,

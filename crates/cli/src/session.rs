@@ -222,7 +222,7 @@ impl Session {
         let tokenizer = &self.loaded.dir.tokenizer;
         let params = GenerateParams {
             max_tokens: self.settings.max_tokens,
-            stop_tokens: self.loaded.model.config().eos_tokens.clone(),
+            stop_tokens: self.loaded.stop_tokens(),
             usable_vocab: tokenizer.vocab_size(),
             speculation: self.speculate.then_some(Speculation::MEASURED),
         };

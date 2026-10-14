@@ -13,10 +13,13 @@ pub enum Stage {
     Mlp,
     Residual,
     LmHead,
+    StateCopy,
+    Convolution,
+    Recurrence,
 }
 
 impl Stage {
-    pub const ALL: [Stage; 10] = [
+    pub const ALL: [Stage; 13] = [
         Stage::Embedding,
         Stage::Norm,
         Stage::Qkv,
@@ -27,6 +30,9 @@ impl Stage {
         Stage::Mlp,
         Stage::Residual,
         Stage::LmHead,
+        Stage::StateCopy,
+        Stage::Convolution,
+        Stage::Recurrence,
     ];
 
     pub fn name(self) -> &'static str {
@@ -41,6 +47,9 @@ impl Stage {
             Self::Mlp => "mlp",
             Self::Residual => "residual add",
             Self::LmHead => "lm head",
+            Self::StateCopy => "state transaction copy",
+            Self::Convolution => "causal convolution",
+            Self::Recurrence => "DeltaNet recurrence",
         }
     }
 }

@@ -13,6 +13,7 @@ pub mod json_out;
 pub mod load;
 pub mod marin_args;
 pub mod memory;
+pub mod plan;
 pub mod probe;
 pub mod progress;
 pub mod quality;

@@ -124,6 +124,28 @@ impl Gpu {
         tokens: usize,
         out: &mut Buffer,
     ) -> Result<(), CudaError> {
+        self.matmul_quant_with_cores(w, x, tokens, out, true)
+    }
+
+    /// FP32 activation math for strict hybrid-reference checks.
+    pub fn matmul_quant_precise(
+        &self,
+        w: &DeviceQuantMatrix,
+        x: &Buffer,
+        tokens: usize,
+        out: &mut Buffer,
+    ) -> Result<(), CudaError> {
+        self.matmul_quant_with_cores(w, x, tokens, out, false)
+    }
+
+    fn matmul_quant_with_cores(
+        &self,
+        w: &DeviceQuantMatrix,
+        x: &Buffer,
+        tokens: usize,
+        out: &mut Buffer,
+        allow_tensor_cores: bool,
+    ) -> Result<(), CudaError> {
         expect_len("matmul input", tokens.checked_mul(w.cols), x)?;
         expect_len("matmul output", tokens.checked_mul(w.rows), out)?;
         if tokens == 0 || w.rows == 0 || w.cols == 0 {
@@ -132,7 +154,7 @@ impl Gpu {
         if tokens == 1 {
             return self.matvec_quant(w, x, out);
         }
-        let tensor_cores = tokens >= MMA_MIN_TOKENS;
+        let tensor_cores = allow_tensor_cores && tokens >= MMA_MIN_TOKENS;
         let k = &self.kernels;
         let function = match (w.scheme.bits, tensor_cores) {
             (QuantBits::Int8, false) => &k.matmul_q8,

@@ -4359,3 +4359,486 @@ convolution and dense work; §36 profiled those before INT8. No new bottleneck
 profile is claimed from these end-to-end measurements. Qwen3.5 CUDA DeltaNet,
 vision, Instruct checkpoints and CPU snapshots were not validated here.
 No commit, push or stash change was made.
+
+## 38. Qwen3.5 CUDA and 4B milestone (in progress)
+
+### Phase 1 gates fixed before implementation
+
+Target: the official Qwen3.5-2B-Base text backbone on the RTX 5050, BF16
+weights and FP32 activations/state. Use the existing CLI with `--backend cuda`.
+No host-side recurrent or attention state in the inference path.
+
+| Gate | Requirement |
+|---|---|
+| HF numerical parity | Against the same BF16 source weights and official HF FP32 reference, compare embedding, all 24 layer outputs and full logits: normalized maximum ≤1e-4 and relative RMS ≤1e-5; greedy IDs exact on prose and code; investigate first mismatched layer |
+| State | CUDA convolution/recurrent state and full-attention KV remain device-resident; fresh session, reset, repeated decode, prefill→decode and edited-prefix replay agree with fresh execution; failures preserve the last committed session state |
+| Usability | Real 2B model loads and generates text through `marin-run --backend cuda`; explicit GPU admission refuses an impossible budget before weight upload; default BF16/CPU fallback behavior remains correct |
+| Compatibility | Existing Qwen3 CPU/CUDA, Qwen3.5 CPU BF16/INT8, packed loading, scalar CPU, KV reuse and snapshots pass their relevant regression tests |
+
+Phase 2 performance and phase 3 real-4B gates will be recorded **before**
+their respective implementations, after the prior phase passes. No speed or
+8 GiB feasibility claim is accepted from synthetic fixtures alone.
+
+### Phase 1 result and phase 2 gates fixed before optimization
+
+On the RTX 5050, the original Qwen3.5-2B-Base BF16 checkpoint runs the
+complete 24-layer hybrid text path on CUDA. Convolution and recurrent state
+use device buffers, the six full-attention blocks use device paged KV, and a
+pass stages device state until final logits have synchronized and passed
+finite-value validation. Short prose/code HF verification passes **16/16**
+greedy steps; 128/512-token HF full-layer/full-logit verification passes
+**4/4** more. Worst normalized maximum/RMS at 512 tokens:
+**3.055e-6 / 2.639e-6**. Tiny hybrid fixture full-vector verification
+passes **8/8** greedy steps. A first 128-token run missed the fixed RMS gate
+at layer 1 (**1.054e-5**); a controlled precise GPU matmul run passed
+(**1.937e-6** RMS), identifying tensor-core projection rounding as the cause.
+The tiny fixture also caught an incorrect +1 applied to DeltaNet's norm
+weight; the focused GPU-vs-CPU intermediate/state test now passes. Device
+session tests cover whole/tokenwise, replay, reset, independent sessions and
+late failure after staged state updates. A 3 GiB competing GPU reservation
+left **4,000,645,120 bytes** free; explicit CUDA refused the estimated
+**4,470 MB** requirement before uploading weights. An initial real short
+generation produced ` Paris.\nA. True\nB`: **21.5 ms TTFT**, **55.27
+decode tok/s**, **4.55 s load**, and **4.76 GB device-wide VRAM in use**.
+These are single-run phase-1 figures, not phase-2 comparison medians.
+
+**Phase 1 GO:** the fixed strict HF, real-generation, device-resident state
+and rollback gates pass. Remaining stage checks run at final integration.
+
+| Phase 2 gate | Requirement |
+|---|---|
+| Profile first | Measure real 5/128/512-token prefill and decode, kernel launches, allocations, host/device transfers, synchronization, VRAM and GPU power where available; distinguish device-wide readings from process ownership |
+| Correctness | Preserve phase-1 HF full-layer/logit tolerances, exact greedy IDs and transactional state tests after every accepted optimization |
+| Speed | Accept a change only with ≥15% gain in a measured hot path or ≥10% end-to-end TTFT/decode gain on three serialized paired runs, without >5% regression on another representative workload |
+| Memory and power | Peak VRAM must not rise >5% for a speed-only change; report measured power/energy rather than inferring it from speed; no per-token host copy of recurrent/KV state |
+| Comparisons | Same model, precision, tokens, context and hardware for CPU and available llama.cpp baselines; label any unmatched format/configuration explicitly |
+
+Phase 3 gates will be written after phase 2 passes. No 4B support is inferred
+from the 2B fixture or config shape alone.
+
+### Phase 2 focused measurements and rejected experiments
+
+The RTX 5050 Laptop GPU has an enforced **40 W** power limit. All runs below
+use the official BF16 2B checkpoint, context 1152, eight output tokens,
+one warmup and three serialized measured runs. `--profile --sample-gpu` adds
+one separate instrumented pass. Times are median end-to-end CLI measurements;
+VRAM is device-wide `nvidia-smi` usage, not this process's allocation.
+
+| Prompt | First baseline TTFT / decode | Grouped-projection trial | Unchanged baseline rerun | Baseline-rerun prefill / peak VRAM |
+|---|---:|---:|---:|---:|
+| 5 | 30.94 ms / 60.60 tok/s | 29.08 ms / 62.88 tok/s | 28.92 ms / 62.44 tok/s | 175.15 tok/s / 4.78 GB |
+| 128 | 442.14 ms / 41.42 tok/s | 453.06 ms / 46.38 tok/s | 451.99 ms / 54.84 tok/s | 283.34 tok/s / 4.81 GB |
+| 512 | 1742.68 ms / 30.19 tok/s | 1654.77 ms / 50.26 tok/s | 1590.13 ms / 48.09 tok/s | 322.04 tok/s / 4.86 GB |
+
+The baseline rerun moves as much as the trial: at 128 tokens the unchanged
+baseline is faster than the trial, and at 512 its TTFT is **3.9% lower**.
+The grouped Q/K/V and MLP launch fusion was therefore **reverted**. A scalar
+16-token tile trial changed 512 TTFT by only **2.6%** and regressed 128 TTFT
+by **3.3%**; it was reverted. Applying existing BF16 tensor-core MMA to the
+hybrid prefill failed the fixed 128-token HF RMS gate at layer 1
+(**1.054e-5** versus **1e-5**); a three-part MMA accumulation trial missed
+more (**1.434e-5**). The final path retains FP32-accumulating scalar GPU
+matmul for strict parity. Neither incorrect fast path is in the source.
+
+On the unchanged baseline rerun, 512-token profiled prefill spends **755.7
+ms** in MLP, **346.4 ms** in Q/K/V, and **358.8 ms** in DeltaNet recurrence.
+Device-state staging costs **0.23 ms** once. Decode executes **399 kernel
+launches** and **60–61 device allocations** per pass, with **zero model-state
+host uploads** and about **993 kB** of final logits downloaded. At 128 tokens,
+GPU waiting is **450.4 ms** in profiled prefill versus **0.19 ms** download;
+the bottleneck is GPU execution, not host synchronization or copying.
+At 512 tokens the sampler saw mean **35.5 W** and the 40 W power cap on every
+busy sample; short-run power has only two samples and cannot support an
+energy claim. The trial's 512-token device-wide peak was **4.88 GB** versus
+**4.86 GB** for the nearby baseline rerun. All raw JSON and logs are in the
+ignored `bench-results/qwen35-cuda/` directory.
+
+A separate, serialized **matched BF16 CPU comparison** uses the same model,
+1152-token context, prompt and output lengths, three runs and one warmup;
+CPU prefill has eight explicit threads. This compares backends rather than
+the rejected optimization:
+
+| Prompt | CPU TTFT / prefill / decode | CUDA baseline-rerun TTFT / prefill / decode | CPU process RSS / CUDA process RSS |
+|---|---:|---:|---:|
+| 5 | 689.81 ms / 7.25 / 5.75 tok/s | 28.92 ms / 175.15 / 62.44 tok/s | 3.90 / 1.27 GB |
+| 128 | 1719.85 ms / 74.44 / 5.23 tok/s | 451.99 ms / 283.34 / 54.84 tok/s | 3.93 / 1.27 GB |
+| 512 | 5868.76 ms / 87.24 / 5.69 tok/s | 1590.13 ms / 322.04 / 48.09 tok/s | 3.99 / 1.27 GB |
+
+CUDA also occupies **4.78–4.86 GB device-wide VRAM** in these runs; its low
+process RSS does not mean the GPU weights disappeared. CPU and GPU runs are
+separate, so clock/power state still limits exact speedup attribution.
+
+The available host has no `llama-cli`, `llama-bench`, or comparable Qwen3.5
+GGUF, so a matched llama.cpp figure is **unverified**. Historical §37 CPU
+measurements use different runs and must not be treated as paired results.
+
+**Phase 2 NO-GO:** the fixed ≥15% hot-path or ≥10% stable end-to-end speed
+gate was not met by a correct optimization. The measured 40 W cap and strict
+HF tolerance leave dense projection and recurrent GPU work as the next
+optimization target. Phase 3 is **BLOCKED by phase 2's sequential gate**;
+no 4B checkpoint was downloaded and no 4B inference, parity, or 8 GiB
+feasibility claim is made. The [official 4B checkpoint](https://huggingface.co/Qwen/Qwen3.5-4B/tree/main)
+totals **9.34 GB** including vision shards, larger than this GPU's ~8 GiB
+physical VRAM. Its [32-layer text configuration](https://huggingface.co/Qwen/Qwen3.5-4B/blob/main/config.json)
+resembles the validated 2B hybrid topology, but text-only weight bytes and
+admission have not been measured. A future 4B CUDA attempt needs explicit
+text-only admission budgeting; whether BF16 fits or a validated lower-precision
+weight path is required remains an open measurement.
+
+The full `MARIN_REQUIRE_CUDA=1 cargo test --workspace --all-features --locked`
+run passes **624 tests in 73 suites** with zero failures or ignores, including
+Qwen3 CUDA snapshots and backend switching, Qwen3.5 CUDA state rollback,
+CPU INT8, scalar and CLI tests. A first suite run exposed the stale Qwen3.5
+CLI expectation that CUDA must fail; after updating that test it exposed
+`marin`'s implicit FP16 GPU KV choice. Qwen3.5 now selects FP32 state for
+implicit GPU use, while explicit FP16 remains rejected. Workspace/all-targets
+`cargo check` and `cargo clippy -- -D warnings`, Rust formatting, line-limit,
+unsafe checks and `git diff --check` pass.
+
+## 39. Real Qwen3.5-4B text milestone (gates fixed before implementation)
+
+The previous 2B GPU speed experiment is deferred, not a dependency for 4B.
+Target the official post-trained `Qwen/Qwen3.5-4B` checkpoint and its text
+backbone only. Reuse the validated Qwen3.5 CPU/CUDA hybrid execution. The
+official index lists 426 `model.language_model.*` tensors, 297 vision tensors
+and 15 MTP tensors; the exact retained text bytes must be read from shard
+headers before memory admission is evaluated. BF16/FP32 is the numerical
+reference. INT8 is opt-in and accepted only with its own quality checks.
+
+| Gate | Fixed requirement |
+|---|---|
+| Layout and admission | Validate all expected 32-layer shapes, dtypes and names before inference; skip vision/MTP tensors; account separately for retained weights, recurrent/conv state, paged attention KV, workspace, staging/transient buffers and safety margin. Explicit 4B CPU/GPU requests must refuse an impossible RAM/VRAM budget before uncontrolled allocation. |
+| BF16 HF parity | Compare embedding, every layer output and full final logits against official HF on the same text tokens, at short and at least one 128-token prompt: normalized maximum ≤1e-4, relative RMS ≤1e-5, and exact greedy token IDs. Diagnose the first mismatched layer; never relax these tolerances. |
+| Session semantics | For the real model, whole versus split prefill→decode, repeated decode, edited-prefix replay, reset, independent sessions and late whole-model failure rollback agree with fresh execution. Preserve existing 2B and Qwen3 behavior. |
+| Post-trained utility | Generate actual chat and coding responses using the official tokenizer/chat template, not Base-model continuation. Confirm role/end-token handling and deterministic greedy output against HF. Report output verbatim and any template limitation. |
+| INT8 if needed | Reuse the packed Q8 format/kernels. Matched-quant HF execution must meet the same numerical gate and exact greedy IDs; versus original BF16, ≥95% top-1 agreement on matched prose/code teacher-forced positions, mean loss increase ≤0.03 nat and perplexity increase ≤3%. Never keep a full BF16 copy after direct packed loading. |
+| Performance and memory | Report real 128/512/2k prompt TTFT, prefill/decode tok/s, load time, peak process RSS and process-attributable CUDA allocation where measurable; include device-wide `nvidia-smi` only with that label. Serialize runs under the 40 W GPU limit. If a context cannot fit or is prohibitively slow, state the actual limit rather than extrapolate a pass. Compare a matched reference engine only if available. |
+| Regression checks | Full workspace/CUDA tests, scalar CPU, 2B HF parity, fmt, check, Clippy warnings denied, line-limit and unsafe checks pass. |
+
+### Checkpoint, memory ownership and CLI behavior
+
+The official post-trained `Qwen/Qwen3.5-4B` config (local SHA-256
+`ddc63e1c717afa86c865bb5e01313d89d72bb53b97ad4a8a03ba8510c0621670`)
+specifies 32 ordered blocks: 24 linear-attention/DeltaNet and eight full
+attention, hidden width 2560, MLP width 9216, 16 query/four KV heads of
+width 256, and a tied 248320-row output embedding. Safetensors headers show
+426 text tensors occupying **8,411,510,272 bytes**; 297 vision and 15 MTP
+tensors are ignored. The CPU's BF16/FP32 retained-weight estimate is
+**8,413,425,664 bytes** after promotion of protected vectors. The existing
+Q8 exporter took **15.39 s** once and produced a **4,351,791,712-byte**
+`model.safetensors` with **4,351,709,184 bytes** of retained INT8 codes,
+scales and protected FP32 weights. Packed direct loading reads one matrix at
+a time. The CUDA path uploads those Q8 matrices without a whole-model BF16
+copy; the small protected a/b projections originate in BF16 and are checked
+for exact BF16 representability before GPU upload. Recurrent/convolution
+state, full-attention KV and sensitive vectors retain FP32 computation.
+
+At 2k positions, fixed recurrent/convolution state is about **53 MB**;
+CPU state held **188 MB** and CUDA state held **221 MB** with a **570 MB**
+full-window upper bound in the measured run. CPU admission separately
+includes loaded weights, twice the state for rollback, full-prefill
+workspace, transient loading and a **256 MiB** safety margin. `inspect`
+estimates **10.01 GB BF16** versus **5.66 GB Q8** at 2048 context. CUDA
+admission includes weights, staged state, bounded GPU workspace/paged KV
+and a **512 MiB** safety margin. Explicit BF16 CUDA at 128 context refused
+before loading: **7235 MB free, 9164 MB needed** on the 8.11 GB RTX 5050.
+CUDA loading also checks host staging headroom: the largest text tensor,
+twice that size for inline INT8 conversion, plus **512 MiB**. This protects
+the transient upload path under a restricted host-memory budget.
+Under a 512 MiB zero-swap cgroup, the packed CUDA request refused cleanly
+before upload: **1.17 GB needed, 400 MB available** (exit 1, no OOM kill).
+With `systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0`, BF16
+CPU refused its 10.01 GB estimate against 8.48 GB available, while packed
+CPU INT8 completed both a short generation and a real 2048-token prompt;
+the latter peaked at **4,960,686,080 bytes RSS**, with no OOM kill.
+
+The official tokenizer's `enable_thinking=False` chat template exactly
+matched Marin's rendered system/user prompts. A real 4B coding reply exposed
+that `text_config.eos_token_id=248044` names `<|endoftext|>`, while the chat
+tokenizer ends assistant turns with `<|im_end|>` (`248046`). The CLI now adds
+the tokenizer's chat end token to configured stops for chat-capable models;
+Base completion behavior and Qwen3 stop tokens remain unchanged. The real
+CUDA Q8 answer ended cleanly and contained this executable result:
+
+```python
+def factorial(n):
+    if n < 0:
+        raise ValueError("Factorial is not defined for negative numbers.")
+    if n == 0:
+        return 1
+    return n * factorial(n - 1)
+```
+
+Executing the extracted function gave `factorial(0)==1`,
+`factorial(5)==120`, and `ValueError` for `-1`. The BF16 CPU chat answer
+began `A mutex (mutual exclusion lock) is a synchronization primitive...`.
+This is a focused utility check, not a broad instruction-quality evaluation.
+
+### Official HF parity and INT8 quality
+
+Transformers **5.17.0**, CPU eager attention, exact official text weights,
+FP32 reference math and cached-versus-fresh decode checks were used.
+BF16 Marin CPU matched **4/4** short and **1/1** 128-token greedy choices,
+all embedding/32 layer outputs and all 248320 final logits; worst short
+normalized maximum/RMS were **6.249e-6/1.898e-6**, and at 128 positions
+**4.761e-6/3.531e-6**. Official-template chat and coding prompts added
+**16/16** exact greedy choices with worst normalized maximum **3.972e-6**
+and relative RMS **3.125e-6**. The largest absolute logit difference in
+those chat cases was **5.77e-5**; the fixed gate is normalized, not an
+absolute-logit cutoff.
+
+For the exact dequantized packed artifact, CPU and CUDA each matched **4/4**
+short and **1/1** 128-position HF greedy choices, with every full layer/logit
+tensor checked. Worst normalized maximum/RMS were **5.662e-6/3.760e-6**
+on CPU and **5.296e-6/3.288e-6** on CUDA. The first unmodified HF Q8
+reference attempt was OOM-killed because expanding 4B Q8 matrices into
+anonymous FP32 weights exceeds this host's RAM. The test reference now uses
+temporary file-backed FP32 dequantized matrices and completed; production
+Marin inference never creates that expansion.
+
+Teacher forcing used the same tokenizer, 64-token lead-in and 128 scored
+positions each from the §37 prose/code corpora. INT8 versus BF16 selected
+the same first token at **127/128 prose** and **128/128 code** positions:
+**255/256 = 99.61%** overall, above the original 95% gate. Mean loss
+changed **−0.0027 / +0.0000 nats** and perplexity **−0.27% / +0.00%**;
+both remain within +0.03 nat/+3% gates. Independent long greedy paths can
+still diverge after an altered choice.
+
+### Serialized end-to-end measurements
+
+Ryzen 7 260, eight CPU threads, RTX 5050 Laptop GPU at 40 W, group-128
+INT8, FP32 hybrid state, four generated tokens, one measured run and no
+warmup per row. The same built-in prompt token IDs and context
+(`prompt + 5`) were used. Load elapsed includes file-cache effects; these
+are **not** controlled cold-disk comparisons. One run per row gives no
+latency distribution.
+
+| Prompt | Backend/weights | Load s | TTFT s | Prefill tok/s | Decode tok/s | Peak process RSS GB |
+|---:|---|---:|---:|---:|---:|---:|
+| 128 | CPU BF16 | 8.09 | 3.21 | 39.9 | 2.79 | 8.65 |
+| 128 | CPU Q8 | 3.47 | 2.95 | 43.4 | 5.20 | 4.57 |
+| 128 | CUDA Q8 | 3.01 | 0.84 | 152.1 | 27.27 | 0.91 |
+| 512 | CPU BF16 | 8.26 | 12.91 | 39.7 | 2.73 | 8.73 |
+| 512 | CPU Q8 | 3.50 | 11.56 | 44.3 | 4.75 | 4.66 |
+| 512 | CUDA Q8 | 2.99 | 3.68 | 139.3 | 35.91 | 0.91 |
+| 2048 | CPU BF16 | 8.07 | 53.11 | 38.6 | 2.33 | 9.02 |
+| 2048 | CPU Q8 | 3.55 | 47.25 | 43.3 | 4.29 | 4.96 |
+| 2048 | CUDA Q8 | 3.05 | 15.94 | 128.4 | 38.03 | 0.91 |
+
+CPU Q8 reduced 128/512/2k TTFT by **8.2%/10.5%/11.0%** and 2k RSS by
+**45.0%** relative to BF16; 2k decode improved **84%**. The 8 GiB
+zero-swap 2k CPU Q8 run separately measured **51.16 s TTFT**, **40.0
+prefill tok/s** and **4.07 decode tok/s** at the same 4.96 GB process peak.
+For CUDA Q8, device-wide peak use was **5.42/5.56/5.69 GB** at
+128/512/2k; device-wide use grew by about **4.42 GB** after loading. A
+separate 2k run sampled `nvidia-smi --query-compute-apps` 46 times and
+observed this `marin-run` PID at **4696 MiB (4.92 GB) maximum process
+VRAM**, distinct from total-device use. The 512/2k samples saw the 40 W
+power cap active for **100% of busy samples**; 2k mean power was **38.2 W**.
+The tool's 2k **152.92 J per generated token** includes the entire prompt
+and only four output tokens, so it is not a steady decode-energy figure.
+At 2k the GPU prompt uses **2092 launches**, mostly repeated sequential
+recurrent/convolution work; optimizing that is separate from this capability
+milestone. No matched llama.cpp Qwen3.5-4B GGUF/binary was available
+locally, so no comparable reference-engine throughput claim is made.
+
+Commands used for the real model:
+
+```bash
+marin-run export-int8 ~/models/Qwen3.5-4B ~/models/Qwen3.5-4B-Q8 --quant-group 128
+marin-run verify ~/models/Qwen3.5-4B --backend cpu --reference bench-results/qwen35-4b/hf-chat-bf16.json
+marin-run verify ~/models/Qwen3.5-4B-Q8 --backend cuda --quantize int8 --reference bench-results/qwen35-4b/hf-int8-128.json
+marin --model ~/models/Qwen3.5-4B-Q8 --backend cuda --quantize int8 --ctx 256 --max-tokens 160 --temp 0 run 'Write a Python function factorial(n) that returns 1 for n=0 and raises ValueError for negative n.'
+```
+
+The ignored `bench-results/qwen35-4b/` folder contains the HF vectors,
+quality scores and per-row JSON. The 2B CUDA optimization NO-GO in §38 is
+unchanged. Qwen3.5 vision/MTP, BF16 on this 8 GB GPU, Qwen3.5 snapshots,
+long-context HF parity beyond 128 positions, wide quality sampling and a
+controlled cold-disk load study remain outside the demonstrated capability.
+
+Real-checkpoint state regression used the group-128 packed 4B artifact in
+optimized model tests (`MARIN_QWEN35_4B_Q8=... MARIN_REQUIRE_CUDA=1 cargo
+test --release -p model --lib qwen35:: --all-features --locked --
+--test-threads=1`): **9/9 passed in 17.82 s**, including CPU and CUDA
+whole/tokenwise execution, edited-prefix replay, reset, session isolation
+and induced late-layer failure rollback. The fixture test retains its
+65-token case; the real-checkpoint case uses six tokens to keep the focused
+regression affordable. A debug build of the longer real-model case was
+stopped after exceeding ten minutes; no result is inferred from it.
+
+### Stage 39 acceptance
+
+| Original gate | Decision and evidence |
+|---|---|
+| Layout and admission | **PASS.** Official 426-tensor text backbone validates and excludes 312 non-text tensors. Q8 2k CPU fits an 8 GiB zero-swap cgroup at 4.96 GB peak RSS; BF16 CPU and GPU refuse budgets they cannot meet. A 512 MiB host cgroup refuses CUDA staging cleanly. |
+| BF16 HF parity | **PASS.** CPU matches embedding, all 32 layer outputs, full logits, and greedy IDs at short and 128 tokens within 1e-4/1e-5 normalized gates; official-template chat/code add 16/16 exact choices. |
+| Real-model session semantics | **PASS.** Release-mode group-128 4B CPU/CUDA state suite 9/9, including replay, reset, isolation and forced late failure rollback. The standard full suite retains its longer fixture cases. |
+| Post-trained utility | **PASS for focused prose/code prompts.** Official-template rendering matches HF; 4B GPU Q8 chat generated executable factorial code and stopped at `<|im_end|>`; BF16 CPU answered the mutex prompt. Broad utility evaluation remains unmeasured. |
+| Opt-in packed INT8 | **PASS.** Matched packed-HF CPU/CUDA full-tensor and greedy parity pass. Against BF16, 255/256 teacher-forced top-1 choices match, with loss and perplexity changes within the fixed gates. Direct Q8 loading retains 4.35 GB of quantized weights without a full BF16 duplicate. |
+| Performance and memory | **PASS for measured capability.** Serialized 128/512/2k measurements above include TTFT, prefill/decode, load, process RSS, process VRAM and power. Q8 CPU and CUDA fit the measured budgets. Controlled cold-disk startup and matched llama.cpp comparisons were unavailable and are not claimed. |
+| Regression checks | **PASS.** Final `MARIN_REQUIRE_CUDA=1 cargo test --workspace --all-features --locked` passed. Real 2B BF16 HF recheck passed 2/2 cases and 16/16 steps on both scalar CPU and CUDA (worst normalized max 3.869e-6 / 9.620e-7). `cargo fmt --all --check`, workspace all-target/all-feature `cargo check`, Clippy `-D warnings`, line-limit, unsafe and `git diff --check` passed. |
+
+**GO: real Qwen3.5-4B text inference on CPU BF16 and opt-in packed INT8,
+and on this 8 GB RTX 5050 with opt-in packed INT8.** The 8 GiB host-memory
+claim applies to packed INT8. BF16 CUDA is correctly refused on this device.
+No claim is made for vision/MTP, 2k HF tensor parity, a broad quality suite,
+or a matched reference-engine speedup.
+
+## 40. Minimal V9 execution planner (gates fixed before implementation)
+
+This milestone plans one explicitly named model folder. That folder is the
+available artifact: a packed Q8 folder is used only with matching explicit
+`--quantize int8`; a BF16 folder stays BF16 by default. Discovering sibling
+artifacts by filename is excluded because the current packed manifest does
+not prove that a sibling was exported from the requested checkpoint without
+rehashing the source weights. The planner must share the actual load path,
+not predict a different configuration than inference executes.
+
+| Gate | Fixed requirement |
+|---|---|
+| Determinism and overrides | Given the same model metadata, available RAM/VRAM and flags, report the same backend, artifact, precision, threads and context. Explicit backend, quantization, thread count and context survive unchanged or fail with a clear reason. Never select INT8 without explicit opt-in. No explicit context is reduced. |
+| Memory safety | Use the existing Qwen3/Qwen3.5 weight, state/KV, full-prefill workspace, staging and safety-margin estimates. CUDA auto selection requires the *whole requested context window* to fit, not merely the startup slab; otherwise choose CPU only if CPU admission passes. Explicit CUDA may retain its established startup-only warning, but the dry run must label the unsafe full-window fit and never claim it is safe. Unknown memory is reported as unknown, not as a verified fit. |
+| Dry run | `marin-run plan MODEL` reports selected backend, artifact/format, thread count, context, CPU/GPU budget components, available memory, fallback or rejection reason. It does not load weight tensors or generate tokens. The reported plan agrees with an actual load under unchanged conditions. |
+| Constrained hardware | Check Qwen3-0.6B and Qwen3.5-2B/4B at 4/8/16 GiB RAM scopes, restricted affinity, and 8/6/4 GiB available GPU where controllable. Verify appropriate admission/refusal and no OOM kill. Distinguish a simulated budget calculation from an enforced cgroup or actual GPU limit. |
+| Numerical and session regression | Fixed Qwen3 and Qwen3.5 HF vectors, scalar CPU, CUDA, packed INT8, prefix reuse and rollback retain their existing tolerances and greedy IDs. Run real inference with the selected plan. |
+| Focused 4B utility and cost | One coding task, a multi-turn session, a longer prompt and at least 32 sustained decode tokens on packed 4B; report output correctness, TTFT, decode rate, RSS/VRAM and planning overhead where measurable. A llama.cpp comparison is made only if a matching Qwen3.5-4B binary/GGUF is available locally; never extrapolate from a different model or format. |
+| Project checks | `cargo fmt`, workspace check/test, all-feature Clippy warnings denied, line-limit, unsafe and final diff checks pass. Document failures and a GO/NO-GO without weakening these gates. |
+
+### Planner behavior and constrained evidence
+
+The implementation uses the loader's same metadata, `Footprint` and
+`Backend::select` path for `marin plan`, `marin-run plan` and real model
+loading. It does not search by sibling filename: the named folder remains
+the artifact, and packed INT8 still needs an explicit matching opt-in.
+Automatic CUDA now requires the full requested GPU window plus the
+existing 512 MiB margin. Explicit CUDA retains the existing startup-only
+mode but the dry run labels its full-window OOM risk. CPU default context
+fit still uses the existing Qwen3 calculation; Qwen3.5 now finds the
+largest feasible default context by the same whole-prefill/state estimate.
+An explicit `--ctx` is refused rather than reduced. CPU thread reporting
+uses the same affinity/cgroup-capped default as execution; explicit counts
+are preserved. No weight tensors are read during planning; packed tensor
+digests remain validated during the actual load.
+
+All RAM scopes below used `systemd-run --user --scope -p MemoryMax=... -p
+MemorySwapMax=0`, with real model metadata. These are admission results,
+not simulated model weights. Free bytes include current cgroup use.
+
+| Scope and request | Planner result | Actual execution |
+|---|---|---|
+| 4 GiB, Qwen3-0.6B BF16 CPU, explicit 2k | **2.07 GB needed**, 4.21 GB available: admit | Existing HF/scalar path rechecked separately, 48/48 greedy IDs. |
+| 4 GiB, Qwen3-1.7B BF16 CPU, default 2k | Fit **1484** tokens and print reduction; explicit 2k refused (4.40 > 4.21 GB) | Separate invocation fit **1483** as free memory shifted; generated four tokens, **3.53 GB peak RSS**, no OOM kill. |
+| 4 GiB, Qwen3.5-2B-Base BF16 CPU, explicit 2k | Refuse **5.07 > 4.18 GB** | No allocation attempted. |
+| 4 GiB, Qwen3.5-4B Q8 CPU, explicit 2k | Refuse **5.66 > 4.18 GB** | No allocation attempted. |
+| 4 GiB, Qwen3.5-4B Q8 CUDA, explicit 2k | Admit: **4.92 GB full GPU window + 512 MiB**, **6.72 GB free VRAM**; host stage **1.17 < 4.18 GB** | At 256 context, eight tokens generated; **912 MB peak RSS**, **4.55 s model load**, no OOM kill. |
+| 8 GiB, Qwen3.5-4B BF16 CPU, explicit 2k | Refuse **10.01 > 8.48 GB** | No allocation attempted. |
+| 8 GiB, Qwen3.5-4B Q8 CPU, explicit 2k | Admit **5.66 < 8.48 GB** | §39's enforced 8 GiB 2k run peaked at **4.96 GB RSS**. |
+| 16 GiB scope, Qwen3.5-4B BF16 CPU, explicit 2k | Admit **10.01 < 10.70 GB actually free**; host physical RAM, rather than the scope, was limiting | BF16 4B HF chat verification below executed on this host. |
+
+Additional final-binary CPU plans under enforced 8/16 GiB, zero-swap
+scopes admitted Qwen3-0.6B BF16 at **2.07 GB** and Qwen3.5-2B BF16 at
+**5.07 GB** in both scopes; 16 GiB also admitted packed 4B Q8 at **5.66
+GB**. These are dry runs, not extra inference measurements.
+
+With `taskset -c 0`, the default plan reported **one** CPU prefill
+thread; explicit `--threads 8` reported **eight**. With CUDA hidden under
+the 4 GiB scope, automatic Q8 reported both rejection causes: no visible
+GPU and **5.66 GB CPU need vs 4.18 GB available**. On the live RTX 5050,
+4B BF16 auto chose CPU because the GPU needed about **9.29 GB** for its
+full window while only **6.72 GB** was free; packed Q8 auto chose CUDA.
+Using the real Q8 2k budget (**4.92 GB + 512 MiB**) against hypothetical
+4/6/8 GB free VRAM gives reject/fit/fit respectively. These last three
+VRAM outcomes are **budget calculations, not enforced GPU quotas**; this
+driver exposes no VRAM quota control. CPU/GPU dry runs on the packed 4B
+artifact took medians **0.418/0.778 s** over three process invocations.
+That is total dry-run time, not additional model-load latency.
+
+### Real-model workload and numerical regression
+
+After planning, the official-template GPU Q8 coding prompt generated a
+recursive factorial function with zero/negative guards; the same
+function's `0→1`, `5→120` and negative-`ValueError` checks passed in
+§39. A piped two-turn `marin` session replied **`OK`**, then **`17`**
+to a remembered-number question. The 4 GiB GPU scope also completed
+real generation. Serialized `marin-run bench` runs used the same packed
+4B artifact, RTX 5050 at 40 W, one run, no warmup, and **32** output
+tokens; JSON is in ignored `bench-results/v9/`.
+
+| Prompt | TTFT | Prefill | Decode | Peak process RSS | Peak device-wide VRAM |
+|---:|---:|---:|---:|---:|---:|
+| 512 | 4.006 s | 127.8 tok/s | 40.34 tok/s | 913 MB | 6.09 GB |
+| 2048 | 16.736 s | 122.4 tok/s | 35.52 tok/s | 913 MB | 6.22 GB |
+
+The 2k pass used **2092 GPU launches**; sustained decode's p50/p95
+inter-token latency was **27.85/33.11 ms**. These are single-run,
+file-cache-warm observations. Different output lengths and power history
+make §39's four-token decode row an unsuitable controlled before/after
+speed comparison. Process-specific VRAM was not resampled here; §39
+measured **4696 MiB** on a matching 2k 4B Q8 process. No local
+`llama-cli`, `llama-bench` or matching Qwen3.5-4B GGUF was present,
+so no llama.cpp speed comparison is claimed.
+
+Final release-mode HF verification after planner integration passed:
+Qwen3-0.6B scalar CPU **48/48** greedy IDs; Qwen3.5-2B BF16 scalar CPU
+**16/16** with worst normalized max/RMS **3.869e-6/3.025e-6**;
+Qwen3.5-4B BF16 CPU official chat/code **16/16** with worst
+**3.972e-6/3.125e-6**; and packed 4B Q8 CUDA at 128 positions **1/1**
+with **3.879e-6/3.288e-6**. The matched full-layer/logit gates remain
+1e-4/1e-5. The earlier 4B real-checkpoint state suite and workspace
+rollback tests remain in force.
+
+The final release binary again planned packed 4B Q8 at 256 tokens on
+CUDA (**4.64 GB GPU full-window budget + 512 MiB margin** vs **6.72 GB**
+free) and then generated ` Paris.` in two tokens with automatic backend
+selection. That real run loaded in **3.75 s**, reported **913 MB** peak
+process RSS and **45.58 tok/s** for the single measured decode interval;
+its five-token prompt is only a load/selection smoke test, not a stable
+throughput benchmark.
+
+### Stage 40 acceptance
+
+| Fixed gate | Decision and evidence |
+|---|---|
+| Determinism and overrides | **PASS.** One shared plan feeds dry-run and load. Explicit context and quantization are retained or refused; CPU affinity defaults and explicit thread overrides tested. BF16 remains default, and the packed-artifact integration test rejects missing INT8 opt-in. |
+| Memory safety | **PASS for measured hardware.** CPU estimates include weights, full KV/recurrent state, rollback, full-prefill workspace and 256 MiB safety; Qwen3.5 additionally budgets its known load transient. CUDA auto requires its full GPU window plus 512 MiB, and host staging is checked. Explicit CUDA reports startup-only window risk. 4/8/16 GiB admission/refusal and real 4 GiB CPU/GPU runs showed no OOM kill. |
+| Dry run | **PASS.** Both CLIs report the same artifact/format, backend, threads and context used by load without reading weight tensors. Final-binary Q8 auto CUDA plan and real generation agreed. CPU/GPU dry-run medians were 0.418/0.778 s; this is total process time. |
+| Constrained hardware | **PASS for enforceable RAM and actual GPU, PARTIAL for hypothetical GPU quotas.** Enforced 4/8/16 GiB RAM and one-core affinity checks passed; no-GPU and live 6.72 GB free-VRAM fallback/selection passed. 4/6/8 GB VRAM thresholds were calculated from actual model budgets but could not be enforced on this driver. |
+| Numerical and session regression | **PASS.** Final release HF checks above retained exact greedy IDs and strict normalized logits across Qwen3/Qwen3.5 BF16, scalar CPU and Q8 CUDA. Full workspace tests covered CUDA, CPU, packed INT8, prefix reuse, rollback and snapshots. |
+| Focused 4B utility and cost | **PASS with comparator unavailable.** Executable coding output, two-turn recall, 512/2k prompts and 32-token decode completed; table above records TTFT, rate, RSS and device-wide VRAM. A matched llama.cpp 4B binary/GGUF was absent locally, so no comparison is claimed. |
+| Project checks | **PASS.** The full `MARIN_REQUIRE_CUDA=1 cargo test --workspace --all-features --locked` suite passed after planner logic was complete. A later output-label wording change passed focused `plan_cli` tests, `cargo fmt --all --check`, workspace check and all-target/all-feature Clippy `-D warnings`. Line-limit, unsafe and `git diff --check` passed. |
+
+**GO for the minimal V9 static execution planner on the measured CPU and
+RTX 5050 configurations.** It is an admission estimate, not a reservation:
+concurrent processes can change free RAM/VRAM between planning and load.
+No claim is made for enforceable GPU quotas, matched llama.cpp throughput,
+or runtime re-planning after another process consumes memory.
+
+### Next milestone: MoE residency pilot design, not implementation
+
+[IBM Granite 3.0 1B-A400M Instruct](https://huggingface.co/ibm-granite/granite-3.0-1b-a400m-instruct)
+is a small first candidate: its [official config](https://huggingface.co/ibm-granite/granite-3.0-1b-a400m-instruct/blob/main/config.json)
+specifies 24 layers, 32 local experts and top-8 routing, hidden size 1024,
+4k maximum context, and tied embeddings. The [Transformers implementation](https://github.com/huggingface/transformers/blob/main/src/transformers/models/granitemoe/modeling_granitemoe.py)
+uses FP32 router logits, top-k softmax, and separate gate/up/down expert
+projections. Its embedding, attention and RMS-norm structure may reuse
+Marin's tensor operations, but Granite's scaling factors, exact router,
+expert weights and model loader require separate HF parity work. Top-8
+across 24 layers means up to 192 selected expert uses per decoded token;
+at BF16, the config dimensions imply about **3 MiB per expert**, **2.25 GiB**
+for all routed experts and **576 MiB/token** of cold expert reads if none
+are cached. These are arithmetic estimates, not measured I/O. Small total
+size alone does not imply useful disk-streaming speed.
+
+The smallest pilot is (1) exact all-resident BF16 text inference with
+layer/logit and greedy-token HF parity; (2) measure per-layer expert IDs,
+bytes and reuse on a fixed short/long conversation; (3) only then store
+experts separately and compare all-resident to a fixed-budget, per-layer
+LRU cache under enforced 4/8 GiB RAM. Keep embeddings, attention, norms
+and router resident; never approximate routing or silently change
+precision. Report cold/warm hit rates, disk bytes/token, TTFT, decode
+tok/s, peak RSS and OOM behavior. [Colibrì](https://github.com/uv-genai/colibri)
+demonstrates this dense-resident, routed-expert-on-disk design with a
+per-layer LRU and OS page cache; its GLM-5.2 speed figures are its own
+measurements, not predictions for Granite or Marin. Do not add prefetch,
+learned hotness, mixed precision or a generic MoE scheduler to the pilot.

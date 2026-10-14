@@ -103,7 +103,7 @@ fn check_case(model: &Engine, tokenizer: &Tokenizer, case: &Case) -> Result<Case
     let mut kv: EngineCache = model.new_cache(capacity).map_err(CliError::Model)?;
     let layers = case.layer_norms.len();
     let mut norms = vec![0.0_f64; layers];
-    let hybrid = matches!(model, Engine::Qwen35(_));
+    let hybrid = matches!(model, Engine::Qwen35(_) | Engine::Qwen35Cuda(_));
     let mut actual_layers = Vec::new();
     let mut observer = |index: usize, hidden: &[f32]| {
         if let Some(slot) = norms.get_mut(index) {
@@ -256,7 +256,7 @@ pub fn run(
                 println!("  {} {label}\n      {why}", style.red("FAIL"));
             }
         }
-        if matches!(loaded.model, Engine::Qwen35(_)) {
+        if matches!(loaded.model, Engine::Qwen35(_) | Engine::Qwen35Cuda(_)) {
             println!(
                 "      full tensors: max normalized {:.3e}, relative RMS {:.3e}",
                 report.max_tensor_normalized, report.max_tensor_rms

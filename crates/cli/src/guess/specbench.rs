@@ -126,8 +126,8 @@ pub fn run(
         encoded.push(ids);
     }
     let usable_vocab = session.loaded.dir.tokenizer.vocab_size();
+    let stop = session.loaded.stop_tokens();
     let (engine, kv) = session.engine_and_kv();
-    let stop = engine.config().eos_tokens.clone();
     let cancel = interrupt.cancel_flag();
     let mut records: Vec<RunRecord> = Vec::new();
     let total = options.rounds.saturating_add(1);

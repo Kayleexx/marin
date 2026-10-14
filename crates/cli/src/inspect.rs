@@ -16,6 +16,7 @@ pub fn is_base_model(name: &str) -> bool {
 /// The same facts `inspect` prints, shared with the `/model` command.
 pub fn describe(
     name: &str,
+    kind: chat::ModelKind,
     cfg: &Qwen3Config,
     vocab_known: usize,
     ctx: usize,
@@ -26,10 +27,12 @@ pub fn describe(
         |p| format!("{:.2} billion", p as f64 / 1e9),
     );
     let share = cfg.heads.checked_div(cfg.kv_heads).unwrap_or(1);
-    let kind = if is_base_model(name) {
+    let kind = if kind == chat::ModelKind::Chat {
+        "chat model: marin applies its chat template"
+    } else if is_base_model(name) {
         "base model: it continues text, it does not follow instructions"
     } else {
-        "plain-text completion (chat templates are not supported yet)"
+        "plain-text completion; use marin-run"
     };
     let rows = [
         (
@@ -142,7 +145,14 @@ pub fn run(
     println!("  A decoder-only transformer: it reads tokens and predicts the next one.\n");
     println!(
         "{}\n",
-        describe(&name, &cfg, dir.tokenizer.vocab_size(), ctx, &fp)
+        describe(
+            &name,
+            chat::classify(dir.tokenizer_config_json.as_deref()),
+            &cfg,
+            dir.tokenizer.vocab_size(),
+            ctx,
+            &fp,
+        )
     );
     if let Some(scheme) = precision.weights {
         println!(

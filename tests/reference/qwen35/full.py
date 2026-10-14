@@ -4,6 +4,8 @@ import argparse
 import json
 import pathlib
 import shutil
+import tempfile
+import numpy as np
 import torch
 import torch.nn.functional as F
 from safetensors import safe_open
@@ -28,13 +30,14 @@ def float_math(model):
     return model
 
 
-def load(path):
+def load(path, scratch=None):
     config = json.loads((path / "config.json").read_text())
     text = Qwen3_5TextConfig.from_dict(config["text_config"])
     text._attn_implementation = "eager"
     with torch.device("meta"):
         model = Qwen3_5ForCausalLM(text)
-    weights = {}
+    missing = set(model.state_dict())
+    missing.discard("lm_head.weight")  # Tied to the input embedding below.
     manifest_path = path / "marin-int8.json"
     group = json.loads(manifest_path.read_text())["group"] if manifest_path.exists() else None
     for file in sorted(path.glob("*.safetensors")):
@@ -46,11 +49,24 @@ def load(path):
                         rows, cols = value.shape
                         scales = src.get_tensor(name + ".scales")
                         assert group and scales.shape == (rows, cols // group)
-                        value = (value.float().reshape(rows, cols // group, group) * scales[..., None]).reshape(rows, cols)
-                    weights[name.replace("model.language_model.", "model.", 1)] = value
-    weights["lm_head.weight"] = weights["model.embed_tokens.weight"]
-    result = model.load_state_dict(weights, strict=True, assign=True)
-    assert not result.missing_keys and not result.unexpected_keys
+                        decoded = (value.float().reshape(rows, cols // group, group) * scales[..., None]).reshape(rows, cols)
+                        if scratch is None:
+                            value = decoded
+                        else:
+                            # 4B Q8 expands beyond this host's RAM; clean file-backed pages can be reclaimed.
+                            mapped = np.memmap(pathlib.Path(scratch) / (name + ".f32"), dtype=np.float32,
+                                               mode="w+", shape=(rows, cols))
+                            mapped[:] = decoded.numpy()
+                            mapped.flush()
+                            value = torch.from_numpy(mapped)
+                            del mapped
+                        del decoded, scales
+                    key = name.replace("model.language_model.", "model.", 1)
+                    assert key in missing, key
+                    model.load_state_dict({key: value}, strict=False, assign=True)
+                    missing.remove(key)
+                    del value
+    assert not missing, missing
     model.tie_weights()
     # Meta initialization does not populate nonpersistent rotary buffers.
     model.model.rotary_emb = Qwen3_5TextRotaryEmbedding(text)
@@ -88,7 +104,8 @@ def tiny(path, quantizable=False):
 
 @torch.inference_mode()
 def reference(path, out, prompts, steps):
-    model = load(path)
+    scratch = tempfile.TemporaryDirectory(dir=out.parent) if (path / "marin-int8.json").exists() else None
+    model = load(path, scratch.name if scratch else None)
     tokenizer = Tokenizer.from_file(str(path / "tokenizer.json"))
     cases = []
     for prompt in prompts:
@@ -122,6 +139,8 @@ def reference(path, out, prompts, steps):
         cases.append(case)
     with out.open("w") as file:
         json.dump({"format":1,"weights":"int8-dequantized" if (path/"marin-int8.json").exists() else "bfloat16","math":"float32","transformers":__version__,"cases":cases},file,separators=(",",":"))
+    if scratch:
+        scratch.cleanup()
 
 
 def main():

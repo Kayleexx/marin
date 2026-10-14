@@ -8,6 +8,55 @@ use crate::pages::{PAGE_TOKENS, SLAB_PAGES};
 use crate::{CudaError, Gpu};
 
 impl DeviceKv {
+    /// Copies a committed prefix entirely on the device for a transactional model pass.
+    pub fn clone_prefix(&self, gpu: &Gpu) -> Result<Self, CudaError> {
+        let mut next = Self::new(
+            gpu,
+            self.layers,
+            (self.heads, self.kv_heads, self.head_dim),
+            self.capacity,
+            self.format,
+        )?;
+        if self.len == 0 {
+            return Ok(next);
+        }
+        next.reserve_empty(gpu, self.len)?;
+        for page in 0..crate::pages::pages_for(self.len) {
+            let rows = self
+                .len
+                .saturating_sub(page.saturating_mul(PAGE_TOKENS))
+                .min(PAGE_TOKENS);
+            let (source_slab, source_slot) = self.slot_of(page)?;
+            let (target_slab, target_slot) = next.slot_of(page)?;
+            let block = self
+                .row_bytes()
+                .checked_mul(rows)
+                .ok_or(CudaError::Overflow { what: "KV clone" })?;
+            for layer in 0..self.layers {
+                for values in [false, true] {
+                    let src = self.block_start(layer, values, source_slot)?;
+                    let dst = next.block_start(layer, values, target_slot)?;
+                    let from = self
+                        .slabs
+                        .get(source_slab)
+                        .and_then(Option::as_ref)
+                        .ok_or(shape("KV source slab", source_slab, source_slab))?;
+                    let to = next
+                        .slabs
+                        .get_mut(target_slab)
+                        .and_then(Option::as_mut)
+                        .ok_or(shape("KV target slab", target_slab, target_slab))?;
+                    gpu.stream.memcpy_dtod(
+                        &from.slice(src..src.saturating_add(block)),
+                        &mut to.slice_mut(dst..dst.saturating_add(block)),
+                    )?;
+                }
+            }
+        }
+        next.advance(self.len)?;
+        Ok(next)
+    }
+
     /// Bytes `export_page` returns and `import_page` takes for a page holding `rows` positions.
     pub fn page_payload_bytes(&self, rows: usize) -> usize {
         self.row_bytes()

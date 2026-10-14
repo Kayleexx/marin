@@ -17,7 +17,8 @@ const KERNELS: &str = concat!(
     include_str!("attention.cu"),
     include_str!("attention_mma.cu"),
     include_str!("mma.cu"),
-    include_str!("quant.cu")
+    include_str!("quant.cu"),
+    include_str!("qwen35.cu")
 );
 
 pub(crate) struct Kernels {
@@ -46,6 +47,11 @@ pub(crate) struct Kernels {
     pub matmul_q4: CudaFunction,
     pub matmul_q8_mma: CudaFunction,
     pub matmul_q4_mma: CudaFunction,
+    pub q35_convolution: CudaFunction,
+    pub q35_recurrent: CudaFunction,
+    pub q35_split_query: CudaFunction,
+    pub q35_partial_rope: CudaFunction,
+    pub q35_gate_attention: CudaFunction,
 }
 
 pub struct Gpu {
@@ -173,6 +179,11 @@ impl Gpu {
             matmul_q4: module.load_function("matmul_q4")?,
             matmul_q8_mma: module.load_function("matmul_q8_mma")?,
             matmul_q4_mma: module.load_function("matmul_q4_mma")?,
+            q35_convolution: module.load_function("q35_convolution")?,
+            q35_recurrent: module.load_function("q35_recurrent")?,
+            q35_split_query: module.load_function("q35_split_query")?,
+            q35_partial_rope: module.load_function("q35_partial_rope")?,
+            q35_gate_attention: module.load_function("q35_gate_attention")?,
         };
         let sm_count = ctx
             .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)?

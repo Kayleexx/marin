@@ -20,12 +20,34 @@ impl Gpu {
         tokens: usize,
         out: &mut Buffer,
     ) -> Result<(), CudaError> {
+        self.matmul_bf16(w, x, tokens, out, true)
+    }
+
+    /// FP32 accumulation without tensor-core rounding for strict hybrid-reference checks.
+    pub fn matmul_precise(
+        &self,
+        w: &DeviceMatrix,
+        x: &Buffer,
+        tokens: usize,
+        out: &mut Buffer,
+    ) -> Result<(), CudaError> {
+        self.matmul_bf16(w, x, tokens, out, false)
+    }
+
+    fn matmul_bf16(
+        &self,
+        w: &DeviceMatrix,
+        x: &Buffer,
+        tokens: usize,
+        out: &mut Buffer,
+        tensor_cores: bool,
+    ) -> Result<(), CudaError> {
         expect_len("matmul input", tokens.checked_mul(w.cols), x)?;
         expect_len("matmul output", tokens.checked_mul(w.rows), out)?;
         if tokens == 0 || w.rows == 0 || w.cols == 0 {
             return Ok(());
         }
-        if tokens >= MMA_MIN_TOKENS && w.cols.checked_rem(16) == Some(0) {
+        if tensor_cores && tokens >= MMA_MIN_TOKENS && w.cols.checked_rem(16) == Some(0) {
             return self.matmul_mma(w, x, tokens, out);
         }
         let config = LaunchConfig {

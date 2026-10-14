@@ -2,10 +2,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use loader::ModelDir;
-use model::{Backend, BackendChoice, Engine, KvFormat, Precision, QuantScheme, Selected};
+use model::{Backend, BackendChoice, Engine, KvFormat, Precision, QuantScheme};
 
 use crate::CliError;
-use crate::memory::{Footprint, footprint, resolve_ctx};
+use crate::memory::Footprint;
 use crate::progress::Progress;
 use crate::style::Style;
 use crate::units;
@@ -23,6 +23,19 @@ pub struct Loaded {
     pub gpu_free_before: Option<u64>,
     /// Running while the weights load, when a snapshot was asked for.
     pub weights_hash: Option<std::thread::JoinHandle<Result<u64, loader::LoaderError>>>,
+}
+
+impl Loaded {
+    pub fn stop_tokens(&self) -> Vec<u32> {
+        let mut stops = self.model.config().eos_tokens.clone();
+        if chat::classify(self.dir.tokenizer_config_json.as_deref()) == chat::ModelKind::Chat
+            && let Some(id) = self.dir.tokenizer.token_id("<|im_end|>")
+            && !stops.contains(&id)
+        {
+            stops.push(id);
+        }
+        stops
+    }
 }
 
 pub fn model_name(path: &Path) -> String {
@@ -138,67 +151,27 @@ fn open(request: Request<'_>) -> Result<Loaded, CliError> {
         hash_weights,
         kv_follows_backend,
     } = request;
-    if backend == BackendChoice::Cpu {
-        if precision
-            .weights
-            .is_some_and(|q| q.bits != model::QuantBits::Int8)
-        {
-            return Err(CliError::BadOption(
-                "CPU weights support int8 only; int4 needs the GPU".into(),
-            ));
+    let planned = crate::plan::build(
+        path,
+        ctx,
+        default_ctx,
+        backend,
+        precision,
+        kv_follows_backend,
+    )?;
+    let crate::plan::Plan {
+        dir,
+        selected,
+        footprint,
+        precision,
+        ctx,
+        notes,
+        ..
+    } = planned;
+    for note in &notes {
+        if chrome || note.starts_with("default context reduced") {
+            eprintln!("{} {note}", style.yellow("note:"));
         }
-        if precision.kv != KvFormat::default() && !kv_follows_backend {
-            return Err(CliError::BadOption(
-                "--kv-type needs the GPU, but --backend cpu was given".into(),
-            ));
-        }
-    }
-    let dir = ModelDir::open(path)?;
-    let config = Engine::parse_config(&dir)?;
-    let hybrid = model::qwen35::is_qwen35(&dir.config_json);
-    if hybrid && !kv_follows_backend && precision.kv != KvFormat::F32 {
-        return Err(CliError::BadOption("Qwen3.5 requires FP32 state".into()));
-    }
-    let adaptive_ctx = ctx.is_none();
-    let mut ctx = resolve_ctx(&config, ctx, default_ctx)?;
-    let mut footprint = footprint(&dir, &config, ctx, precision)?;
-    let selected = if hybrid {
-        if backend == BackendChoice::Cuda {
-            return Err(CliError::BadOption("Qwen3.5 requires CPU inference".into()));
-        }
-        Selected {
-            backend: Backend::Cpu,
-            note: Some("Qwen3.5 text inference uses the CPU".into()),
-        }
-    } else {
-        Backend::select(
-            backend,
-            footprint.weights.saturating_add(footprint.kv_startup),
-            footprint
-                .weights
-                .saturating_add(footprint.kv_window.max(footprint.kv_startup)),
-        )?
-    };
-    let mut precision = precision;
-    if matches!(selected.backend, Backend::Cpu) {
-        if kv_follows_backend {
-            precision.kv = KvFormat::F32;
-        }
-        let old_ctx = ctx;
-        if hybrid {
-            footprint.ensure_fits()?;
-        } else {
-            ctx = footprint.fit_cpu(&config, ctx, adaptive_ctx)?;
-        }
-        if chrome && ctx != old_ctx {
-            eprintln!(
-                "{} CPU context reduced to {ctx} tokens to fit available memory",
-                style.yellow("note:")
-            );
-        }
-    }
-    if let (Some(note), true) = (&selected.note, chrome) {
-        eprintln!("{} {note}", style.yellow("note:"));
     }
     if chrome && !crate::style::stderr_is_terminal() {
         eprintln!(

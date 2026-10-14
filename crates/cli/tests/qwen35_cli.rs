@@ -38,6 +38,23 @@ fn both_existing_clis_generate_and_reject_unsupported_formats() -> Result {
         chat.join("tokenizer_config.json"),
     )?;
 
+    let loaded = cli::load::load(
+        &chat,
+        Some(64),
+        64,
+        model::BackendChoice::Cpu,
+        model::Precision::default(),
+        &cli::style::Style::plain(),
+        false,
+    )?;
+    let im_end = loaded
+        .dir
+        .tokenizer
+        .token_id("<|im_end|>")
+        .ok_or("im_end")?;
+    assert_ne!(im_end, 0);
+    assert_eq!(loaded.stop_tokens(), vec![0, im_end]);
+
     for (bin, args) in [
         (
             env!("CARGO_BIN_EXE_marin-run"),
@@ -68,17 +85,26 @@ fn both_existing_clis_generate_and_reject_unsupported_formats() -> Result {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(!output.stdout.is_empty());
-        for flags in [
-            ["--quantize", "int8"],
-            ["--kv-type", "f16"],
-            ["--backend", "cuda"],
-        ] {
+        for flags in [["--quantize", "int8"], ["--kv-type", "f16"]] {
             let output = Command::new(bin)
                 .env("MARIN_HOME", temp.0.join("home"))
                 .args(&args)
                 .args(flags)
                 .output()?;
             assert!(!output.status.success());
+        }
+        if std::env::var_os("MARIN_REQUIRE_CUDA").is_some() {
+            let output = Command::new(bin)
+                .env("MARIN_HOME", temp.0.join("home"))
+                .args(&args)
+                .args(["--backend", "cuda", "--max-tokens", "4", "--temp", "0"])
+                .output()?;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!output.stdout.is_empty());
         }
     }
     Ok(())

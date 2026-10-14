@@ -61,7 +61,14 @@ fn model(s: &Session) {
     println!("{}", s.style.bold(&s.loaded.name));
     println!(
         "{}",
-        describe(&s.loaded.name, cfg, vocab, s.ctx, &s.loaded.footprint)
+        describe(
+            &s.loaded.name,
+            chat::classify(s.loaded.dir.tokenizer_config_json.as_deref()),
+            cfg,
+            vocab,
+            s.ctx,
+            &s.loaded.footprint,
+        )
     );
 }
 

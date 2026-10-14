@@ -165,8 +165,8 @@ impl App {
     fn settings_lines(s: &Session) -> Vec<String> {
         let config = s.loaded.model.config();
         let tokenizer = &s.loaded.dir.tokenizer;
-        let stops: Vec<String> = config
-            .eos_tokens
+        let stops = s.loaded.stop_tokens();
+        let stops: Vec<String> = stops
             .iter()
             .map(|id| {
                 format!(
@@ -175,7 +175,9 @@ impl App {
                 )
             })
             .collect();
-        let source = if config.eos_from_generation_config {
+        let source = if stops.len() > config.eos_tokens.len() {
+            "config.json + tokenizer_config.json"
+        } else if config.eos_from_generation_config {
             "generation_config.json"
         } else {
             "config.json"
@@ -220,6 +222,7 @@ impl App {
         });
         let model = describe(
             &s.loaded.name,
+            chat::classify(s.loaded.dir.tokenizer_config_json.as_deref()),
             s.loaded.model.config(),
             s.loaded.dir.tokenizer.vocab_size(),
             s.ctx,

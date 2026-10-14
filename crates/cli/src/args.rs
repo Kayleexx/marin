@@ -55,6 +55,18 @@ pub enum Command {
         #[command(flatten)]
         ctx: CtxArg,
     },
+    /// Select a safe execution configuration without loading model weights
+    Plan {
+        /// Folder with config.json, tokenizer.json and model.safetensors
+        model_dir: PathBuf,
+        /// Where the math should run
+        #[arg(long, value_enum, default_value_t = BackendArg::Auto)]
+        backend: BackendArg,
+        #[command(flatten)]
+        quant: QuantArgs,
+        #[command(flatten)]
+        ctx: CtxArg,
+    },
     /// Measure load time, prefill and decode speed, memory and (with --profile) where the time goes
     Bench {
         /// Folder with config.json, tokenizer.json and model.safetensors

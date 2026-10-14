@@ -263,7 +263,7 @@ pub fn run_turns(
     let mut cache = loaded.model.new_cache(options.ctx)?;
     let params = GenerateParams {
         max_tokens: options.reply_tokens,
-        stop_tokens: loaded.model.config().eos_tokens.clone(),
+        stop_tokens: loaded.stop_tokens(),
         usable_vocab: loaded.dir.tokenizer.vocab_size(),
         speculation: options.speculate.then_some(Speculation::MEASURED),
     };

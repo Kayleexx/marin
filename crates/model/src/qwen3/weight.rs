@@ -33,6 +33,19 @@ impl Weight {
             Self::Quant(w) => gpu.matmul_quant(w, x, tokens, out),
         }
     }
+
+    pub(crate) fn matmul_precise(
+        &self,
+        gpu: &Gpu,
+        x: &Buffer,
+        tokens: usize,
+        out: &mut Buffer,
+    ) -> Result<(), CudaError> {
+        match self {
+            Self::Bf16(w) => gpu.matmul_precise(w, x, tokens, out),
+            Self::Quant(w) => gpu.matmul_quant_precise(w, x, tokens, out),
+        }
+    }
 }
 
 /// Two matrices over the same input; one launch when both are bf16.

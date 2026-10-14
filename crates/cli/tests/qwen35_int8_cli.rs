@@ -87,5 +87,27 @@ fn both_clis_select_opt_in_packed_hybrid_int8_and_preserve_bf16_default() -> Res
                 .success()
         );
     }
+    if std::env::var_os("MARIN_REQUIRE_CUDA").is_some() {
+        let verified = Command::new(env!("CARGO_BIN_EXE_marin-run"))
+            .arg("verify")
+            .arg(&packed)
+            .args([
+                "--backend",
+                "cuda",
+                "--quantize",
+                "int8",
+                "--quant-group",
+                "32",
+                "--reference",
+            ])
+            .arg(fixture.join("quant-reference.json"))
+            .output()?;
+        assert!(
+            verified.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&verified.stdout),
+            String::from_utf8_lossy(&verified.stderr)
+        );
+    }
     Ok(())
 }

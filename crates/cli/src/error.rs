@@ -28,6 +28,8 @@ pub enum CliError {
     BadOption(String),
     #[error("this needs about {} of memory but only {} is available", units::bytes(*.needed), units::bytes(*.available))]
     NotEnoughMemory { needed: u64, available: u64 },
+    #[error("{gpu}; CPU also cannot run: {cpu}")]
+    NoFit { gpu: String, cpu: String },
     #[error("cannot use reference file {path}: {reason}")]
     Reference { path: String, reason: String },
     #[error("no model found")]

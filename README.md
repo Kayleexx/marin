@@ -4,7 +4,7 @@
 
 Marin is a small language-model engine written from scratch in Rust, built to run well on ordinary laptops and desktops. No Python, no outside inference library. The goal is to understand every step of running a model, measure it, and make it faster on weak hardware. A chat assistant on top gives the engine real work to be judged by.
 
-- **Models:** Qwen3 (1.7B is the reference) on CPU/CUDA; Qwen3.5-2B-Base text inference on CPU with FP32 math.
+- **Models:** Qwen3 on CPU/CUDA; Qwen3.5-2B-Base and post-trained Qwen3.5-4B text inference on CPU/CUDA with FP32 hybrid state.
 - **Checked against Hugging Face**, token for token.
 - **Fast where it matters:** tensor-core prefill, tuned attention, int8 / int4 weights, a chat cache that survives between turns, a KV cache that grows with the conversation (stored as f16 on the GPU), prefix snapshots across restarts, opt-in guessing ahead, and SIMD matmul kernels on the CPU.
 - **Measured:** every optimization has before/after numbers, and the commands to repeat them, in [BENCHMARKS.md](BENCHMARKS.md).
@@ -29,6 +29,26 @@ marin-run MODEL -p "The capital of France is"
 ```
 
 Marin uses the GPU when CUDA works and the model fits, and the CPU otherwise; `--backend cpu` or `--backend cuda` forces a choice.
+
+### Plan before loading
+
+```bash
+marin --model ~/models/Qwen3.5-4B-Q8 --quantize int8 plan
+marin-run plan ~/models/Qwen3.5-4B-Q8 --quantize int8 --ctx 2048
+```
+
+`plan` reads model metadata and hardware limits, then shows the selected
+backend, artifact format, CPU threads, context and memory budget without
+loading weight tensors. `marin` uses its 4096-token chat default;
+`marin-run` uses 2048, so pass `--ctx` when comparing either dry run with
+a command. Automatic CUDA selection requires the full context window to
+fit; explicit CUDA still reports when only startup fits. If no context was
+specified, a CPU default may be reduced to fit and the reduction is printed;
+an explicit `--ctx` is never reduced. The named folder remains the artifact:
+INT8 requires explicit `--quantize int8`, and a packed folder is never
+silently substituted for a BF16 folder. The dry run checks metadata and
+budgets; inference verifies packed tensor payloads while loading.
+[Planner gates and constrained-hardware results](BENCHMARKS.md#40-minimal-v9-execution-planner-gates-fixed-before-implementation).
 
 ### Options worth knowing
 
@@ -81,12 +101,20 @@ and code prompts. Measured short-prompt peak RAM is about **3.90 GB**,
 TTFT **0.55–0.66 s**, and decode **5.9–6.1 tok/s** on the reference CPU.
 [Exact gates, measurements and limitations](BENCHMARKS.md#35-end-to-end-qwen35-2b-text-inference).
 
-CPU only. BF16 remains default; opt-in CPU INT8 reuses the same Q8 kernels
+BF16 remains default; opt-in CPU INT8 reuses the same Q8 kernels
 and packed loader as Qwen3. On the reference CPU, short-prompt decode rises
 from **5.52 to 9.30 tok/s**, peak RSS falls from **3.90 to 2.08 GB**, and warm
 load falls from **3.86 to 1.90 s**. Convolution, norms, decay/beta projections,
-recurrent state and attention KV keep FP32 values/math. Vision, MoE, untied
-heads, CUDA DeltaNet and stage profiling remain unsupported.
+recurrent state and attention KV keep FP32 values/math. Vision, MoE and untied
+heads remain unsupported.
+
+The BF16 text checkpoint also runs on CUDA with device-resident recurrent,
+convolution and attention state. On the RTX 5050, strict HF verification
+passes at 128/512 tokens (worst normalized max **3.055e-6**, relative RMS
+**2.639e-6**). Use `--backend cuda` with the same command above; an explicit
+GPU request refuses a model that exceeds the available VRAM. The CUDA speed
+optimization experiments remain deferred; 4B support is measured separately.
+[CUDA measurements and limitations](BENCHMARKS.md#38-qwen35-cuda-and-4b-milestone-in-progress).
 
 ```bash
 marin-run export-int8 ~/models/Qwen3.5-2B-Base ~/models/Qwen3.5-2B-Base-Q8 --quant-group 128
@@ -106,9 +134,40 @@ and TTFT fell from 15.74/62.12 to **1.41/5.48 s**, with a **33 MiB** peak-RAM
 increase at 512. Short passes retain GEMV. [Gates, HF parity and workload limits](BENCHMARKS.md#36-qwen35-cpu-batched-prefill-2026-10-13).
 Appending reuses state; edited prefixes
 reset and replay retained tokens. Whole-model errors leave committed state
-unchanged. CPU snapshots remain unsupported. Base models use `marin-run`;
-`marin` still requires a chat model, and the real Qwen3.5 chat checkpoint
-has not been validated. Qwen3 defaults and CPU/CUDA/INT8 behavior are retained.
+unchanged. Qwen3.5 snapshots remain unsupported on either backend. Base models use `marin-run`;
+the post-trained 4B model works with `marin`'s non-thinking chat template.
+Qwen3 defaults and CPU/CUDA/INT8 behavior are retained.
+
+### Qwen3.5-4B text chat on constrained hardware
+
+The official post-trained 4B checkpoint has 32 hybrid text layers. CPU BF16
+is the default and passes strict Hugging Face layer/logit and greedy-token
+checks. Its 8.41 GB text weights exceed this RTX 5050's total VRAM, so an
+explicit BF16 CUDA request refuses to load. Exporting once to Marin's existing
+Q8 format makes the same text model usable on CPU and this 8 GB GPU:
+
+```bash
+marin-run export-int8 ~/models/Qwen3.5-4B ~/models/Qwen3.5-4B-Q8 --quant-group 128
+marin --model ~/models/Qwen3.5-4B-Q8 --backend cuda --quantize int8 \
+  --ctx 256 --max-tokens 160 --temp 0 run "Explain a mutex in one sentence."
+marin-run ~/models/Qwen3.5-4B-Q8 --backend cpu --quantize int8 \
+  --ctx 2053 --temp 0 -p "The capital of France is"
+```
+
+The packed folder needs explicit `--quantize int8`; its stored group size is
+validated at load. There is no whole-model BF16 expansion at inference time.
+A 2k prompt peaked
+at **4.96 GB process RAM** on CPU and **4696 MiB process VRAM** on the
+RTX 5050. CPU BF16 versus INT8 decode was **2.33 → 4.29 tok/s**, while
+CUDA INT8 reached **38.03 tok/s**; 2k TTFT was **53.11 / 47.25 / 15.94 s**
+respectively. The CPU Q8 run also completed inside an enforced 8 GiB,
+zero-swap memory scope. On 256 matched prose/code positions, INT8 agreed with
+BF16 on **255** first choices. The official non-thinking chat template and
+assistant end marker are handled by `marin`; a generated factorial function
+passed executable checks for zero, five and negative input. Vision and MTP
+weights are skipped; Qwen3.5 snapshots remain unsupported. These are focused
+measurements, with no matched llama.cpp 4B baseline or controlled cold-disk
+startup claim. [Gates, HF parity and measurements](BENCHMARKS.md#39-real-qwen35-4b-text-milestone-gates-fixed-before-implementation).
 
 
 ### `marin-run` subcommands

@@ -5,7 +5,7 @@ use crate::ModelError;
 
 /// Times GPU stages on the GPU's own clock: a mark before and after each stage, read once the pass is queued,
 /// so profiling does not stall the stream between stages. Off, it runs the stage and nothing else.
-pub(super) struct GpuProbe<'a> {
+pub(crate) struct GpuProbe<'a> {
     gpu: &'a Gpu,
     times: Option<&'a mut StageTimes>,
     layer: Option<usize>,
@@ -13,7 +13,7 @@ pub(super) struct GpuProbe<'a> {
 }
 
 impl<'a> GpuProbe<'a> {
-    pub(super) fn new(gpu: &'a Gpu, times: Option<&'a mut StageTimes>) -> Self {
+    pub(crate) fn new(gpu: &'a Gpu, times: Option<&'a mut StageTimes>) -> Self {
         Self {
             gpu,
             times,
@@ -23,11 +23,11 @@ impl<'a> GpuProbe<'a> {
     }
 
     /// Tags the stages timed from now on with `layer`.
-    pub(super) fn layer(&mut self, layer: Option<usize>) {
+    pub(crate) fn layer(&mut self, layer: Option<usize>) {
         self.layer = layer;
     }
 
-    pub(super) fn stage<T>(
+    pub(crate) fn stage<T>(
         &mut self,
         stage: Stage,
         work: impl FnOnce() -> Result<T, ModelError>,
@@ -42,7 +42,7 @@ impl<'a> GpuProbe<'a> {
         Ok(out)
     }
 
-    pub(super) fn finish(self) -> Result<(), ModelError> {
+    pub(crate) fn finish(self) -> Result<(), ModelError> {
         if let Some(times) = self.times {
             for (layer, stage, before, after) in &self.marks {
                 times.set_layer(*layer);

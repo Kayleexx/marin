@@ -15,6 +15,7 @@ mod pages;
 mod pages_tests;
 mod probe;
 mod quant;
+mod qwen35;
 
 pub use counters::{Mark, Traffic};
 pub use error::CudaError;
@@ -24,3 +25,4 @@ pub use kv_format::KvFormat;
 pub use pages::{PAGE_TOKENS, PagePool, PageTable, PagesExhausted, SLAB_PAGES, pages_for};
 pub use probe::{CopyTimes, Window};
 pub use quant::DeviceQuantMatrix;
+pub use qwen35::{DeltaDims, DeltaInputs};

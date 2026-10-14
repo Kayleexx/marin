@@ -187,17 +187,23 @@ fn batched_last_layer_failure_preserves_the_entire_transaction() {
 
 #[test]
 fn int8_batched_state_replay_reset_and_late_failure_are_atomic() {
-    let dir = loader::ModelDir::open(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-qwen35-int8"),
-    )
-    .unwrap();
-    let scheme = tensor::QuantScheme::new(tensor::QuantBits::Int8, 32).unwrap();
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-qwen35-int8");
+    int8_state_case(&fixture, 32, false);
+    if let Some(real) = std::env::var_os("MARIN_QWEN35_4B_Q8") {
+        int8_state_case(Path::new(&real), 128, true);
+    }
+}
+
+fn int8_state_case(path: &Path, group: usize, real: bool) {
+    let dir = loader::ModelDir::open(path).unwrap();
+    let scheme = tensor::QuantScheme::new(tensor::QuantBits::Int8, group).unwrap();
     let mut m = Qwen35::load_quantized(&dir, Some(scheme), |_, _| {}).unwrap();
     let mut batch = m.new_cache(128).unwrap();
     let mut single = m.new_cache(128).unwrap();
     let untouched = m.new_cache(128).unwrap();
     let original = contents(&untouched);
-    let ids: Vec<_> = (1..66).collect();
+    let ids: Vec<_> = (1..if real { 7 } else { 66 }).collect();
     let a = m.forward(&ids, &mut batch).unwrap();
     let mut b = Vec::new();
     for token in &ids {
@@ -210,11 +216,13 @@ fn int8_batched_state_replay_reset_and_late_failure_are_atomic() {
         &m.forward(&[5], &mut batch).unwrap(),
         &m.forward(&[5], &mut single).unwrap(),
     );
-    batch.truncate(17).unwrap();
-    let a = m.forward(&[36; 16], &mut batch).unwrap();
+    let prefix = if real { 3 } else { 17 };
+    let replacement = vec![36; if real { 2 } else { 16 }];
+    batch.truncate(prefix).unwrap();
+    let a = m.forward(&replacement, &mut batch).unwrap();
     single.clear();
-    let mut edited = ids[..17].to_vec();
-    edited.extend_from_slice(&[36; 16]);
+    let mut edited = ids[..prefix].to_vec();
+    edited.extend_from_slice(&replacement);
     assert_eq!(a, m.forward(&edited, &mut single).unwrap());
     assert_eq!(contents(&batch), contents(&single));
     batch.clear();
@@ -228,16 +236,21 @@ fn int8_batched_state_replay_reset_and_late_failure_are_atomic() {
     let ledger = batch.tokens.clone();
     let h = m.config().hidden_size;
     let ff = m.config().intermediate_size;
+    let n = h.checked_mul(ff).unwrap();
     let last = m.blocks.last_mut().unwrap();
-    last.common.gate = Linear::new(vec![1000.0; h * ff], h);
-    last.common.up = Linear::new(vec![1000.0; h * ff], h);
-    last.common.down = Linear::new(vec![f32::MAX; h * ff], ff);
+    last.common.gate = Linear::new(vec![1000.0; n], h);
+    last.common.up = Linear::new(vec![1000.0; n], h);
+    last.common.down = Linear::new(vec![f32::MAX; n], ff);
     let mut reached = 0;
     assert!(
-        m.forward_observed(&[29; 17], &mut batch, Some(&mut |i, _| reached = i))
-            .is_err()
+        m.forward_observed(
+            &vec![29; if real { 1 } else { 17 }],
+            &mut batch,
+            Some(&mut |i, _| reached = i)
+        )
+        .is_err()
     );
-    assert_eq!(reached, 3);
+    assert_eq!(reached, m.blocks.len().checked_sub(1).unwrap());
     assert_eq!(contents(&batch), before);
     assert_eq!(batch.tokens, ledger);
 }
