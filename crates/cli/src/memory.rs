@@ -50,6 +50,63 @@ pub fn footprint(
             max: cfg.max_positions,
         });
     }
+    if model::granite::is_granite(&dir.config_json) {
+        if dir.weights.packed_group().is_some()
+            && dir.weights.packed_group() != precision.weights.map(|q| q.group)
+        {
+            return Err(CliError::BadOption(
+                "Granite artifact and requested INT8 group differ".into(),
+            ));
+        }
+        if precision
+            .weights
+            .is_some_and(|q| q.bits != model::QuantBits::Int8)
+        {
+            return Err(CliError::BadOption(
+                "Granite CPU supports INT8 weights only".into(),
+            ));
+        }
+        let granite = model::granite::Config::parse(&dir.config_json)?;
+        let weights = model::granite::resident_bytes(&dir.weights, &granite, precision.weights)?;
+        let kv = KvCache::bytes_for(cfg.layers, cfg.kv_heads, cfg.head_dim, ctx)
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| CliError::BadOption("Granite KV size overflows".into()))?;
+        let transient = dir
+            .weights
+            .names()
+            .filter_map(|name| dir.weights.info(name))
+            .map(|info| info.byte_len())
+            .max()
+            .unwrap_or(0);
+        let needed = weights
+            .checked_add(kv)
+            .and_then(|n| n.checked_add(model::cpu_workspace_bytes(cfg, ctx).ok()?))
+            .and_then(|n| n.checked_add(transient))
+            .and_then(|n| n.checked_add(model::CPU_SLACK_BYTES))
+            .ok_or_else(|| CliError::BadOption("Granite memory size overflows".into()))?;
+        return Ok(Footprint {
+            weights,
+            parameters: dir
+                .weights
+                .names()
+                .filter(|name| !name.ends_with(".scales"))
+                .try_fold(0_u64, |n, name| {
+                    let info = dir.weights.info(name)?;
+                    let count = info
+                        .shape
+                        .iter()
+                        .try_fold(1_u64, |a, d| a.checked_mul(*d as u64))?;
+                    n.checked_add(count)
+                }),
+            recurrent: 0,
+            quant: precision.weights,
+            kv,
+            kv_window: kv,
+            kv_startup: 0,
+            needed,
+            available: metrics::cpu_available_bytes()?,
+        });
+    }
     if model::qwen35::is_qwen35(&dir.config_json) {
         let c = model::qwen35::TextConfig::parse(
             &dir.config_json,

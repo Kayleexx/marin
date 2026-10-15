@@ -6,6 +6,7 @@ mod attention_mma;
 mod counters;
 mod error;
 mod gpu;
+mod granite;
 mod kv;
 mod kv_format;
 mod matmul;

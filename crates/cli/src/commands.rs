@@ -68,6 +68,7 @@ fn model(s: &Session) {
             vocab,
             s.ctx,
             &s.loaded.footprint,
+            model::granite::is_granite(&s.loaded.dir.config_json),
         )
     );
 }

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod error;
+pub mod granite;
 mod precision;
 mod qwen3;
 pub mod qwen35;

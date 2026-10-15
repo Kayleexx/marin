@@ -3,21 +3,21 @@ use crate::TensorError;
 const LANES: usize = 8;
 
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
-    let mut acc = [0.0_f32; LANES];
+    let mut acc = [0.0_f64; LANES];
     let a_chunks = a.chunks_exact(LANES);
     let b_chunks = b.chunks_exact(LANES);
-    let tail: f32 = a_chunks
+    let tail: f64 = a_chunks
         .remainder()
         .iter()
         .zip(b_chunks.remainder())
-        .map(|(x, y)| x * y)
+        .map(|(x, y)| f64::from(*x) * f64::from(*y))
         .sum();
     for (ca, cb) in a_chunks.zip(b_chunks) {
         for ((sum, x), y) in acc.iter_mut().zip(ca).zip(cb) {
-            *sum += x * y;
+            *sum += f64::from(*x) * f64::from(*y);
         }
     }
-    acc.iter().sum::<f32>() + tail
+    (acc.iter().sum::<f64>() + tail) as f32
 }
 
 pub fn softmax(x: &mut [f32]) {

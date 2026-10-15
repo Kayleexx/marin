@@ -10,6 +10,7 @@ use crate::CliError;
 use crate::load::load;
 use crate::memory::DEFAULT_CTX;
 use crate::style::Style;
+use crate::verify_hybrid::{argmax, l2};
 
 /// Largest accepted gap between our logits and the float32 reference.
 const LOGIT_ABS: f64 = 5e-4;
@@ -30,6 +31,12 @@ struct Case {
     layer_norms: Vec<f64>,
     #[serde(default)]
     layer_values: Vec<Vec<f32>>,
+    #[serde(default)]
+    router_values: Vec<Vec<f32>>,
+    #[serde(default)]
+    router_top: Vec<Vec<usize>>,
+    #[serde(default)]
+    expert_values: Vec<Vec<f32>>,
     steps: Vec<Step>,
 }
 
@@ -39,6 +46,12 @@ struct Step {
     top: Vec<(u32, f64)>,
     #[serde(default)]
     logits: Vec<f32>,
+    #[serde(default)]
+    router_top: Vec<Vec<usize>>,
+    #[serde(default)]
+    layer_values: Vec<Vec<f32>>,
+    #[serde(default)]
+    expert_values: Vec<Vec<f32>>,
 }
 
 #[derive(Debug)]
@@ -65,22 +78,6 @@ fn read_reference(path: &Path) -> Result<Reference, CliError> {
     Ok(reference)
 }
 
-fn l2(values: &[f32]) -> f64 {
-    values
-        .iter()
-        .map(|v| f64::from(*v).powi(2))
-        .sum::<f64>()
-        .sqrt()
-}
-
-fn argmax(logits: &[f32]) -> Option<u32> {
-    let (index, _) = logits
-        .iter()
-        .enumerate()
-        .reduce(|best, next| if next.1 > best.1 { next } else { best })?;
-    u32::try_from(index).ok()
-}
-
 fn check_case(model: &Engine, tokenizer: &Tokenizer, case: &Case) -> Result<CaseReport, CliError> {
     let mut report = CaseReport {
         prompt: case.prompt.clone(),
@@ -103,21 +100,53 @@ fn check_case(model: &Engine, tokenizer: &Tokenizer, case: &Case) -> Result<Case
     let mut kv: EngineCache = model.new_cache(capacity).map_err(CliError::Model)?;
     let layers = case.layer_norms.len();
     let mut norms = vec![0.0_f64; layers];
-    let hybrid = matches!(model, Engine::Qwen35(_) | Engine::Qwen35Cuda(_));
+    let hybrid = matches!(
+        model,
+        Engine::Qwen35(_) | Engine::Qwen35Cuda(_) | Engine::Granite(_) | Engine::GraniteCuda(_)
+    );
     let mut actual_layers = Vec::new();
-    let mut observer = |index: usize, hidden: &[f32]| {
-        if let Some(slot) = norms.get_mut(index) {
-            *slot = l2(hidden);
+    let mut routers = Vec::new();
+    let mut tops = Vec::new();
+    let mut experts = Vec::new();
+    let mut logits = {
+        let mut observer = |index: usize, hidden: &[f32]| {
+            if let Some(slot) = norms.get_mut(index) {
+                *slot = l2(hidden);
+            }
+            if hybrid {
+                actual_layers.push(hidden.to_vec());
+            }
+        };
+        match (model, &mut kv) {
+            (Engine::Granite(m), EngineCache::Cpu(c)) => {
+                let last = ids.len().saturating_sub(1);
+                let mut route =
+                    |_: usize, position: usize, values: &[f32], ids: &[usize], output: &[f32]| {
+                        if position == last {
+                            routers.push(values.to_vec());
+                            tops.push(ids.to_vec());
+                            experts.push(output.to_vec());
+                        }
+                    };
+                m.forward_detailed(&ids, c, Some(&mut observer), Some(&mut route))?
+            }
+            (Engine::GraniteCuda(m), EngineCache::GraniteCuda(c)) => {
+                let last = ids.len().saturating_sub(1);
+                let mut route =
+                    |_: usize, position: usize, values: &[f32], ids: &[usize], output: &[f32]| {
+                        if position == last {
+                            routers.push(values.to_vec());
+                            tops.push(ids.to_vec());
+                            experts.push(output.to_vec());
+                        }
+                    };
+                m.forward_detailed(&ids, c, Some(&mut observer), Some(&mut route))?
+            }
+            (Engine::Qwen35(m), EngineCache::Qwen35(c)) => {
+                m.forward_full_observed(&ids, c, Some(&mut observer))?
+            }
+            _ => model.forward_observed(&ids, &mut kv, Some(&mut observer))?,
         }
-        if hybrid {
-            actual_layers.push(hidden.to_vec());
-        }
-    };
-    let mut logits = match (model, &mut kv) {
-        (Engine::Qwen35(m), EngineCache::Qwen35(c)) => {
-            m.forward_full_observed(&ids, c, Some(&mut observer))?
-        }
-        _ => model.forward_observed(&ids, &mut kv, Some(&mut observer))?,
     };
     if hybrid {
         if actual_layers.len() != case.layer_values.len() {
@@ -134,6 +163,22 @@ fn check_case(model: &Engine, tokenizer: &Tokenizer, case: &Case) -> Result<Case
                     report.failure = Some(format!("first incorrect layer {i}: {e}"));
                     return Ok(report);
                 }
+            }
+        }
+    }
+    if matches!(model, Engine::Granite(_) | Engine::GraniteCuda(_)) {
+        match crate::verify_hybrid::compare_granite(
+            (&routers, &tops, &experts),
+            (&case.router_values, &case.router_top, &case.expert_values),
+            model.config().layers,
+        ) {
+            Ok((normalized, rms)) => {
+                report.max_tensor_normalized = report.max_tensor_normalized.max(normalized);
+                report.max_tensor_rms = report.max_tensor_rms.max(rms);
+            }
+            Err(e) => {
+                report.failure = Some(e);
+                return Ok(report);
             }
         }
     }
@@ -158,9 +203,68 @@ fn check_case(model: &Engine, tokenizer: &Tokenizer, case: &Case) -> Result<Case
                 .steps
                 .get(index.saturating_sub(1))
                 .map_or(0, |s| s.token);
-            logits = model
-                .forward(&[previous], &mut kv)
-                .map_err(CliError::Model)?;
+            logits = match (model, &mut kv) {
+                (Engine::Granite(m), EngineCache::Cpu(c)) if !step.router_top.is_empty() => {
+                    tops.clear();
+                    experts.clear();
+                    actual_layers.clear();
+                    let mut route =
+                        |_: usize, _: usize, _: &[f32], ids: &[usize], output: &[f32]| {
+                            tops.push(ids.to_vec());
+                            experts.push(output.to_vec());
+                        };
+                    let mut watch = |_: usize, hidden: &[f32]| actual_layers.push(hidden.to_vec());
+                    m.forward_detailed(&[previous], c, Some(&mut watch), Some(&mut route))?
+                }
+                (Engine::GraniteCuda(m), EngineCache::GraniteCuda(c))
+                    if !step.router_top.is_empty() =>
+                {
+                    tops.clear();
+                    experts.clear();
+                    actual_layers.clear();
+                    let mut route =
+                        |_: usize, _: usize, _: &[f32], ids: &[usize], output: &[f32]| {
+                            tops.push(ids.to_vec());
+                            experts.push(output.to_vec());
+                        };
+                    let mut watch = |_: usize, hidden: &[f32]| actual_layers.push(hidden.to_vec());
+                    m.forward_detailed(&[previous], c, Some(&mut watch), Some(&mut route))?
+                }
+                _ => model
+                    .forward(&[previous], &mut kv)
+                    .map_err(CliError::Model)?,
+            };
+        }
+        if matches!(model, Engine::Granite(_) | Engine::GraniteCuda(_))
+            && !step.router_top.is_empty()
+            && tops != step.router_top
+        {
+            report.failure = Some(format!("step {index}: Granite top-k routing differs"));
+            break;
+        }
+        if !step.layer_values.is_empty() {
+            for (layer, (actual, expected)) in
+                actual_layers.iter().zip(&step.layer_values).enumerate()
+            {
+                if let Err(e) = crate::verify_hybrid::compare(actual, expected) {
+                    report.failure =
+                        Some(format!("step {index}: first incorrect layer {layer}: {e}"));
+                    break;
+                }
+            }
+        }
+        if !step.expert_values.is_empty() && report.failure.is_none() {
+            for (layer, (actual, expected)) in experts.iter().zip(&step.expert_values).enumerate() {
+                if let Err(e) = crate::verify_hybrid::compare(actual, expected) {
+                    report.failure = Some(format!(
+                        "step {index}: first incorrect expert layer {layer}: {e}"
+                    ));
+                    break;
+                }
+            }
+        }
+        if report.failure.is_some() {
+            break;
         }
         if hybrid {
             match crate::verify_hybrid::compare(&logits, &step.logits) {
@@ -256,7 +360,10 @@ pub fn run(
                 println!("  {} {label}\n      {why}", style.red("FAIL"));
             }
         }
-        if matches!(loaded.model, Engine::Qwen35(_) | Engine::Qwen35Cuda(_)) {
+        if matches!(
+            loaded.model,
+            Engine::Qwen35(_) | Engine::Qwen35Cuda(_) | Engine::Granite(_) | Engine::GraniteCuda(_)
+        ) {
             println!(
                 "      full tensors: max normalized {:.3e}, relative RMS {:.3e}",
                 report.max_tensor_normalized, report.max_tensor_rms
@@ -272,121 +379,5 @@ pub fn run(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use loader::ModelDir;
-    use model::Backend;
-
-    use super::*;
-
-    fn fixture() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-qwen3")
-    }
-
-    #[test]
-    fn tiny_model_matches_the_huggingface_reference() {
-        let dir = ModelDir::open(&fixture()).unwrap();
-        let model = Engine::load(&dir, Backend::Cpu, None, |_, _| {}).unwrap();
-        let reference = read_reference(&fixture().join("reference.json")).unwrap();
-        assert!(!reference.cases.is_empty());
-        for case in &reference.cases {
-            let report = check_case(&model, &dir.tokenizer, case).unwrap();
-            assert_eq!(report.failure, None, "{report:?}");
-            assert!(report.steps > 0);
-            eprintln!(
-                "{:?}: max logit diff {:.3e}, max layer diff {:.3e}",
-                report.prompt, report.max_logit_diff, report.max_norm_diff
-            );
-        }
-    }
-
-    #[test]
-    fn tiny_model_matches_the_huggingface_reference_on_the_gpu() {
-        let selected = match Backend::select(BackendChoice::Cuda, 0, 0) {
-            Ok(selected) => selected,
-            Err(e) if std::env::var_os("MARIN_REQUIRE_CUDA").is_none() => {
-                eprintln!("skipping GPU test: {e}");
-                return;
-            }
-            Err(e) => panic!("{e}"),
-        };
-        let dir = ModelDir::open(&fixture()).unwrap();
-        let model = Engine::load(&dir, selected.backend, None, |_, _| {}).unwrap();
-        let reference = read_reference(&fixture().join("reference.json")).unwrap();
-        for case in &reference.cases {
-            let report = check_case(&model, &dir.tokenizer, case).unwrap();
-            assert_eq!(report.failure, None, "{report:?}");
-            eprintln!(
-                "gpu {:?}: max logit diff {:.3e}, max layer diff {:.3e}",
-                report.prompt, report.max_logit_diff, report.max_norm_diff
-            );
-        }
-    }
-
-    fn load_fixture() -> (ModelDir, Engine, Reference) {
-        let dir = ModelDir::open(&fixture()).unwrap();
-        let model = Engine::load(&dir, Backend::Cpu, None, |_, _| {}).unwrap();
-        let reference = read_reference(&fixture().join("reference.json")).unwrap();
-        (dir, model, reference)
-    }
-
-    fn failure(case: &Case, dir: &ModelDir, model: &Engine) -> String {
-        check_case(model, &dir.tokenizer, case)
-            .unwrap()
-            .failure
-            .unwrap_or_default()
-    }
-
-    #[test]
-    fn a_wrong_logit_in_the_reference_is_caught() {
-        let (dir, model, mut reference) = load_fixture();
-        let case = reference.cases.first_mut().unwrap();
-        case.steps.get_mut(1).unwrap().top.get_mut(0).unwrap().1 += 0.5;
-        assert!(failure(case, &dir, &model).contains("step 1: logit"));
-    }
-
-    #[test]
-    fn a_wrong_greedy_token_in_the_reference_is_caught() {
-        let (dir, model, mut reference) = load_fixture();
-        let case = reference.cases.first_mut().unwrap();
-        let step = case.steps.first_mut().unwrap();
-        step.token = step.token.wrapping_add(1);
-        assert!(failure(case, &dir, &model).contains("step 0"));
-    }
-
-    #[test]
-    fn a_wrong_layer_size_in_the_reference_is_caught() {
-        let (dir, model, mut reference) = load_fixture();
-        let case = reference.cases.first_mut().unwrap();
-        *case.layer_norms.get_mut(1).unwrap() *= 1.01;
-        assert!(failure(case, &dir, &model).contains("layer 1"));
-    }
-
-    #[test]
-    fn a_tokenizer_disagreement_is_caught() {
-        let (dir, model, mut reference) = load_fixture();
-        let case = reference.cases.first_mut().unwrap();
-        case.prompt_ids.push(1);
-        assert!(failure(case, &dir, &model).contains("tokenizer disagrees"));
-    }
-
-    /// `verify` is a greedy reference comparison: it is not a sampler, so no sampler setting or seed can matter,
-    /// and it agrees with the sampler's own temperature-0 path.
-    #[test]
-    fn verification_is_greedy_and_ignores_every_sampling_setting() {
-        use sampler::{Sampler, SamplerConfig};
-        let logits = [0.5_f32, 3.0, 1.0, 3.0, -2.0];
-        assert_eq!(argmax(&logits), Some(1), "ties go to the lowest id");
-        for (top_k, top_p, seed) in [(0, 1.0, 1), (20, 0.8, 2), (2, 0.1, 99)] {
-            let config = SamplerConfig {
-                temperature: 0.0,
-                top_k,
-                top_p,
-                seed,
-            };
-            let picked = Sampler::new(config).unwrap().sample(&logits, 5).unwrap();
-            assert_eq!(Some(picked), argmax(&logits), "{top_k} {top_p} {seed}");
-        }
-    }
-}
+#[path = "verify_tests.rs"]
+mod tests;

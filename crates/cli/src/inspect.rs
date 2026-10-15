@@ -21,6 +21,7 @@ pub fn describe(
     vocab_known: usize,
     ctx: usize,
     fp: &Footprint,
+    moe: bool,
 ) -> String {
     let params = fp.parameters.map_or_else(
         || "unknown".to_string(),
@@ -50,7 +51,9 @@ pub fn describe(
         ),
         (
             "layers",
-            if fp.recurrent > 0 {
+            if moe {
+                format!("{} attention + routed-expert layers", cfg.layers)
+            } else if fp.recurrent > 0 {
                 format!(
                     "{} hybrid recurrent/full-attention layers + MLP",
                     cfg.layers
@@ -77,7 +80,10 @@ pub fn describe(
                 cfg.heads, cfg.kv_heads, cfg.head_dim, ""
             ),
         ),
-        ("mlp size", units::count(cfg.intermediate_size as u64)),
+        (
+            if moe { "expert size" } else { "mlp size" },
+            units::count(cfg.intermediate_size as u64),
+        ),
         (
             "vocabulary",
             format!(
@@ -108,7 +114,7 @@ pub fn describe(
                 )
             } else {
                 format!(
-                    "up to {} for this context, {} before the first token on the GPU   (remembers earlier tokens so they are not recomputed)",
+                    "up to {} for this context, {} initially allocated   (remembers earlier tokens so they are not recomputed)",
                     units::bytes(fp.kv),
                     units::bytes(fp.kv_startup)
                 )
@@ -152,6 +158,7 @@ pub fn run(
             dir.tokenizer.vocab_size(),
             ctx,
             &fp,
+            model::granite::is_granite(&dir.config_json),
         )
     );
     if let Some(scheme) = precision.weights {

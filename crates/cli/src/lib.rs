@@ -21,6 +21,7 @@ pub mod quality_stats;
 pub mod render;
 pub mod repl;
 pub mod restart;
+pub mod server;
 pub mod session;
 pub mod show;
 pub mod signal;

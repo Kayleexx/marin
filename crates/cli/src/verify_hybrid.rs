@@ -1,3 +1,19 @@
+pub(crate) fn l2(values: &[f32]) -> f64 {
+    values
+        .iter()
+        .map(|v| f64::from(*v).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
+pub(crate) fn argmax(logits: &[f32]) -> Option<u32> {
+    let (index, _) = logits
+        .iter()
+        .enumerate()
+        .reduce(|best, next| if next.1 > best.1 { next } else { best })?;
+    u32::try_from(index).ok()
+}
+
 /// Section 34/35 gates apply to every value, including low-ranked logits.
 pub(crate) fn compare(actual: &[f32], expected: &[f32]) -> Result<(f64, f64, f64), String> {
     if actual.len() != expected.len()
@@ -28,6 +44,47 @@ pub(crate) fn compare(actual: &[f32], expected: &[f32]) -> Result<(f64, f64, f64
         ));
     }
     Ok((max_error, normalized, rms))
+}
+
+type GraniteTensors<'a> = (&'a [Vec<f32>], &'a [Vec<usize>], &'a [Vec<f32>]);
+
+pub(crate) fn compare_granite(
+    actual: GraniteTensors<'_>,
+    expected: GraniteTensors<'_>,
+    layers: usize,
+) -> Result<(f64, f64), String> {
+    let (routers, tops, experts) = actual;
+    let (reference_routers, reference_tops, reference_experts) = expected;
+    if routers.len() != layers
+        || tops.len() != layers
+        || experts.len() != layers
+        || reference_routers.len() != layers
+        || reference_tops.len() != layers
+        || reference_experts.len() != layers
+    {
+        return Err("missing full Granite router/expert references".into());
+    }
+    let mut worst = (0.0_f64, 0.0_f64);
+    let pairs = routers
+        .iter()
+        .zip(reference_routers)
+        .zip(experts.iter().zip(reference_experts))
+        .zip(tops.iter().zip(reference_tops));
+    for (layer, ((router, expert), top)) in pairs.enumerate() {
+        for (label, left, right) in [
+            ("router", router.0, router.1),
+            ("experts", expert.0, expert.1),
+        ] {
+            let (_, normalized, rms) = compare(left, right)
+                .map_err(|e| format!("first incorrect {label} layer {layer}: {e}"))?;
+            worst.0 = worst.0.max(normalized);
+            worst.1 = worst.1.max(rms);
+        }
+        if top.0 != top.1 {
+            return Err(format!("Granite layer {layer} top-k routing differs"));
+        }
+    }
+    Ok(worst)
 }
 #[cfg(test)]
 mod tests {

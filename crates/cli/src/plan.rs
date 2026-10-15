@@ -116,6 +116,17 @@ pub(crate) fn build(
     let dir = ModelDir::open(path)?;
     let config = Engine::parse_config(&dir)?;
     let hybrid = model::qwen35::is_qwen35(&dir.config_json);
+    let granite = model::granite::is_granite(&dir.config_json);
+    if granite {
+        if choice == BackendChoice::Cuda && precision.weights.is_some() {
+            return Err(CliError::BadOption(
+                "Granite CUDA currently supports BF16 weights only".into(),
+            ));
+        }
+        if precision.kv != KvFormat::F32 && !kv_follows_backend {
+            return Err(CliError::BadOption("Granite MoE requires FP32 KV".into()));
+        }
+    }
     if hybrid && !kv_follows_backend && precision.kv != KvFormat::F32 {
         return Err(CliError::BadOption("Qwen3.5 requires FP32 state".into()));
     }
@@ -127,12 +138,31 @@ pub(crate) fn build(
             dir.generation_config_json.as_deref(),
         )?;
         model::qwen35::gpu_budget_bytes(&text, ctx)?
+    } else if granite {
+        let c = model::granite::Config::parse(&dir.config_json)?;
+        let workspace = model::granite::gpu_workspace_bytes(&c, ctx)?;
+        let (startup, window) = model::granite::gpu_kv_budget(&c, ctx)?;
+        (
+            startup.saturating_add(workspace),
+            window.saturating_add(workspace),
+        )
     } else {
         (usage.kv_startup, usage.kv_window.max(usage.kv_startup))
     };
     let gpu_startup = usage.weights.saturating_add(startup);
     let gpu_window = usage.weights.saturating_add(window);
-    let mut selected = Backend::select(choice, gpu_startup, gpu_window)?;
+    let mut selected = if granite && choice == BackendChoice::Auto {
+        Selected {
+            backend: Backend::Cpu,
+            note: Some(if precision.weights.is_some() {
+                "Granite CUDA BF16 does not support INT8; using the CPU".into()
+            } else {
+                "Granite CUDA BF16 is experimental; use --backend cuda to select it".into()
+            }),
+        }
+    } else {
+        Backend::select(choice, gpu_startup, gpu_window)?
+    };
     let host_staging = staging_bytes(&dir, precision);
     let mut notes = Vec::new();
     if let Some(note) = selected.note.take() {
@@ -157,7 +187,7 @@ pub(crate) fn build(
         selected.backend = Backend::Cpu;
     }
     if matches!(selected.backend, Backend::Cuda(_)) {
-        if hybrid {
+        if hybrid || granite {
             usage.kv_startup = startup;
             usage.kv_window = window;
         }
@@ -179,7 +209,7 @@ pub(crate) fn build(
                 CliError::BadOption("--kv-type needs the GPU, but no CUDA backend fits".into()),
             ));
         }
-        let cpu_fit = if hybrid {
+        let cpu_fit = if hybrid || granite {
             fit_hybrid_cpu(&dir, &config, requested_ctx, ctx, precision, usage)
         } else {
             usage
@@ -194,7 +224,7 @@ pub(crate) fn build(
         }
     }
     if kv_follows_backend {
-        precision.kv = if hybrid || matches!(selected.backend, Backend::Cpu) {
+        precision.kv = if hybrid || granite || matches!(selected.backend, Backend::Cpu) {
             KvFormat::F32
         } else {
             precision.kv
@@ -266,7 +296,14 @@ fn display(plan: Plan) -> Result<(), CliError> {
     println!("model       {}", plan.dir.path.display());
     println!("artifact    {format}");
     println!("backend     {backend_name}");
-    println!("threads     {} CPU prefill", tensor::threads());
+    if backend_name == "cuda" {
+        println!(
+            "threads     GPU execution; {} CPU fallback prefill",
+            tensor::threads()
+        );
+    } else {
+        println!("threads     {} CPU prefill", tensor::threads());
+    }
     println!("context     {} tokens", plan.ctx);
     println!("weights     {}", units::bytes(plan.footprint.weights));
     if plan.footprint.recurrent > 0 {
@@ -285,7 +322,11 @@ fn display(plan: Plan) -> Result<(), CliError> {
     } else {
         println!("KV window   {}", units::bytes(plan.footprint.kv));
     }
-    println!("workspace   {} full prefill", units::bytes(workspace));
+    if backend_name == "cuda" {
+        println!("CPU work    {} fallback prefill", units::bytes(workspace));
+    } else {
+        println!("workspace   {} full prefill", units::bytes(workspace));
+    }
     println!("safety      {}", units::bytes(model::CPU_SLACK_BYTES));
     println!(
         "CPU-only need {} estimated",

@@ -10,6 +10,7 @@ Examples:
   marin                                 start a session with your default model
   marin run Explain what a mutex is    ask once and print only the reply
   echo \"Say hi in French\" | marin run    read the question from stdin
+  marin --model ~/models/Qwen3.5-4B-Q8 --quantize int8 serve    serve local text requests
   marin model ~/models/Qwen3-1.7B       choose the default chat model
   marin show notes.md                   read a file with formatting, wrapped to your terminal
 
@@ -33,6 +34,12 @@ pub struct MarinCli {
 pub enum MarinCommand {
     /// Ask one question and print only the reply (question from the arguments or stdin)
     Run { prompt: Vec<String> },
+    /// Serve one loaded chat model over a loopback OpenAI-compatible text API
+    Serve {
+        /// Local TCP port (0 asks the OS to choose an available port)
+        #[arg(long, default_value_t = 8000)]
+        port: u16,
+    },
     /// Show the selected backend and memory budget without loading weights
     Plan,
     /// Show a file (or text piped in) in the terminal: markdown, code, json, diffs, tables and logs, nicely

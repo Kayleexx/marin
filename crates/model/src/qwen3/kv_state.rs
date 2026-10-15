@@ -21,7 +21,11 @@ fn unsupported() -> ModelError {
 impl Engine {
     pub fn kv_layout(&self) -> Option<KvLayout> {
         match self {
-            Self::Cpu(_) | Self::Qwen35(_) | Self::Qwen35Cuda(_) => None,
+            Self::Cpu(_)
+            | Self::Qwen35(_)
+            | Self::Qwen35Cuda(_)
+            | Self::Granite(_)
+            | Self::GraniteCuda(_) => None,
             Self::Cuda(m) => {
                 let config = m.config();
                 Some(KvLayout {
@@ -83,9 +87,10 @@ impl Engine {
     ) -> Result<(), ModelError> {
         match cache {
             EngineCache::Cuda(c) => Ok(c.kv_mut().advance(tokens)?),
-            EngineCache::Cpu(_) | EngineCache::Qwen35(_) | EngineCache::Qwen35Cuda(_) => {
-                Err(unsupported())
-            }
+            EngineCache::Cpu(_)
+            | EngineCache::Qwen35(_)
+            | EngineCache::Qwen35Cuda(_)
+            | EngineCache::GraniteCuda(_) => Err(unsupported()),
         }
     }
 
@@ -93,7 +98,10 @@ impl Engine {
     pub fn kv_page_payload_bytes(&self, cache: &EngineCache, rows: usize) -> Option<usize> {
         match cache {
             EngineCache::Cuda(c) => Some(c.kv().page_payload_bytes(rows)),
-            EngineCache::Cpu(_) | EngineCache::Qwen35(_) | EngineCache::Qwen35Cuda(_) => None,
+            EngineCache::Cpu(_)
+            | EngineCache::Qwen35(_)
+            | EngineCache::Qwen35Cuda(_)
+            | EngineCache::GraniteCuda(_) => None,
         }
     }
 }

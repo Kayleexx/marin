@@ -26,7 +26,7 @@ pub fn cpu_workspace_bytes(cfg: &Qwen3Config, tokens: usize) -> Result<u64, Mode
         .ok_or_else(|| ModelError::InvalidConfig("CPU workspace size overflows".into()))
 }
 
-pub(super) fn ensure_available(needed: u64) -> Result<(), ModelError> {
+pub(crate) fn ensure_available(needed: u64) -> Result<(), ModelError> {
     if let Some(available) = metrics::cpu_available_bytes().map_err(ModelError::CpuMemoryInfo)?
         && needed > available
     {
@@ -35,13 +35,23 @@ pub(super) fn ensure_available(needed: u64) -> Result<(), ModelError> {
     Ok(())
 }
 
-pub(super) fn before_growth(
+pub(crate) fn before_growth(
     cfg: &Qwen3Config,
     kv: &KvCache,
     end: usize,
     tokens: usize,
 ) -> Result<(), ModelError> {
     let workspace = cpu_workspace_bytes(cfg, tokens)?;
+    before_growth_with_workspace(cfg, kv, end, tokens, workspace)
+}
+
+pub(crate) fn before_growth_with_workspace(
+    cfg: &Qwen3Config,
+    kv: &KvCache,
+    end: usize,
+    tokens: usize,
+    workspace: u64,
+) -> Result<(), ModelError> {
     let total = KvCache::bytes_for(cfg.layers, cfg.kv_heads, cfg.head_dim, end)
         .ok_or(kv::KvError::Overflow)?;
     let growth = u64::try_from(total.saturating_sub(kv.bytes_initialized()))

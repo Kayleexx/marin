@@ -18,7 +18,8 @@ const KERNELS: &str = concat!(
     include_str!("attention_mma.cu"),
     include_str!("mma.cu"),
     include_str!("quant.cu"),
-    include_str!("qwen35.cu")
+    include_str!("qwen35.cu"),
+    include_str!("granite.cu")
 );
 
 pub(crate) struct Kernels {
@@ -52,6 +53,13 @@ pub(crate) struct Kernels {
     pub q35_split_query: CudaFunction,
     pub q35_partial_rope: CudaFunction,
     pub q35_gate_attention: CudaFunction,
+    pub granite_scale: CudaFunction,
+    pub granite_scaled_add: CudaFunction,
+    pub granite_route: CudaFunction,
+    pub granite_expert_input: CudaFunction,
+    pub granite_silu: CudaFunction,
+    pub granite_expert_output: CudaFunction,
+    pub granite_mix: CudaFunction,
 }
 
 pub struct Gpu {
@@ -184,6 +192,13 @@ impl Gpu {
             q35_split_query: module.load_function("q35_split_query")?,
             q35_partial_rope: module.load_function("q35_partial_rope")?,
             q35_gate_attention: module.load_function("q35_gate_attention")?,
+            granite_scale: module.load_function("granite_scale")?,
+            granite_scaled_add: module.load_function("granite_scaled_add")?,
+            granite_route: module.load_function("granite_route")?,
+            granite_expert_input: module.load_function("granite_expert_input")?,
+            granite_silu: module.load_function("granite_silu")?,
+            granite_expert_output: module.load_function("granite_expert_output")?,
+            granite_mix: module.load_function("granite_mix")?,
         };
         let sm_count = ctx
             .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)?

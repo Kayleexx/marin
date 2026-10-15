@@ -18,6 +18,11 @@ mod workspace;
 
 pub use config::Qwen3Config;
 pub use cpu_memory::{CPU_SLACK_BYTES, cpu_workspace_bytes};
+pub(crate) use cpu_memory::{
+    before_growth as before_cpu_growth,
+    before_growth_with_workspace as before_cpu_growth_with_workspace,
+    ensure_available as ensure_cpu_available,
+};
 
 /// Receives the last token's hidden state before layer 0 (index 0) and after each layer.
 pub type Observer<'a> = Option<&'a mut dyn FnMut(usize, &[f32])>;

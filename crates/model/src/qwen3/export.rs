@@ -16,7 +16,11 @@ pub fn export_int8(dir: &ModelDir, destination: &Path, group: usize) -> Result<(
         ));
     }
     let scheme = QuantScheme::new(QuantBits::Int8, group)?;
-    let expected = if crate::qwen35::is_qwen35(&dir.config_json) {
+    let expected = if crate::granite::is_granite(&dir.config_json) {
+        let config = crate::granite::Config::parse(&dir.config_json)?;
+        crate::granite::weight_bytes(&dir.weights, &config)?;
+        crate::granite::export_tensors(&config)
+    } else if crate::qwen35::is_qwen35(&dir.config_json) {
         let config = crate::qwen35::TextConfig::parse(
             &dir.config_json,
             dir.generation_config_json.as_deref(),
@@ -36,19 +40,19 @@ pub fn export_int8(dir: &ModelDir, destination: &Path, group: usize) -> Result<(
     for (name, shape, codes) in &expected {
         descriptors.push((name.clone(), shape.clone(), *codes));
         if *codes {
-            let [rows, cols] = shape.as_slice() else {
-                return Err(ModelError::Unsupported("quantized matrix shape".into()));
-            };
+            let cols = shape
+                .last()
+                .ok_or_else(|| ModelError::Unsupported("quantized matrix shape".into()))?;
             if cols.checked_rem(group) != Some(0) {
                 return Err(ModelError::Unsupported(
                     "matrix columns are not divisible by quantization group".into(),
                 ));
             }
-            descriptors.push((
-                format!("{name}.scales"),
-                vec![*rows, cols.checked_div(group).unwrap_or(0)],
-                false,
-            ));
+            let mut scale_shape = shape.clone();
+            if let Some(last) = scale_shape.last_mut() {
+                *last = last.checked_div(group).unwrap_or(0);
+            }
+            descriptors.push((format!("{name}.scales"), scale_shape, false));
         }
     }
     let mut writer = PackedWriter::new(&dir.path, destination, group, descriptors)?;
@@ -82,10 +86,11 @@ pub fn export_int8(dir: &ModelDir, destination: &Path, group: usize) -> Result<(
             }),
         );
         if codes {
-            let [rows, cols] = shape.as_slice() else {
-                return Err(ModelError::Unsupported("matrix shape".into()));
-            };
-            let q = quantize(&bits, *rows, *cols, scheme)?;
+            let cols = *shape
+                .last()
+                .ok_or_else(|| ModelError::Unsupported("matrix shape".into()))?;
+            let rows = bits.len().checked_div(cols).unwrap_or(0);
+            let q = quantize(&bits, rows, cols, scheme)?;
             writer.write(&name, [&q.codes])?;
             writer.write(
                 &format!("{}.scales", name),

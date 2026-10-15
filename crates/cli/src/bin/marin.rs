@@ -66,6 +66,25 @@ fn run(cli: MarinCli, style: Style) -> Result<ExitCode, CliError> {
         Some(MarinCommand::Run { prompt }) => {
             one_shot(&prompt.join(" "), &cli.options, home, style)
         }
+        Some(MarinCommand::Serve { port }) => {
+            if cli.options.snapshot.is_some() {
+                return Err(CliError::BadOption(
+                    "--snapshot is not supported by marin serve".into(),
+                ));
+            }
+            let defaults = settings(&cli.options)?;
+            let path = absolute(&choose_model(&cli.options, home.as_ref(), false, style)?);
+            let loaded = load::load_chat(
+                &path,
+                (cli.options.ctx, CHAT_CTX),
+                backend_choice(cli.options.backend),
+                chat_precision(&cli.options)?,
+                &style,
+                (false, false),
+            )?;
+            cli::server::run(loaded, defaults, port)?;
+            Ok(ExitCode::SUCCESS)
+        }
         None => session(&cli.options, home, style),
     }
 }

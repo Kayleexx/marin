@@ -77,7 +77,10 @@ impl Manifest {
         let result: Self = serde_json::from_reader(file).map_err(|e| bad(e.to_string()))?;
         if result.format != FORMAT
             || result.quantizer != QUANTIZER
-            || !matches!(result.architecture.as_str(), "qwen3" | "qwen3_5")
+            || !matches!(
+                result.architecture.as_str(),
+                "qwen3" | "qwen3_5" | "granitemoe"
+            )
             || result.group == 0
             || result.group.checked_rem(32) != Some(0)
         {
@@ -180,7 +183,7 @@ impl PackedWriter {
         let architecture = config
             .get("model_type")
             .and_then(|v| v.as_str())
-            .filter(|s| matches!(*s, "qwen3" | "qwen3_5"))
+            .filter(|s| matches!(*s, "qwen3" | "qwen3_5" | "granitemoe"))
             .ok_or_else(|| bad("unsupported architecture"))?;
         fs::create_dir(&temp).map_err(|e| io(&temp, e))?;
         // Construct the guard before any fallible writes so failed exports clean up too.

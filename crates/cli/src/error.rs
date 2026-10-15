@@ -89,7 +89,7 @@ impl CliError {
                 Some("the file may be a partial download; fetch it again")
             }
             Self::Model(ModelError::UnsupportedModelType { .. }) => {
-                Some("only Qwen3 models work so far; Qwen3-1.7B-Base is the tested one")
+                Some("supported text models are Qwen3, Qwen3.5 and Granite 3.0")
             }
             Self::Model(ModelError::InvalidWeights(_)) => {
                 Some("the download may be incomplete or mix files from different versions")
