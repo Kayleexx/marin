@@ -1,0 +1,115 @@
+# Server history checkpoints, 2026-10-18
+
+RTX 5050 Laptop GPU (8 GB, 40 W limit), Ryzen 7 host, packed
+`/home/mitali/models/Qwen3.5-4B-Q8`, CUDA INT8 group 128, context 512,
+temperature 0, SSE, 32 output tokens. One release-build server process per
+variant, warm model, three sequential ON/OFF pairs per workload; no competing
+CPU benchmark. An ON pair sends `marin_session_id: "new"` then the returned ID;
+an OFF pair omits it. Each turn-two request includes the exact turn-one
+assistant text. TTFT is first nonempty SSE content delta; decode is nonempty
+SSE content events per second after the first, a proxy rather than formal
+engine token/s. Total includes the final SSE chunk. `marin_reused_tokens` is
+the number of earlier tokens skipped, excluding history advanced this turn.
+
+Coding first user prompt: `("Explain Rust ownership, borrowing, lifetimes and
+Send/Sync with a practical example. " * 8).strip()`; follow-up: `Now write
+one small Rust function that illustrates borrowing.` Chat first user prompt:
+`("Explain how to plan a two-day visit to Kyoto while minimizing travel time
+and keeping costs low. " * 8).strip()`; follow-up: `Now adapt that plan for
+rainy weather and a vegetarian traveler.`
+
+| Workload | Variant | Run | Turn 1 total s | Turn 2 TTFT s | Turn 2 total s | Pair total s | Decode events/s | Reused |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| code | replay on | 1 | 3.503 | 0.481 | 2.974 | 6.478 | 40.4 | 170 |
+| code | replay off | 1 | 2.149 | 1.763 | 2.556 | 4.705 | 39.1 | 0 |
+| code | replay on | 2 | 3.541 | 0.463 | 2.993 | 6.533 | 39.2 | 170 |
+| code | replay off | 2 | 2.176 | 1.777 | 2.566 | 4.742 | 39.3 | 0 |
+| code | replay on | 3 | 3.469 | 0.474 | 2.963 | 6.432 | 39.4 | 170 |
+| code | replay off | 3 | 2.123 | 1.761 | 2.555 | 4.678 | 39.0 | 0 |
+| code | checkpoint on | 1 | 2.227 | 0.469 | 1.295 | 3.522 | 37.5 | 170 |
+| code | checkpoint off | 1 | 2.192 | 1.829 | 2.642 | 4.834 | 38.1 | 0 |
+| code | checkpoint on | 2 | 2.203 | 0.501 | 1.292 | 3.495 | 39.2 | 170 |
+| code | checkpoint off | 2 | 2.194 | 1.819 | 2.618 | 4.812 | 38.8 | 0 |
+| code | checkpoint on | 3 | 2.206 | 0.495 | 1.295 | 3.501 | 38.8 | 170 |
+| code | checkpoint off | 3 | 2.200 | 1.823 | 2.618 | 4.818 | 39.0 | 0 |
+| chat | replay on | 1 | 3.704 | 0.504 | 3.121 | 6.825 | 40.3 | 186 |
+| chat | replay off | 1 | 2.272 | 1.912 | 2.683 | 4.955 | 40.2 | 0 |
+| chat | replay on | 2 | 3.709 | 0.481 | 3.095 | 6.804 | 40.3 | 186 |
+| chat | replay off | 2 | 2.265 | 1.915 | 2.692 | 4.957 | 40.0 | 0 |
+| chat | replay on | 3 | 3.702 | 0.481 | 3.107 | 6.809 | 39.8 | 186 |
+| chat | replay off | 3 | 2.383 | 2.036 | 2.827 | 5.210 | 39.2 | 0 |
+| chat | checkpoint on | 1 | 2.362 | 0.524 | 1.288 | 3.650 | 40.6 | 186 |
+| chat | checkpoint off | 1 | 2.328 | 1.970 | 2.745 | 5.073 | 40.0 | 0 |
+| chat | checkpoint on | 2 | 2.338 | 0.510 | 1.302 | 3.640 | 39.1 | 186 |
+| chat | checkpoint off | 2 | 2.320 | 1.968 | 2.753 | 5.073 | 39.5 | 0 |
+| chat | checkpoint on | 3 | 2.342 | 0.511 | 1.309 | 3.651 | 38.9 | 186 |
+| chat | checkpoint off | 3 | 2.303 | 1.972 | 2.765 | 5.068 | 39.1 | 0 |
+
+Greedy turn-one and turn-two text matched ON/OFF in all six pairs in each
+variant. The first coding prompt tokenized to 177 prompt tokens, 170 stable
+history tokens. The chat history reused 186 tokens. The official template
+diverges before the prior assistant reply because Qwen3.5 adds the
+non-thinking generation header, so generated-token state cannot simply be
+kept. The checkpoint is taken after the exact rendered history prefix is
+advanced and before the generation marker; generated-token commits remain
+the ordinary decode loop, with no post-reply commit pass.
+
+One baseline coding pair was profiled with temporary timers and GPU event
+stages, then the instrumentation was removed. Rendering took 10–23 us and
+tokenization 0.3–1.1 ms. The post-reply history rebuild took 1.328 s for
+170 tokens and 1.758 s for 222 tokens. Ordinary generation took
+2.198/1.248 s on turns one/two, including
+1.370/0.480 s prompt passes and 8.7/9.1 ms sampling; the remaining decode
+work already commits generated tokens as needed. There was no separate
+post-reply generated-token commit to remove. GPU stage times for the two
+rebuilds:
+
+| Stage | 170 history tokens | 222 history tokens |
+|---|---:|---:|
+| QKV projections | 303.85 ms | 412.63 ms |
+| MLP | 672.04 ms | 872.46 ms |
+| DeltaNet recurrence | 236.73 ms | 318.70 ms |
+| Output projection | 100.16 ms | 133.66 ms |
+| Convolution | 4.74 ms | 5.69 ms |
+| Full attention | 4.31 ms | 7.84 ms |
+| KV writes | 0.135 ms | 0.163 ms |
+| State transaction copy | 0.312 ms | 0.348 ms |
+
+Each rebuild launched 523 kernels, made 72 device allocations and downloaded
+993,280 logit bytes. Host `sync_wait` was 1.184/1.553 s, chiefly waiting for
+queued model computation; it must not be added to GPU stage times. D2D copy
+bytes are not exposed by current counters. The 4B config implies 51 MiB of
+DeltaNet recurrent/convolution buffers per checkpoint; GPU KV uses 64-token
+pages in eight-page slabs. Admission also counts the cloned page table and
+split-attention scratch, then retains 512 MiB free GPU slack. The extra cache is transient during generation and
+not persisted for another session. A 0.2 s `nvidia-smi` sample during an
+additional coding pair saw at most 4536 MiB process VRAM. After each of the
+three measured coding pairs, process RSS was 275,960 KiB and VmHWM 891,848
+KiB; process VRAM readings were 4504–4536 MiB, a 32 MiB spread. The replay
+chat server was observed at 4536 MiB process VRAM and 275,976 KiB RSS after
+its three pairs. This is process-attributable sampled VRAM, not a continuous
+device peak or an energy measurement.
+
+The real 4B CUDA INT8 checkpoint test compared exact recurrent and KV state
+before mutation, after branching and after restoration, then checked
+continuation logits under the existing model tolerance. The pinned HF case
+still passed (max logit difference 1.31e-5, max layer difference 1.18e-5,
+normalized max 3.879e-6, relative RMS 3.288e-6; exact token choice). A real
+server changed-prefix request reused zero positions and matched fresh greedy
+output; closing a stream and retrying the same bearer ID matched fresh output
+with 69 positions reused; issuing `new` evicted the prior ID (404).
+After adding KV scratch to checkpoint admission, one final release-build
+coding smoke pair remained correct: checkpoint 3.363 s versus fresh 4.518 s,
+170 positions reused, identical greedy text, 275,996 KiB RSS and 4504 MiB
+process VRAM. It is a confirmation run, not part of the three-run medians.
+
+Reproduce with `cargo build --release -p cli --bin marin --locked` and
+`target/release/marin --model /home/mitali/models/Qwen3.5-4B-Q8 --backend
+cuda --quantize int8 --ctx 512 --temp 0 serve --port 8000`. Send the two
+messages above as OpenAI-compatible streamed chat completions with
+`temperature:0,max_tokens:32`. Repeat with `marin_session_id:"new"` on turn
+one and the returned ID on turn two, then without the field for fresh runs.
+Use `/proc/$PID/status` for RSS and `nvidia-smi --query-compute-apps=pid,used_gpu_memory
+--format=csv,noheader` for process VRAM. The pinned reference command is
+`target/release/marin-run verify /home/mitali/models/Qwen3.5-4B-Q8 --backend
+cuda --quantize int8 --reference bench-results/qwen35-4b/hf-int8-128.json`.

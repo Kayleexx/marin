@@ -146,6 +146,114 @@ treated as cancellation, so clients should keep the connection open to read
 the response. A long concurrent-client or adverse-network load test remains
 unverified.
 
+### Gates fixed before session reuse and bounded queuing
+
+- Opt-in bearer session IDs are scoped to one loaded model process. Reuse only
+  when the complete retained token ledger is an exact prefix of the next
+  rendered prompt, with at least one new token. A changed or shorter prompt
+  must report zero reused tokens and match fresh greedy text exactly. IDs
+  from another server instance must not access state.
+- A complete Qwen3.5-4B CUDA INT8 two-turn chat must produce identical greedy
+  text with reuse on/off and exact streamed/non-streamed output. Reused turn 2
+  must skip at least 90% of turn 1's prompt tokens and cut matched, warmed
+  turn-2 TTFT by at least 20% across three runs. Decode throughput must stay
+  within 10%; retain the original HF tolerances and exact token choices.
+- Only one session cache may be resident. New, anonymous, reset or incompatible
+  requests evict before allocating a replacement. Across three repeated
+  turn pairs, second-to-third process RSS and VRAM growth must each stay below
+  128 MiB. No extra model-weight copy or unbudgeted parallel cache is allowed.
+- One request executes while at most two wait in FIFO order. A further
+  connection gets HTTP 503; a queued request older than 10 s or a partially
+  read request older than 10 s fails clearly. At 300 s, active-generation
+  cancellation must be requested and take effect at the next generation
+  boundary. Disconnect, timeout and inference failure must never publish a
+  partially updated session; the next request remains usable. TCP write
+  half-close must still receive a valid response.
+
+### Opt-in server sessions: measured result
+
+RTX 5050 (8 GB), Qwen3.5-4B packed INT8, CUDA, `--ctx 512`, temperature 0,
+32 generated tokens, one 177-token Rust prompt followed by a coding request;
+three sequential matched streaming pairs after model load. No competing
+benchmark ran. `marin_session_id: "new"` enabled reuse; omitting it forced a
+fresh prefill. The full prompt and assistant answer were identical on both
+paths. Detailed per-run values are in the [server archive](docs/benchmarks/archive/04-server-sessions.log).
+
+| Metric (median of three) | Reuse off | Reuse on | Gate |
+|---|---:|---:|---|
+| Turn 1 TTFT | 1.243 s | 1.262 s | Measured |
+| Turn 1 complete response | 2.203 s | 3.436 s | Rebuild costs 1.23 s |
+| Turn 2 TTFT | 1.616 s | 0.422 s | **PASS**, −73.9% |
+| Turn 2 decode event rate | 31.9/s | 32.4/s | **PASS**, +1.6% |
+| Turn 2 complete response | 2.588 s | 2.969 s | Rebuild costs 0.38 s net |
+| Reused positions | 0 | 170/177 first-turn prompt tokens | **PASS**, 96.0% |
+
+All three turn-2 greedy strings matched exactly. VmRSS remained about 269.4
+MiB after model load and across three turn pairs; VmHWM was about 871 MiB.
+Process-attributable `nvidia-smi` VRAM readings were 4440–4472 MiB, a 32 MiB
+spread. The one-slot cache evicts before creating another; failure or
+cancellation never publishes a partial cache. FIFO, 503, read/queue 408,
+stream/non-stream equivalence and TCP write half-close passed fixture tests.
+
+**Historical GO for next-turn TTFT, NO-GO for total latency.** The official
+template diverges before assistant text, and recurrent state cannot roll
+back without replay. Socket-close detection before a non-streamed final
+write remains limited by TCP write half-close. Remote networking, a 300 s
+wall-clock timeout and long-duration load were not tested; the deadline had
+only a 250 ms equivalent unit test. Prior checks and traces are in the
+[server archive](docs/benchmarks/archive/04-server-sessions.log).
+
+## End-to-end session checkpoint gates (set before implementation)
+
+On the same Qwen3.5-4B packed INT8 artifact, RTX 5050, context 512 and
+temperature zero, use three matched two-turn coding pairs and three chat
+pairs, with the exact returned assistant text in turn two. Compare reuse off,
+the replay-based server, and the candidate on a warm model with no competing
+benchmark. Accept only if greedy text and the pinned HF logit tolerances stay
+unchanged; template boundaries, changed-prefix fallback, rollback,
+cancellation, isolation and streaming/non-streaming equality pass. The median
+whole-pair response time must improve at least 10% over reuse off and 20%
+over replay-based reuse. Turn-two TTFT must remain at least 20% below fresh;
+decode event rate must stay within 5% of replay-based reuse. Process RSS and
+VRAM after three pairs may grow less than 128 MiB; checkpoint allocation must
+respect the existing admission slack. Reject the candidate if any of these
+gates fails. Archive raw timings and the measured breakdown separately.
+
+### Measured checkpoint result — GO for Qwen3.5 CUDA sessions
+
+The server now advances only the new rendered history tokens, checkpoints
+Qwen3.5 GPU recurrent/convolution state and attention KV at that boundary,
+then generates from a writable cache. It publishes the checkpoint after a
+successful reply. This preserves the official template without a full
+post-reply replay. Other backends retain the prior refresh behavior.
+RTX 5050, Qwen3.5-4B Q8 CUDA, context 512, 32 output tokens; three matched
+streamed coding and chat pairs per variant, warm model, temperature zero.
+Raw runs and GPU-stage breakdown are in the
+[checkpoint archive](docs/benchmarks/archive/05-server-checkpoints.log).
+
+| Median two-turn metric | Coding replay ON / fresh / checkpoint | Chat replay ON / fresh / checkpoint | Gate |
+|---|---:|---:|---|
+| Whole pair | 6.478 / 4.705 / **3.501 s** | 6.809 / 4.957 / **3.650 s** | **PASS**: checkpoint −46.0%/−46.4% vs replay, −25.6%/−26.4% vs matched fresh baseline |
+| Turn-two TTFT | 0.474 / 1.763 / **0.496 s** | 0.481 / 1.916 / **0.512 s** | **PASS**: −72.8%/−74.0% vs current fresh runs |
+| Turn-two decode SSE events/s | 39.4 / 39.1 / **38.8** | 40.3 / 40.0 / **39.1** | **PASS**: −1.5%/−2.9% vs replay |
+| Earlier positions skipped | 170 / 0 / **170** | 186 / 0 / **186** | **PASS**: current-turn history prefill excluded from count |
+
+Current fresh-run pair medians were 4.818 s coding and 5.073 s chat; the
+table retains the separately measured replay-era fresh baselines to expose
+clock variation. Greedy strings matched on/off in all pairs. The pinned 4B
+CUDA Q8 HF check passed unchanged: exact token, max logit 1.31e−5, max layer
+1.18e−5, normalized max 3.879e−6, relative RMS 3.288e−6. A real-model
+checkpoint test checked exact restored recurrent/KV state and continuation;
+real HTTP changed-prefix fallback, stream-disconnect rollback, session eviction
+and retry matched fresh output. After three coding pairs RSS stayed at
+275,960 KiB and process VRAM varied 4504–4536 MiB; sampled peak was 4536
+MiB. No energy or continuous VRAM peak was measured. Admission retains 512
+MiB GPU slack; low-free-VRAM requests fall back to the replay path. The extra
+cache exists only during an active request, so long-context checkpoint fit
+remains a memory-limit case rather than a promise of speed at every context.
+Full CUDA-required workspace tests, forced-scalar server/model tests, fmt,
+check, Clippy `-D warnings`, line-limit and unsafe checks passed.
+
 ## Results that changed the runtime
 
 | Change | Matched evidence | Decision |

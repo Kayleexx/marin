@@ -1,7 +1,7 @@
 use super::TextConfig;
 use super::gpu_cache::GpuCache;
 use super::gpu_weights::{Layer, load_layers};
-use super::math::size;
+use super::math::{invalid, size};
 use crate::qwen3::weight::Weight;
 use crate::{ModelError, Observer, Qwen3Config};
 use cuda::{Buffer, Gpu, Tokens};
@@ -112,6 +112,13 @@ impl Qwen35Gpu {
     }
     pub fn new_cache(&self, capacity: usize) -> Result<GpuCache, ModelError> {
         GpuCache::new(&self.gpu, &self.config, &self.layers, capacity, self.owner)
+    }
+
+    pub fn checkpoint_cache(&self, cache: &GpuCache) -> Result<GpuCache, ModelError> {
+        if cache.owner != self.owner {
+            return Err(invalid("cache belongs to a different Qwen3.5 GPU model"));
+        }
+        cache.stage(&self.gpu, &self.config, &self.layers)
     }
 
     pub fn forward_observed(

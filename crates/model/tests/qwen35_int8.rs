@@ -1,5 +1,5 @@
 use model::qwen35::Qwen35;
-use model::{QuantBits, QuantScheme, export_int8};
+use model::{Backend, Engine, QuantBits, QuantScheme, export_int8};
 use runtime::{CausalLm, SequenceCache};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -117,5 +117,50 @@ fn corruption_and_wrong_architecture_are_refused_without_overwriting_source() ->
     fs::remove_file(manifest)?;
     let unmarked = loader::ModelDir::open(&path)?;
     assert!(model::qwen35::weight_bytes(&unmarked.weights, None).is_err());
+    Ok(())
+}
+
+#[test]
+fn cuda_history_checkpoint_restores_delta_and_attention_state() -> Result {
+    let gpu = match model::Gpu::new() {
+        Ok(gpu) => gpu,
+        Err(error) if std::env::var_os("MARIN_REQUIRE_CUDA").is_none() => {
+            eprintln!("CUDA unavailable: {error}");
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let temp = Temp::new()?;
+    let source = loader::ModelDir::open(&fixture())?;
+    let path = temp.0.join("q8");
+    export_int8(&source, &path, 32)?;
+    let packed = loader::ModelDir::open(&path)?;
+    let engine = Engine::load(
+        &packed,
+        Backend::Cuda(Box::new(gpu)),
+        Some(scheme()?),
+        |_, _| {},
+    )?;
+    let mut live = engine.new_cache(128)?;
+    let mut fresh = engine.new_cache(128)?;
+    let history: Vec<u32> = (1..66).collect();
+    assert_eq!(
+        engine.forward(&history, &mut live)?,
+        engine.forward(&history, &mut fresh)?
+    );
+    let checkpoint = engine
+        .session_checkpoint(&live)?
+        .ok_or("checkpoint refused")?;
+    engine.forward(&[11, 12, 13], &mut live)?;
+    live = checkpoint;
+    assert_eq!(live.used(), history.len());
+    assert_eq!(
+        engine.forward(&[21, 22], &mut live)?,
+        engine.forward(&[21, 22], &mut fresh)?
+    );
+    assert_eq!(
+        engine.forward(&[23], &mut live)?,
+        engine.forward(&[23], &mut fresh)?
+    );
     Ok(())
 }

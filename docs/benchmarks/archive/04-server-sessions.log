@@ -1,0 +1,60 @@
+# Server sessions, 2026-10-16
+
+Hardware/model: RTX 5050 8 GB; host model
+`/home/mitali/models/Qwen3.5-4B-Q8`; `target/release/marin --model ... --backend cuda
+--quantize int8 --ctx 512 --temp 0 serve --port 8137`. The official Q8
+artifact and one server process were used for each matched set. No other CPU
+benchmark ran concurrently. Linux `/proc/<pid>/status` supplied RSS/HWM;
+`nvidia-smi --query-compute-apps=pid,used_gpu_memory` supplied process VRAM.
+
+Requests: first user message was
+`("Explain Rust ownership, borrowing, lifetimes and Send/Sync with a practical example. " * 8).strip()`;
+second user message was `Now write one small Rust function that illustrates borrowing.`
+The second request included the first assistant's exact text. Both used
+`temperature:0`, `max_tokens:32`, `stream:true`, identical message arrays.
+One path sent `marin_session_id:"new"` and then the returned ID; the other
+omitted it. TTFT is first nonempty SSE content delta after send. Decode event
+rate is `(nonempty content events - 1)/(last - first event time)`; it is an
+event-rate proxy, not an engine-internal token counter. Total is through the
+final SSE chunk, including session refresh. Prompt length was confirmed by
+a separate non-streamed `max_tokens:1` request: 177 tokens.
+
+Matched second-turn runs (seconds, events/s):
+
+| Run | Reuse TTFT | Reuse decode | Reuse total | Fresh TTFT | Fresh decode | Fresh total | Reused | Text equal |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 0.415 | 33.0 | 2.942 | 1.617 | 32.4 | 2.575 | 170 | yes |
+| 2 | 0.422 | 32.1 | 2.969 | 1.616 | 31.9 | 2.588 | 170 | yes |
+| 3 | 0.440 | 32.4 | 3.026 | 1.639 | 31.9 | 2.610 | 170 | yes |
+
+Separate matched first-turn runs:
+
+| Run | Fresh TTFT | Fresh total | Session TTFT | Session total | Fresh/session decode events/s | Text equal |
+|---|---:|---:|---:|---:|---|---|
+| 1 | 1.255 | 2.195 | 1.249 | 3.409 | 33.0 / 32.1 | yes |
+| 2 | 1.243 | 2.208 | 1.269 | 3.444 | 32.1 / 32.2 | yes |
+| 3 | 1.231 | 2.203 | 1.262 | 3.436 | 31.9 / 32.0 | yes |
+
+The three turn-pair cycle RSS readings were each 269.43 MiB. Process VRAM
+readings were 4472, 4440 and 4472 MiB. A separate six-first-turn run ended
+at 269.54 MiB RSS and 871.14 MiB VmHWM, including model startup. The process
+VRAM variation was 32 MiB. No reliable per-request energy sample was taken.
+
+Failure and correctness observations: the first implementation retained the
+post-generation cache and reused zero positions on real 4B because the
+official next-turn template diverges four tokens before the prior answer.
+Rebuilding only the rendered message-history prefix after generation made
+170 positions reusable. The tiny fixture independently showed exact
+stream/non-stream output equality, changed-prefix fresh fallback, old-ID
+eviction, write-half-close response, bounded FIFO 503, and 408 read/queue
+timeouts. A forced streaming disconnect followed by a same-ID retry matched
+the prior fresh answer in five consecutive focused runs. A full disconnect
+cancels on a streaming write failure; an EOF by
+itself is a valid write half-close and is not treated as cancellation.
+
+Reproduction sketch: launch the command above; POST the first message with
+`marin_session_id:"new"` and `stream:true`; copy the final SSE chunk's
+`marin_session_id` and full assistant content into a second POST containing
+both prior messages and the follow-up user message. Repeat that second POST
+without the ID for a fresh comparison. Three cycles were run sequentially;
+each cycle used a new first-turn session and then an anonymous fresh request.

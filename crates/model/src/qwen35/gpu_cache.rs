@@ -118,6 +118,10 @@ impl GpuCache {
             })
     }
 
+    pub fn checkpoint_bytes(&self) -> usize {
+        self.bytes_held().saturating_add(self.kv.auxiliary_bytes())
+    }
+
     pub fn kv_held(&self) -> (usize, usize) {
         (self.kv.pages_held(), self.bytes_held())
     }

@@ -83,9 +83,9 @@ fn visible_answer(content: &str) -> &str {
         .trim_start_matches('\n')
 }
 
-/// Qwen3's official chat template for non-thinking mode, ending with the assistant-generation marker.
-/// `specials` are the tokenizer's special-token strings, neutralized inside message text.
-pub fn render(messages: &[Message], specials: &[String]) -> Result<String, ChatError> {
+/// Render complete messages without the next assistant-generation marker.
+/// `specials` are neutralized inside message text.
+pub fn render_history(messages: &[Message], specials: &[String]) -> Result<String, ChatError> {
     let last = messages.last().ok_or(ChatError::Empty)?;
     if last.role != Role::User {
         return Err(ChatError::MustEndWithUser);
@@ -102,6 +102,12 @@ pub fn render(messages: &[Message], specials: &[String]) -> Result<String, ChatE
             neutralize(content, specials)
         ));
     }
+    Ok(out)
+}
+
+/// Qwen3's official non-thinking chat template, ending with the assistant-generation marker.
+pub fn render(messages: &[Message], specials: &[String]) -> Result<String, ChatError> {
+    let mut out = render_history(messages, specials)?;
     out.push_str(&format!("{START}assistant\n{NO_THINKING}"));
     Ok(out)
 }

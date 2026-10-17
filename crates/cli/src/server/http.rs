@@ -1,5 +1,6 @@
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
+use std::time::Instant;
 
 use serde_json::Value;
 
@@ -23,11 +24,37 @@ impl From<io::Error> for RequestError {
     }
 }
 
-pub(super) fn read(stream: &mut TcpStream) -> Result<Option<Request>, RequestError> {
+fn read_before(
+    stream: &mut TcpStream,
+    chunk: &mut [u8],
+    start: Instant,
+) -> Result<usize, RequestError> {
+    let remaining = super::queue::READ_LIMIT
+        .checked_sub(start.elapsed())
+        .filter(|time| !time.is_zero())
+        .ok_or(RequestError::Bad(408, "request read timed out"))?;
+    stream.set_read_timeout(Some(remaining))?;
+    match stream.read(chunk) {
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            ) =>
+        {
+            Err(RequestError::Bad(408, "request read timed out"))
+        }
+        result => result.map_err(RequestError::Io),
+    }
+}
+
+pub(super) fn read(
+    stream: &mut TcpStream,
+    start: Instant,
+) -> Result<Option<Request>, RequestError> {
     let mut raw = Vec::new();
     let mut chunk = [0_u8; 4096];
     let header_end = loop {
-        let count = stream.read(&mut chunk)?;
+        let count = read_before(stream, &mut chunk, start)?;
         if count == 0 {
             return if raw.is_empty() {
                 Ok(None)
@@ -99,7 +126,7 @@ pub(super) fn read(stream: &mut TcpStream) -> Result<Option<Request>, RequestErr
     }
     let target = header_end.saturating_add(length);
     while raw.len() < target {
-        let count = stream.read(&mut chunk)?;
+        let count = read_before(stream, &mut chunk, start)?;
         if count == 0 {
             return Err(RequestError::Bad(400, "incomplete HTTP body"));
         }
@@ -118,11 +145,14 @@ pub(super) fn json(stream: &mut TcpStream, status: u16, body: &Value) -> io::Res
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        408 => "Request Timeout",
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Content Too Large",
         415 => "Unsupported Media Type",
         431 => "Request Header Fields Too Large",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
         _ => "Internal Server Error",
     };
     write!(

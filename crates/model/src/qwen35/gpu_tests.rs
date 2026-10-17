@@ -181,6 +181,18 @@ fn gpu_sessions_replay_reset_and_late_failure_are_transactional() -> Result {
         );
         assert_eq!(contents(&model, &independent)?, original);
 
+        let original_history = contents(&model, &whole)?;
+        let checkpoint = model.checkpoint_cache(&whole)?;
+        assert_eq!(contents(&model, &checkpoint)?, original_history);
+        model.forward(&[53], &mut whole)?;
+        whole = checkpoint;
+        assert_eq!(contents(&model, &whole)?, original_history);
+        close(
+            &model.forward(&[5], &mut whole)?,
+            &model.forward(&[5], &mut split)?,
+            "checkpoint continuation",
+        );
+
         whole.truncate(3)?;
         let edited = [21, 27, 31, 50, 51];
         let replay = model.forward(&edited[3..], &mut whole)?;

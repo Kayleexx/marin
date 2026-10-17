@@ -75,23 +75,43 @@ FP32 precision. Qwen3 GPU chat uses FP16 KV by default; CPU KV is FP32.
 `marin serve` loads one chat model once and accepts sequential requests on
 `127.0.0.1` only. It supports OpenAI-style `/v1/models` and
 `/v1/chat/completions` with string messages, non-streaming JSON or SSE token
-streaming. A fresh inference cache isolates each request. It does not batch,
-retain server-side conversations, execute tools, accept multimodal content or
-provide network authentication; keep it on loopback. Snapshots are unavailable
-in server mode and `--snapshot` is rejected.
+streaming. Anonymous requests use a fresh inference cache. It does not batch,
+execute tools, accept multimodal content or provide network authentication;
+keep it on loopback. Snapshots are unavailable in server mode and `--snapshot`
+is rejected. Opt-in sessions retain one conversation prefix in memory; a new
+session or anonymous request evicts the previous one.
 
 ```bash
 marin --model ~/models/Qwen3.5-4B-Q8 --backend cuda --quantize int8 \
-  --ctx 256 serve --port 8000
+  --ctx 512 serve --port 8000
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"Qwen3.5-4B-Q8","messages":[{"role":"user","content":"Say hello."}],"temperature":0,"max_tokens":32}'
+  -d '{"model":"Qwen3.5-4B-Q8","messages":[{"role":"user","content":"Say hello."}],"temperature":0,"max_tokens":32,"marin_session_id":"new"}'
 ```
 
-Add `"stream":true` for `text/event-stream` chunks ending in `[DONE]`.
-Client disconnects cancel at the next generated-token callback. As with the
-CLI, request length and the selected context window are checked before
-inference. One request runs at a time; other clients wait.
+Save the returned `marin_session_id` and send it with the full conversation,
+including Marin's prior assistant text, on the next request. For example:
+
+```json
+{"model":"Qwen3.5-4B-Q8","marin_session_id":"<returned 32-character ID>","messages":[{"role":"user","content":"Say hello."},{"role":"assistant","content":"Hello!"},{"role":"user","content":"Now explain why."}],"temperature":0,"max_tokens":32}
+```
+
+`marin_reused_tokens` reports exact token-prefix reuse; a changed prefix
+starts fresh. IDs are bearer secrets scoped to this server process; an evicted
+or unknown ID returns 404. `"new"` resets the one retained slot. Sessions
+reuse attention KV and Qwen3.5 recurrent/convolution state. To preserve the
+official multi-turn template, Qwen3.5 CUDA checkpoints the stable history
+before generation and avoids replaying it after the reply. Other backends
+still rebuild that history after each opt-in turn.
+
+Add `"stream":true` for `text/event-stream` chunks ending in `[DONE]`;
+the final chunk includes the session ID and reuse count. TCP write half-close
+still permits a response. One request runs while at most two wait; further
+connections receive 503. Queued and partial-read requests time out after
+10 seconds; generation requests cancellation after 300 seconds, effective
+at the next model boundary. The 1 MiB body and selected context limits still
+apply. A failed or cancelled turn never publishes partial state; a session
+may be evicted and need `"new"` again.
 
 ## Useful controls
 

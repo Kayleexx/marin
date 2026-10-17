@@ -26,7 +26,7 @@ impl Server {
                 "--backend",
                 "cpu",
                 "--ctx",
-                "128",
+                "256",
                 "--temp",
                 "0",
                 "serve",
@@ -66,6 +66,21 @@ impl Server {
             "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{content}",
             content.len()
         )?;
+        let mut response = String::new();
+        socket.read_to_string(&mut response)?;
+        Ok(response)
+    }
+
+    fn half_closed_request(&self, body: &Value) -> io::Result<String> {
+        let mut socket = TcpStream::connect(&self.address)?;
+        socket.set_read_timeout(Some(Duration::from_secs(10)))?;
+        let content = body.to_string();
+        write!(
+            socket,
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{content}",
+            content.len()
+        )?;
+        socket.shutdown(Shutdown::Write)?;
         let mut response = String::new();
         socket.read_to_string(&mut response)?;
         Ok(response)
@@ -207,5 +222,151 @@ fn serve_rejects_unsupported_snapshot_before_loading() -> io::Result<()> {
         .output()?;
     assert!(!output.status.success());
     assert!(text(&output.stderr).contains("--snapshot is not supported by marin serve"));
+    Ok(())
+}
+
+#[test]
+fn sessions_reuse_exact_prefix_and_half_close_works() -> Result<(), Box<dyn std::error::Error>> {
+    let server = Server::start()?;
+    let mut first = json!({"model":"tiny-chat","messages":[{"role":"user","content":"the cat sat"}],"max_tokens":6,"temperature":0,"marin_session_id":"new"});
+    let first_response = server.half_closed_request(&first)?;
+    assert!(
+        first_response.starts_with("HTTP/1.1 200"),
+        "{first_response}"
+    );
+    let first_body = body(&first_response)?;
+    let id = first_body["marin_session_id"]
+        .as_str()
+        .ok_or("missing session id")?;
+    assert_eq!(id.len(), 32);
+    let answer = first_body["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or("missing answer")?;
+    first["messages"] = json!([
+        {"role":"user","content":"the cat sat"},
+        {"role":"assistant","content":answer},
+        {"role":"user","content":"what next?"}
+    ]);
+    first["marin_session_id"] = json!(id);
+    let reused = body(&server.request("POST", "/v1/chat/completions", Some(&first))?)?;
+    assert_eq!(reused["marin_session_id"], id, "{reused}");
+    assert!(
+        reused["marin_reused_tokens"].as_u64().unwrap_or(0) > 0,
+        "{reused}"
+    );
+    first["stream"] = json!(true);
+    let streamed = server.request("POST", "/v1/chat/completions", Some(&first))?;
+    let mut pieces = String::new();
+    let mut final_chunk = Value::Null;
+    for event in streamed
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+    {
+        if event == "[DONE]" {
+            continue;
+        }
+        let value: Value = serde_json::from_str(event)?;
+        if let Some(piece) = value["choices"][0]["delta"]["content"].as_str() {
+            pieces.push_str(piece);
+        }
+        if !value["choices"][0]["finish_reason"].is_null() {
+            final_chunk = value;
+        }
+    }
+    assert_eq!(pieces, reused["choices"][0]["message"]["content"]);
+    assert_eq!(final_chunk["marin_session_id"], id);
+    assert!(final_chunk["marin_reused_tokens"].as_u64().unwrap_or(0) > 0);
+    first["max_tokens"] = json!(64);
+    let content = first.to_string();
+    let mut abandoned = TcpStream::connect(&server.address)?;
+    write!(
+        abandoned,
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{content}",
+        content.len()
+    )?;
+    abandoned.shutdown(Shutdown::Both)?;
+    first["max_tokens"] = json!(6);
+    first
+        .as_object_mut()
+        .ok_or("bad test request")?
+        .remove("stream");
+    let retry = body(&server.request("POST", "/v1/chat/completions", Some(&first))?)?;
+    assert_eq!(retry["choices"], reused["choices"]);
+    first["messages"][0]["content"] = json!("a different first turn");
+    let changed = body(&server.request("POST", "/v1/chat/completions", Some(&first))?)?;
+    assert_eq!(changed["marin_reused_tokens"], 0);
+    first
+        .as_object_mut()
+        .ok_or("bad test request")?
+        .remove("marin_session_id");
+    let fresh = body(&server.request("POST", "/v1/chat/completions", Some(&first))?)?;
+    assert_eq!(changed["choices"], fresh["choices"]);
+    first["marin_session_id"] = json!(id);
+    assert!(
+        server
+            .request("POST", "/v1/chat/completions", Some(&first))?
+            .starts_with("HTTP/1.1 404")
+    );
+    Ok(())
+}
+
+#[test]
+fn full_queue_returns_overload_and_waiters_remain_fifo() -> Result<(), Box<dyn std::error::Error>> {
+    let server = Server::start()?;
+    let mut active = TcpStream::connect(&server.address)?;
+    active.write_all(b"GET /v1/models HTTP/1.1\r\n")?;
+    std::thread::sleep(Duration::from_millis(100));
+    let mut waiting = Vec::new();
+    for _ in 0..2 {
+        let mut socket = TcpStream::connect(&server.address)?;
+        socket.set_read_timeout(Some(Duration::from_secs(10)))?;
+        socket.write_all(b"GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+        waiting.push(socket);
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let overload = server
+        .request("GET", "/v1/models", None)
+        .map_err(|e| io::Error::other(format!("overload: {e}")))?;
+    assert!(overload.starts_with("HTTP/1.1 503"), "{overload}");
+    active.write_all(b"Host: localhost\r\n\r\n")?;
+    active.shutdown(Shutdown::Write)?;
+    let mut active_response = String::new();
+    active
+        .read_to_string(&mut active_response)
+        .map_err(|e| io::Error::other(format!("active: {e}")))?;
+    assert!(active_response.starts_with("HTTP/1.1 200"));
+    for mut socket in waiting {
+        let mut response = String::new();
+        socket
+            .read_to_string(&mut response)
+            .map_err(|e| io::Error::other(format!("waiting: {e}")))?;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    }
+    Ok(())
+}
+
+#[test]
+fn partial_read_times_out_and_queued_request_completes() -> Result<(), Box<dyn std::error::Error>> {
+    let server = Server::start()?;
+    let mut active = TcpStream::connect(&server.address)?;
+    active.set_read_timeout(Some(Duration::from_secs(15)))?;
+    active.write_all(b"GET /v1/models HTTP/1.1\r\n")?;
+    std::thread::sleep(Duration::from_millis(100));
+    let mut queued = TcpStream::connect(&server.address)?;
+    queued.set_read_timeout(Some(Duration::from_secs(15)))?;
+    queued.write_all(b"GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+    let mut active_response = String::new();
+    active.read_to_string(&mut active_response)?;
+    assert!(
+        active_response.starts_with("HTTP/1.1 408"),
+        "{active_response}"
+    );
+    let mut queued_response = String::new();
+    queued.read_to_string(&mut queued_response)?;
+    // This request arrives near the shared deadline; either status is valid.
+    assert!(
+        queued_response.starts_with("HTTP/1.1 200") || queued_response.starts_with("HTTP/1.1 408"),
+        "{queued_response}"
+    );
     Ok(())
 }

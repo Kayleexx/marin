@@ -11,6 +11,8 @@ use super::fit::{GPU_SLACK_BYTES, GpuFit, gpu_fit};
 use super::gpu::{GpuCache, Qwen3Gpu};
 use super::model::Qwen3;
 use crate::ModelError;
+#[path = "engine_session.rs"]
+mod session;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendChoice {

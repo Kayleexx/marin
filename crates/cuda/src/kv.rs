@@ -143,6 +143,15 @@ impl DeviceKv {
             .saturating_mul(self.slab_bytes())
     }
 
+    /// Split-attention scratch and page table allocated again by `clone_prefix`.
+    pub fn auxiliary_bytes(&self) -> usize {
+        self.partial_acc
+            .len()
+            .saturating_add(self.partial_ml.len())
+            .saturating_mul(size_of::<f32>())
+            .saturating_add(self.page_ptrs.len().saturating_mul(size_of::<u64>()))
+    }
+
     /// GPU memory a cache for `capacity` positions needs before its first token: the first slab, the page table and the
     /// split-attention scratch. The rest of the window is allocated as the sequence grows.
     pub fn startup_bytes(

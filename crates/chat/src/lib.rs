@@ -4,7 +4,7 @@ mod conversation;
 mod qwen3;
 
 pub use conversation::{Conversation, FitError, fit};
-pub use qwen3::{ChatError, ModelKind, classify, render};
+pub use qwen3::{ChatError, ModelKind, classify, render, render_history};
 
 pub const DEFAULT_SYSTEM: &str = "You are Marin, a private assistant that runs on the user's own machine. Be friendly, clear and concise.";
 
