@@ -12,4 +12,4 @@ pub mod raw;
 pub mod screen;
 pub mod splash;
 mod switch;
-mod view;
+pub(crate) mod view;

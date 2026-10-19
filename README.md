@@ -81,7 +81,7 @@ concurrent requests share one GPU pass (up to three). Every other
 backend runs one request at a time. It supports OpenAI-style `/v1/models` and
 `/v1/chat/completions` with string messages, non-streaming JSON or SSE token
 streaming. Anonymous requests use a fresh inference cache. It does not batch prompts,
-execute tools, accept multimodal content or provide network authentication;
+execute tools (`marin code` is a client that reads files itself), accept multimodal content or provide network authentication;
 keep it on loopback. Snapshots are unavailable in server mode and `--snapshot`
 is rejected. Opt-in sessions retain one conversation prefix in memory; a new
 session or anonymous request evicts the previous one.
@@ -110,13 +110,44 @@ before generation and avoids replaying it after the reply. Other backends
 still rebuild that history after each opt-in turn.
 
 Add `"stream":true` for `text/event-stream` chunks ending in `[DONE]`;
-the final chunk includes the session ID and reuse count. TCP write half-close
+the final chunk includes the session ID, reuse count and token usage; `/v1/models` reports the context window. TCP write half-close
 still permits a response. At most two requests wait beyond those running;
 further connections receive 503. A session ID in use by another request returns 404. Queued and partial-read requests time out after
 10 seconds; generation requests cancellation after 300 seconds, effective
 at the next model boundary. The 1 MiB body and selected context limits still
 apply. A failed or cancelled turn never publishes partial state; a session
 may be evicted and need `"new"` again.
+
+## Coding assistant (V0, read-only)
+
+`marin code` is a terminal client for a running `marin serve`: ask questions about
+a project and the model reads it with three tools, shown as quiet `›` lines.
+It cannot write files, run commands or leave the project folder.
+
+```bash
+# terminal 1: a server with room for tool output (8k context is a good start)
+marin --model ~/models/Qwen3.5-4B-Q8 --backend cuda --quantize int8 --ctx 8192 serve
+# terminal 2: from the project you want to ask about
+marin code            # or: marin code ~/dev/project --port 8000
+```
+
+- Tools: `list_files` (a folder, up to 3 levels), `read_file` (numbered lines,
+  250 at a time, with the line to continue from) and `search` (literal text,
+  `a|b` for either, case-insensitive unless the pattern has capitals). Results are
+  bounded by the context size; binary, huge and unreadable files are reported, not
+  shown. Symlinks are never followed out of the project and `..` or absolute paths
+  outside it are refused. File text cannot pose as tool markup.
+- Keys: Enter sends, Alt+Enter adds a line, ↑ ↓ recall questions, Ctrl-C stops an
+  answer (or clears the line, or leaves when it is empty), Ctrl-D leaves. `/clear`
+  starts over, `/help` lists commands. Piped input is read one question per line.
+- The conversation stays in the model's window. When it grows too large, old tool
+  output is shortened first, then the oldest questions are dropped, and a note says so.
+  A failed or cancelled question leaves no trace. `--log FILE` appends every request
+  and tool call as JSON lines.
+- A 4B model is unreliable at this: it can answer single-lookup questions well, but
+  it sometimes breaks the call format, wanders on questions that span files, and can
+  state that code is missing when it simply did not look in the right place. Check
+  its `path:line` citations; the measured results are in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Useful controls
 

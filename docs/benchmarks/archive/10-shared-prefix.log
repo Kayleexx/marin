@@ -164,3 +164,35 @@ MARIN_REQUIRE_CUDA=1 (real-model tests enabled) and with MARIN_MATMUL_SCALAR=1:
 649 passed, 0 failed, 5 ignored each (646 before plus the three new tests). Pinned
 HF verify unchanged: max logit 1.31e-5, max layer 1.18e-5, normalized max 3.879e-6,
 relative RMS 3.288e-6.
+
+
+## Verbatim BENCHMARKS.md sections before the Coding V0 consolidation (2026-10-19)
+
+## V8 batched prompt prefill — NO-GO, not built
+
+Prefill is a flat 7.1–7.7 ms/token from 8 tokens (82% matmul, 17% recurrence, <2%
+launches/state/sync), so one pass over two prompts' rows cost −8% to +13% versus
+two passes, against a >= 10% gate ([archive](docs/benchmarks/archive/09-batched-prefill.log)).
+
+## V9 shared prompt prefix — GO for Qwen3.5 CUDA
+
+Gates fixed first ([archive](docs/benchmarks/archive/10-shared-prefix.log)). Every
+default-system request starts with the same 31 token IDs; a user message beginning
+with a newline merges with the last one, so requests are matched by token ID.
+Restoring a stored prefix cache costs 0.45 ms against 239 ms to recompute, and the
+restored cache plus tail gives bit-identical logits. The server builds one
+immutable cache at start (200 ms, 87 MiB) and each matching request starts from a
+copy; others take the old path. Interleaved A/B, 3 sessions each:
+
+| Scenario | Before | After |
+|---|---:|---:|
+| Solo short TTFT p50 / total | 0.333 / 0.581 s | **0.112 / 0.296 s** |
+| 3 short: TTFT p50 / p95; mean completion | 0.60 / 0.99 s; 1.51 s | **0.24 / 0.30 s; 0.81 s** |
+| Custom system message (no match) TTFT p50 | 0.430 s | 0.430 s |
+| 3 decoders events/s; long + 2 short long job | 55.7; 13.71 s | 61.7; 13.08 s |
+
+Greedy text identical in all 36 runs; session pairs (170/186 reused), isolation,
+cancellation and 200/404 behavior match the old server field for field; process
+VRAM +0–64 MiB (gate 128). Next: 16 tokens of real prefill remain (user text and
+9-token tail) at 7.5 ms/token; other system messages get no prefix.
+

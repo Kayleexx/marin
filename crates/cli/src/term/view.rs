@@ -39,7 +39,7 @@ pub(super) fn stop_label(stop: StopReason) -> &'static str {
 
 /// The prompt line and the cursor column. Long input scrolls so the cursor stays visible,
 /// measured in terminal columns so wide characters never push the cursor off the line.
-pub(super) fn input_line(editor: &Editor, prefix: &str, columns: usize) -> (String, usize) {
+pub(crate) fn input_line(editor: &Editor, prefix: &str, columns: usize) -> (String, usize) {
     let chars: Vec<char> = editor
         .chars()
         .iter()

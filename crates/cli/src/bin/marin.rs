@@ -66,6 +66,12 @@ fn run(cli: MarinCli, style: Style) -> Result<ExitCode, CliError> {
         Some(MarinCommand::Run { prompt }) => {
             one_shot(&prompt.join(" "), &cli.options, home, style)
         }
+        Some(MarinCommand::Code { path, port, log }) => cli::code::run(cli::code::Options {
+            path,
+            port,
+            log,
+            no_color: cli.options.no_color,
+        }),
         Some(MarinCommand::Serve { port }) => {
             if cli.options.snapshot.is_some() {
                 return Err(CliError::BadOption(

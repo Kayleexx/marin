@@ -11,6 +11,7 @@ Examples:
   marin run Explain what a mutex is    ask once and print only the reply
   echo \"Say hi in French\" | marin run    read the question from stdin
   marin --model ~/models/Qwen3.5-4B-Q8 --quantize int8 serve    serve local text requests
+  marin code                            chat about the code in this folder (needs `marin serve` running)
   marin model ~/models/Qwen3-1.7B       choose the default chat model
   marin show notes.md                   read a file with formatting, wrapped to your terminal
 
@@ -39,6 +40,17 @@ pub enum MarinCommand {
         /// Local TCP port (0 asks the OS to choose an available port)
         #[arg(long, default_value_t = 8000)]
         port: u16,
+    },
+    /// Ask questions about a code project; the assistant reads it with search, list and read tools (needs `marin serve`)
+    Code {
+        /// Project folder to look at [default: the current directory]
+        path: Option<PathBuf>,
+        /// Port of the running `marin serve`
+        #[arg(long, default_value_t = 8000)]
+        port: u16,
+        /// Append every model request and tool call to this file as JSON lines
+        #[arg(long, value_name = "FILE")]
+        log: Option<PathBuf>,
     },
     /// Show the selected backend and memory budget without loading weights
     Plan,

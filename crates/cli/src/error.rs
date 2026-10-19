@@ -58,6 +58,8 @@ pub enum CliError {
     NotComparable(String),
     #[error("cannot write {path}: {reason}")]
     Output { path: String, reason: String },
+    #[error(transparent)]
+    Code(#[from] crate::code::CodeError),
     #[error("the model does not match the reference output")]
     VerifyFailed,
 }
@@ -130,6 +132,7 @@ impl CliError {
             Self::Output { .. } => {
                 Some("check that the folder exists and that you can write to it")
             }
+            Self::Code(e) => e.hint(),
             Self::VerifyFailed => Some("the lines above show the first step that disagrees"),
             _ => None,
         }

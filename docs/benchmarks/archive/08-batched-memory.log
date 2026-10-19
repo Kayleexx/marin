@@ -210,3 +210,26 @@ clients TTFT p95 1.07 → 1.09 s, mean completion 2.05 → 1.60 s; long job 14.3
 after a failed batch differs by 5.7e-6 in logits (same token, not bit-exact). HF
 check, isolation, cancellation, sessions, CUDA/scalar tests hold.
 
+
+
+## Verbatim BENCHMARKS.md section before the Coding V0 consolidation (2026-10-19)
+
+## V7/V7c multi-request serving — GO for Qwen3.5 CUDA
+
+Archives: [scheduling](docs/benchmarks/archive/06-server-scheduling.log),
+[batched decode](docs/benchmarks/archive/07-batched-decode.log),
+[memory](docs/benchmarks/archive/08-batched-memory.log). Up to 3 request threads;
+GPU passes go through a gate one at a time, prompts in 64-token slices (bit-identical
+to one pass), decode steps of up to 3 requests share one `forward_batch` pass
+(N-token Q8 matvec, caches updated in place; a pass that fails after writing marks
+the batch for replay from the token ledger, 5.7e-6 from incremental decoding).
+
+| Qwen3.5-4B Q8 CUDA, 128 tokens/client | V7 sequential | Batched |
+|---|---:|---:|
+| 1 / 2 / 3 decoders, events/s | 29.5 / 29.1 / 29.0 | 29.3 / 44.5 / **54.5 (1.88x)** |
+| Long + 2 short: short TTFT p50 / p95 | rejected (408) | 0.47 / 0.87 s |
+| 3 short: mean completion; process VRAM growth | 2.05 s | 1.60 s; <= 0 MiB (gate 128) |
+
+Greedy text equals the sequential server's in every run; HF check, isolation,
+cancellation, session pairs and CUDA/scalar tests hold. Engine ceiling 2.35x at B = 3.
+

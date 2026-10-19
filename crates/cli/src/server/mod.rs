@@ -58,7 +58,7 @@ fn connection(ctx: Context<'_>, stream: &mut TcpStream, id: u64) -> io::Result<(
         ("GET", "/v1/models") => http::json(
             stream,
             200,
-            &json!({"object":"list","data":[{"id":ctx.loaded.name,"object":"model"}]}),
+            &json!({"object":"list","data":[{"id":ctx.loaded.name,"object":"model","context_window":ctx.loaded.ctx}]}),
         ),
         ("POST", "/v1/chat/completions") => completion(ctx, stream, id, &request.body),
         (_, "/v1/models" | "/v1/chat/completions") => send_error(stream, 405, "method not allowed"),

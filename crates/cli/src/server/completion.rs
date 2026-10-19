@@ -270,6 +270,14 @@ pub(super) fn completion(
         );
         if let Some(fields) = final_chunk.as_object_mut() {
             fields.insert("marin_reused_tokens".into(), json!(reused));
+            fields.insert(
+                "usage".into(),
+                json!({
+                    "prompt_tokens": outcome.prompt_tokens,
+                    "completion_tokens": outcome.generated,
+                    "total_tokens": outcome.prompt_tokens.saturating_add(outcome.generated)
+                }),
+            );
             if persistent {
                 fields.insert("marin_session_id".into(), json!(active.id.as_str()));
             }

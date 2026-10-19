@@ -200,50 +200,57 @@ check, Clippy `-D warnings`, line-limit and unsafe checks passed.
 
 ## V7/V7c multi-request serving — GO for Qwen3.5 CUDA
 
-Archives: [scheduling](docs/benchmarks/archive/06-server-scheduling.log),
-[batched decode](docs/benchmarks/archive/07-batched-decode.log),
-[memory](docs/benchmarks/archive/08-batched-memory.log). Up to 3 request threads;
-GPU passes go through a gate one at a time, prompts in 64-token slices (bit-identical
-to one pass), decode steps of up to 3 requests share one `forward_batch` pass
-(N-token Q8 matvec, caches updated in place; a pass that fails after writing marks
-the batch for replay from the token ledger, 5.7e-6 from incremental decoding).
+Up to 3 request threads ([scheduling](docs/benchmarks/archive/06-server-scheduling.log),
+[batched decode](docs/benchmarks/archive/07-batched-decode.log), [memory](docs/benchmarks/archive/08-batched-memory.log));
+GPU passes go through a gate one at a time, prompts in 64-token slices (bit-identical), decode steps of up to 3
+requests share one pass with caches updated in place (a failed pass marks the batch for replay, 5.7e-6 off).
 
 | Qwen3.5-4B Q8 CUDA, 128 tokens/client | V7 sequential | Batched |
 |---|---:|---:|
 | 1 / 2 / 3 decoders, events/s | 29.5 / 29.1 / 29.0 | 29.3 / 44.5 / **54.5 (1.88x)** |
 | Long + 2 short: short TTFT p50 / p95 | rejected (408) | 0.47 / 0.87 s |
-| 3 short: mean completion; process VRAM growth | 2.05 s | 1.60 s; <= 0 MiB (gate 128) |
+| 3 short: mean completion; VRAM growth | 2.05 s | 1.60 s; <= 0 MiB (gate 128) |
 
-Greedy text equals the sequential server's in every run; HF check, isolation,
-cancellation, session pairs and CUDA/scalar tests hold. Engine ceiling 2.35x at B = 3.
+## V8/V9 prompt prefill — batching NO-GO, shared prefix GO
 
-## V8 batched prompt prefill — NO-GO, not built
+Prefill is a flat 7.1–7.7 ms/token from 8 tokens (82% matmul), so one pass over two
+prompts cost −8% to +13% against a >= 10% gate: not built ([archive](docs/benchmarks/archive/09-batched-prefill.log)).
+Every default-system request starts with the same 31 token IDs (a leading newline merges
+with the last, so matching is by ID). Restoring a stored cache costs 0.45 ms against
+239 ms to recompute, bit-identical; one immutable cache is built at start (200 ms,
+87 MiB) and matching requests start from a copy ([archive](docs/benchmarks/archive/10-shared-prefix.log)).
 
-Prefill is a flat 7.1–7.7 ms/token from 8 tokens (82% matmul, 17% recurrence, <2%
-launches/state/sync), so one pass over two prompts' rows cost −8% to +13% versus
-two passes, against a >= 10% gate ([archive](docs/benchmarks/archive/09-batched-prefill.log)).
-
-## V9 shared prompt prefix — GO for Qwen3.5 CUDA
-
-Gates fixed first ([archive](docs/benchmarks/archive/10-shared-prefix.log)). Every
-default-system request starts with the same 31 token IDs; a user message beginning
-with a newline merges with the last one, so requests are matched by token ID.
-Restoring a stored prefix cache costs 0.45 ms against 239 ms to recompute, and the
-restored cache plus tail gives bit-identical logits. The server builds one
-immutable cache at start (200 ms, 87 MiB) and each matching request starts from a
-copy; others take the old path. Interleaved A/B, 3 sessions each:
-
-| Scenario | Before | After |
+| Interleaved A/B, 3 sessions | Before | After |
 |---|---:|---:|
 | Solo short TTFT p50 / total | 0.333 / 0.581 s | **0.112 / 0.296 s** |
 | 3 short: TTFT p50 / p95; mean completion | 0.60 / 0.99 s; 1.51 s | **0.24 / 0.30 s; 0.81 s** |
 | Custom system message (no match) TTFT p50 | 0.430 s | 0.430 s |
-| 3 decoders events/s; long + 2 short long job | 55.7; 13.71 s | 61.7; 13.08 s |
 
-Greedy text identical in all 36 runs; session pairs (170/186 reused), isolation,
-cancellation and 200/404 behavior match the old server field for field; process
-VRAM +0–64 MiB (gate 128). Next: 16 tokens of real prefill remain (user text and
-9-token tail) at 7.5 ms/token; other system messages get no prefix.
+Greedy text identical in 36 runs; sessions, cancellation and 200/404 unchanged; VRAM
++0–64 MiB (gate 128).
+
+## Coding V0 (`marin code`) — GO for the tool, NO-GO as a reliable reader
+
+A read-only terminal client of `marin serve` ([archive](docs/benchmarks/archive/11-coding-v0.log)). Its
+`list_files`, `read_file` and `search` tools stay inside the project (symlinks, `..`, absolute paths), bound
+every result, report binary, huge and unreadable files and never accept a tool result written by the model;
+old output and then old questions are dropped when the window fills; Ctrl-C hangs up in under a second. Server
+changes: `context_window` in `/v1/models`, `usage` in the last stream chunk. Qwen3.5-4B Q8, `--ctx 8192`, greedy:
+
+| Five tasks on this repository | Result | Tools | Time |
+|---|---|---:|---:|
+| Find `max_active` | pass (both definitions) | 3 | 25.8 s |
+| Explain the streaming request path | **fail** (wrong crates, 3 invalid calls) | 4 | 35.4 s |
+| Trace the 404 "session not found" | pass (`completion.rs:100`, `store.take`) | 2 | 20.9 s |
+| Time limits across files | pass (four limits, right files) | 3 | 47.1 s |
+| Unanswerable (user accounts) | pass (says there are none) | 8 | 49.6 s |
+
+Over 25 tasks (17 tuned against, 8 held out with the rubric fixed first): 16 pass (64%): lookups 9/12, explain /
+multi-file 4/10, unanswerable 3/3; held-out 7/8. 20 of about 81 calls slipped on format (12 read after a repair,
+8 failed); tool results were always right (median 2 ms); latency is the model (median task 25.8 s). Failures
+were confident: a call site named as the definition, an example read as the default, "the code does not exist".
+Edge cases (injection file, `/etc/passwd`, symlink, binary, mode-000, 20,000-line log, killed server, Ctrl-C, full
+window) all behaved. Next: Qwen3.5's thinking mode on the same tasks (gate: +20 points on explain / multi-file).
 
 ## Results that changed the runtime
 
@@ -339,4 +346,4 @@ Section numbers and their original gates remain unchanged inside them:
 - [22–31: CPU SIMD, INT8, KV, INT4 pilots and consolidation](docs/benchmarks/archive/02-cpu-stages.log)
 - [32–40: packed loader, Qwen3.5 and V9 planner](docs/benchmarks/archive/03-loader-qwen35-planner.log)
 - [41–46: Granite MoE, numerical NO-GOs and H-Tiny pilot](docs/benchmarks/archive/04-granite-moe.log)
-- Server logs: [sessions](docs/benchmarks/archive/04-server-sessions.log), [checkpoints](docs/benchmarks/archive/05-server-checkpoints.log), [V7 scheduling](docs/benchmarks/archive/06-server-scheduling.log), [V7b batched decode](docs/benchmarks/archive/07-batched-decode.log), [V7c memory](docs/benchmarks/archive/08-batched-memory.log), [V8 prefill](docs/benchmarks/archive/09-batched-prefill.log), [V9 prefix](docs/benchmarks/archive/10-shared-prefix.log) (load generator `06-load.py`, prompt `06-long-prompt.txt`)
+- Server logs: [sessions](docs/benchmarks/archive/04-server-sessions.log), [checkpoints](docs/benchmarks/archive/05-server-checkpoints.log), [V7 scheduling](docs/benchmarks/archive/06-server-scheduling.log), [V7b batched decode](docs/benchmarks/archive/07-batched-decode.log), [V7c memory](docs/benchmarks/archive/08-batched-memory.log), [V8 prefill](docs/benchmarks/archive/09-batched-prefill.log), [V9 prefix](docs/benchmarks/archive/10-shared-prefix.log), [Coding V0](docs/benchmarks/archive/11-coding-v0.log) (load generator `06-load.py`, prompt `06-long-prompt.txt`)

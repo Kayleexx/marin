@@ -4,6 +4,7 @@ pub mod arg_types;
 pub mod args;
 pub mod bench;
 pub mod chat;
+pub mod code;
 pub mod commands;
 pub mod config;
 pub mod error;
