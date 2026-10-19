@@ -58,3 +58,82 @@ Reproduction sketch: launch the command above; POST the first message with
 both prior messages and the follow-up user message. Repeat that second POST
 without the ID for a fresh comparison. Three cycles were run sequentially;
 each cycle used a new first-turn session and then an anonymous fresh request.
+
+
+# Gate text moved verbatim from BENCHMARKS.md (V7 consolidation)
+
+### Gates fixed before session reuse and bounded queuing
+
+- Opt-in bearer session IDs are scoped to one loaded model process. Reuse only
+  when the complete retained token ledger is an exact prefix of the next
+  rendered prompt, with at least one new token. A changed or shorter prompt
+  must report zero reused tokens and match fresh greedy text exactly. IDs
+  from another server instance must not access state.
+- A complete Qwen3.5-4B CUDA INT8 two-turn chat must produce identical greedy
+  text with reuse on/off and exact streamed/non-streamed output. Reused turn 2
+  must skip at least 90% of turn 1's prompt tokens and cut matched, warmed
+  turn-2 TTFT by at least 20% across three runs. Decode throughput must stay
+  within 10%; retain the original HF tolerances and exact token choices.
+- Only one session cache may be resident. New, anonymous, reset or incompatible
+  requests evict before allocating a replacement. Across three repeated
+  turn pairs, second-to-third process RSS and VRAM growth must each stay below
+  128 MiB. No extra model-weight copy or unbudgeted parallel cache is allowed.
+- One request executes while at most two wait in FIFO order. A further
+  connection gets HTTP 503; a queued request older than 10 s or a partially
+  read request older than 10 s fails clearly. At 300 s, active-generation
+  cancellation must be requested and take effect at the next generation
+  boundary. Disconnect, timeout and inference failure must never publish a
+  partially updated session; the next request remains usable. TCP write
+  half-close must still receive a valid response.
+
+
+# Persistent server gate text moved verbatim from BENCHMARKS.md (V7 consolidation)
+
+## Persistent server gate: Qwen3.5-4B INT8 CUDA
+
+**GO for sequential local text requests.** One release-build process loaded
+`/home/mitali/models/Qwen3.5-4B-Q8` in 4.41 s, then answered three requests
+without another model load. Configuration: RTX 5050, `--backend cuda
+--quantize int8 --ctx 256 --temp 0`, 47 prompt tokens, up to 24 output tokens,
+the same one-sentence greeting each time. A separate non-streaming request
+reported nine completion tokens. This is one focused run with warm file cache,
+not a throughput distribution or a multi-client benchmark.
+
+| Request | First visible token | Total response | Current RSS after | Process VRAM after |
+|---|---:|---:|---:|---:|
+| Load, before requests | — | 4.41 s | 268.6 MiB | 4,248 MiB |
+| 1 | 0.327 s | 0.516 s | 269.1 MiB | 4,440 MiB |
+| 2 | 0.438 s | 0.722 s | 269.2 MiB | 4,440 MiB |
+| 3 | 0.327 s | 0.737 s | 269.2 MiB | 4,472 MiB |
+
+The process RSS high-water mark was 870.8 MiB. From request 2 to 3,
+resident RSS rose <1 MiB and process VRAM rose 32 MiB, below the fixed
+128 MiB gate. The greeting was identical in streaming, non-streaming and
+`marin run`: `Hello! How can I help you today?` The focused fixture test
+also exercises a bad model name, A→B→A request isolation, disconnect recovery
+and CLI parity. The pinned one-case 128-token Qwen3.5-4B Q8 CUDA HF verifier
+also passed: exact token choice, max logit difference 1.31e-5, max layer
+difference 1.18e-5, normalized max 3.879e-6 and relative RMS 3.288e-6.
+This verifies the shared inference engine; it is not a separate HTTP-level HF
+trace. The stream sends nine content pieces; the eight post-first
+pieces divided by remaining response time imply about 20–42 pieces/s here,
+but this is a short-run proxy, not Marin's formal decode TPS metric. Power
+and clocks were not sampled for these requests.
+
+Reproduce the serving setup and a streamed request:
+
+```bash
+marin --model ~/models/Qwen3.5-4B-Q8 --backend cuda --quantize int8 \
+  --ctx 256 --temp 0 serve --port 8000
+curl -N http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen3.5-4B-Q8","messages":[{"role":"user","content":"Say hello in one short sentence."}],"temperature":0,"max_tokens":24,"stream":true}'
+```
+
+The server binds loopback only. It has no continuous batching,
+remote authentication, persistent conversation store, vision or tool calls.
+OpenAI clients must send string-message chat completions within the selected
+context and the 1 MiB request-body limit. A graceful client half-close can be
+treated as cancellation, so clients should keep the connection open to read
+the response. A long concurrent-client or adverse-network load test remains
+unverified.

@@ -44,6 +44,7 @@ pub(crate) struct Kernels {
     pub embed_q8: CudaFunction,
     pub matvec_q8: CudaFunction,
     pub matvec_q4: CudaFunction,
+    pub matvec_q8_multi: Vec<CudaFunction>,
     pub matmul_q8: CudaFunction,
     pub matmul_q4: CudaFunction,
     pub matmul_q8_mma: CudaFunction,
@@ -183,6 +184,11 @@ impl Gpu {
             embed_q8: module.load_function("embed_q8")?,
             matvec_q8: module.load_function("matvec_q8")?,
             matvec_q4: module.load_function("matvec_q4")?,
+            matvec_q8_multi: vec![
+                module.load_function("matvec_q8_t2")?,
+                module.load_function("matvec_q8_t3")?,
+                module.load_function("matvec_q8_t4")?,
+            ],
             matmul_q8: module.load_function("matmul_q8")?,
             matmul_q4: module.load_function("matmul_q4")?,
             matmul_q8_mma: module.load_function("matmul_q8_mma")?,
@@ -223,6 +229,12 @@ impl Gpu {
             free_bytes,
             total_bytes,
         })
+    }
+
+    /// Makes this GPU's context current on the calling thread. Freeing device memory needs it, and a thread that has
+    /// not made a GPU call yet does not have it.
+    pub fn bind_to_thread(&self) -> Result<(), CudaError> {
+        Ok(self.ctx.bind_to_thread()?)
     }
 
     pub fn synchronize(&self) -> Result<(), CudaError> {
@@ -328,6 +340,26 @@ impl Gpu {
             })?;
         self.stream
             .memcpy_dtod(&buffer.data.slice(start..end), &mut dst.data)?;
+        Ok(())
+    }
+
+    /// Copies all of `src` into `dst` starting at `start` without leaving the GPU.
+    pub fn copy_into_range(
+        &self,
+        src: &Buffer,
+        dst: &mut Buffer,
+        start: usize,
+    ) -> Result<(), CudaError> {
+        let end = start
+            .checked_add(src.len)
+            .filter(|end| *end <= dst.len)
+            .ok_or(CudaError::Shape {
+                what: "copy range",
+                expected: dst.len,
+                actual: start.saturating_add(src.len),
+            })?;
+        self.stream
+            .memcpy_dtod(&src.data, &mut dst.data.slice_mut(start..end))?;
         Ok(())
     }
 

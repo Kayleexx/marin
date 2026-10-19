@@ -46,7 +46,11 @@ pub(super) struct Workspace {
 }
 
 impl Workspace {
-    pub(super) fn new(gpu: &Gpu, config: &TextConfig, count: usize) -> Result<Self, ModelError> {
+    pub(super) fn new(
+        gpu: &Gpu,
+        config: &TextConfig,
+        (count, logit_rows): (usize, usize),
+    ) -> Result<Self, ModelError> {
         let c = &config.block;
         let alloc = |width| -> Result<Buffer, ModelError> { Ok(gpu.zeros(size(count, width)?)?) };
         let q = size(c.num_attention_heads, c.head_dim)?;
@@ -72,7 +76,7 @@ impl Workspace {
             up: alloc(c.intermediate_size)?,
             ff: alloc(c.hidden_size)?,
             last: gpu.zeros(c.hidden_size)?,
-            logits: gpu.zeros(config.summary().vocab_size)?,
+            logits: gpu.zeros(size(config.summary().vocab_size, logit_rows)?)?,
         })
     }
 }

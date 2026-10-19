@@ -1,0 +1,60 @@
+use model::qwen35::Qwen35Gpu;
+use model::{QuantBits, QuantScheme};
+use runtime::CausalLm;
+#[test]
+fn probe() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(dir) = std::env::var_os("MARIN_QWEN35_Q8_DIR") else {
+        return Ok(());
+    };
+    let packed = loader::ModelDir::open(std::path::Path::new(&dir))?;
+    let scheme = QuantScheme::new(QuantBits::Int8, model::DEFAULT_GROUP)?;
+    let m = Qwen35Gpu::load(&packed, model::Gpu::new()?, Some(scheme), |_, _| {})?;
+    let prompt: Vec<u32> = (100..228).collect();
+    for b in [1usize, 2, 3, 4] {
+        let mut caches = Vec::new();
+        for _ in 0..b {
+            let mut c = m.new_cache(512)?;
+            m.forward(&prompt, &mut c)?;
+            caches.push(c);
+        }
+        let toks = vec![300u32; b];
+        let steps = 40;
+        for _ in 0..3 {
+            let mut r: Vec<_> = caches.iter_mut().collect();
+            m.forward_batch(&toks, &mut r)?;
+        }
+        let s = std::time::Instant::now();
+        for _ in 0..steps {
+            let mut r: Vec<_> = caches.iter_mut().collect();
+            m.forward_batch(&toks, &mut r)?;
+        }
+        let batched = s.elapsed().as_secs_f64() * 1e3 / steps as f64;
+        let s = std::time::Instant::now();
+        for _ in 0..steps {
+            for c in caches.iter_mut() {
+                m.forward(&[300], c)?;
+            }
+        }
+        let seq = s.elapsed().as_secs_f64() * 1e3 / steps as f64;
+        eprintln!(
+            "B={b}: batched step {batched:.2} ms ({:.1} tok/s)  sequential {seq:.2} ms ({:.1} tok/s)  gain {:.2}x",
+            b as f64 * 1e3 / batched,
+            b as f64 * 1e3 / seq,
+            seq / batched
+        );
+    }
+    Ok(())
+}
+#[test]
+fn sizes() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(dir) = std::env::var_os("MARIN_QWEN35_Q8_DIR") else { return Ok(()) };
+    let packed = loader::ModelDir::open(std::path::Path::new(&dir))?;
+    let scheme = QuantScheme::new(QuantBits::Int8, model::DEFAULT_GROUP)?;
+    let m = Qwen35Gpu::load(&packed, model::Gpu::new()?, Some(scheme), |_, _| {})?;
+    for ctx in [512usize, 2048] {
+        let mut c = m.new_cache(ctx)?;
+        m.forward(&(100..228).collect::<Vec<u32>>(), &mut c)?;
+        eprintln!("ctx {ctx}: held {} MiB, checkpoint {} MiB", c.bytes_held() >> 20, c.checkpoint_bytes() >> 20);
+    }
+    Ok(())
+}

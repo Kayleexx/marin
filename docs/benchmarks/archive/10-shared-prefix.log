@@ -1,0 +1,166 @@
+# V9 shared system/template prefix checkpoint, 2026-10-18
+
+Machine, model and flags as in 06-server-scheduling.log (RTX 5050 Laptop, 40 W cap,
+Qwen3.5-4B Q8 CUDA INT8, `--ctx 2048`, greedy). Baseline: the V7c server (current
+tree before this change).
+
+## Exact token-ID prefix across real requests
+
+Rendered with the server's own path (`chat::render` + `tokenizer.encode`), default
+system message, six different user messages. Prompt = 47-53 tokens for 8-17 word
+questions. All share the first 30 token IDs
+`248045 8678 198 ... 61446 13 248046 198 248045 846` (system turn through
+`<|im_start|>user`). Token 31 is `198` ("\n") for every ordinary message, but a user
+message that starts with a newline tokenizes `"user\n" + "\nweird"` as `846, 271`
+(the two newlines merge into one token): same text prefix, different token IDs. The
+longest common prefix over all probes is therefore 30, and 31 for every message not
+starting with a newline. Text equality does not imply token equality, so a request
+may use the prefix only if its own token IDs start with the stored IDs; the
+newline-leading request simply falls back to a full prefill (checked in the tests).
+The tail `<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n` (9 tokens) follows
+the user text, so its state depends on that text and cannot be shared. A client that
+sends its own system message does not match and is unaffected. Shared tokens
+contain only the Marin default system message and template markers, never user text.
+
+## Cost: recompute vs restore (real model, ctx 2048, median of 7, `zz_prefix` probe)
+
+| Step | Time |
+|---|---:|
+| New empty cache | 0.17 ms |
+| Full 47-token prefill (current path) | 334.6 ms |
+| Prefix only, 31 tokens, recomputed | 238.7 ms |
+| Restore a stored prefix cache (`checkpoint_cache`) | 0.45 ms |
+| 16-token tail after restore | 142.2 ms |
+| Restore + tail vs full | 142.7 vs 334.6 ms (-57%) |
+Restored prefix + tail logits equal the one-pass logits bit for bit. A stored prefix
+cache is one `GpuCache`: 91,259,136 bytes (87.0 MiB) at ctx 2048 (DeltaNet state about
+51 MiB, one 32 MiB KV slab, 4 MiB scratch/page table). Cloning does not eliminate the
+benefit: 0.45 ms against 238.7 ms.
+
+## Gates, fixed before implementation
+
+Correctness (all required):
+- C1 Restored-prefix + tail logits bit-identical to one pass (real model, test);
+  server greedy text equal to the V7c server's for every client in every scenario;
+  pinned HF check unchanged (max logit 1.31e-5, relative RMS 3.288e-6).
+- C2 The stored prefix is immutable and server-owned: every request gets its own
+  copy; a request that generates or fails leaves the stored cache bit-identical (its
+  `used()` stays at the prefix length and a later request still matches the baseline).
+  A request whose token IDs do not start with the prefix (custom system message,
+  newline-leading user text, other template) takes the unchanged full path.
+- C3 Existing per-session reuse, rollback, cancellation, eviction, replay recovery and
+  memory admission unchanged: session pairs reuse the same token counts (170 / 186),
+  texts equal, 404 / 408 / 503 behavior, mid-batch disconnect survivors unchanged.
+Performance (all required, same-regime interleaved A/B against V7c):
+- P1 Solo short request TTFT at least 30% lower (expected 0.33 -> about 0.15 s).
+- P2 Three independent short clients: TTFT p95 at least 25% lower and mean completion
+  lower. Long + 2 short: interactive TTFT p95 lower, long job within +3%.
+- P3 Requests that do not match (custom system message): TTFT within +3% of baseline.
+  decode3 aggregate not below 0.97x baseline.
+- P4 Peak process VRAM growth <= 128 MiB over baseline; startup build time and
+  resident cache size reported; admission accounts for the cache (it is built before
+  free memory is measured).
+Reject the design if restore + tail is not at least 30% below the full prefill, or if
+any correctness gate fails.
+
+## Implementation (kept)
+
+- `request.rs`: `default_prefix` encodes the default system message with two
+  different user messages exactly as a request is encoded and keeps the longest
+  common run of token IDs (31 here); `encode_chat` is shared with `validated_prompt`.
+- `prefix.rs`: `Prefix::build` (Qwen3.5 CUDA only) prefills those tokens once at
+  server start into a cache of `--ctx` capacity, before the admission limit measures
+  free VRAM. `Prefix::start` hands a request an independent copy made with the
+  existing `session_checkpoint` (through the gate, so it never overlaps a pass) and
+  a `Retained` record of the prefix tokens, only if the prompt's token IDs start with
+  the stored IDs and are longer than them. Anything else (custom system message,
+  newline-leading user text, other template, not enough free VRAM for the copy,
+  copy failure) takes the unchanged `Stored::new` path.
+- `completion.rs`: an existing reusable session still wins; otherwise a prefix copy,
+  otherwise a fresh cache. The generation loop's existing reuse logic skips the prefix
+  tokens; a new session starts from the prefix and its checkpoint keeps it.
+- Nothing is written into the stored cache: requests only read it through the copy.
+  Private user content never enters it (it holds the default system message and
+  template markers only).
+
+## Results (interleaved A/B, 3 sessions each, `ab.sh`: base binary = V7c server)
+
+Medians over all runs (n = 18 requests per solo / three_interactive / custom row;
+9 for decode3 and long_plus_two). TTFT = first content delta.
+
+| Scenario | Baseline | Shared prefix |
+|---|---|---|
+| solo short TTFT p50 / p95 | 0.333 / 0.369 s | **0.112 / 0.114 s (-66%)** |
+| solo short total | 0.581 s | 0.296 s |
+| 3 short clients TTFT p50 / p95 | 0.604 / 0.993 s | **0.238 / 0.304 s (-61% / -69%)** |
+| 3 short clients per-client TTFT a / b / c | 0.305 / 0.604 / 0.986 s | 0.112 / 0.238 / 0.302 s |
+| 3 short clients mean completion; wall | 1.51 s; 1.82 s | **0.81 s; 1.26 s** |
+| 3 short clients events/s | 22.5 | 32.7 |
+| custom system message (no match), TTFT p50 / p95 | 0.430 / 0.616 s | 0.430 / 0.614 s |
+| custom system message, mean completion | 0.979 s | 0.967 s |
+| decode3 events/s; completion mean; spread | 55.7; 6.74 s; 1.1% | 61.7; 6.12 s; 1.8% |
+| decode3 TTFT p50 / p95 | 0.661 / 1.074 s | 0.286 / 0.382 s |
+| long + 2 short: interactive TTFT p50 / p95 | 0.556 / 0.712 s | 0.504 / 0.565 s |
+| long + 2 short: long job total; interactive mean completion | 13.71 s; 1.314 s | 13.08 s; 1.049 s |
+
+Texts: every client in solo_short, three_interactive, custom, decode3 and
+long_plus_two is identical across all 36 runs of both binaries.
+
+Cache construction: 199-208 ms once at startup (31-token prefill 239 ms measured in
+the probe, warm), 83 MiB of KV + state (87.0 MiB with scratch, 91,259,136 bytes).
+Per request: 0.45 ms to copy it, 0 extra resident bytes (the copy replaces the empty
+cache the request would have allocated).
+
+Process VRAM peak (nvidia-smi 2 Hz, per session, MiB) base -> new: solo 4504 ->
+4504; three_interactive 4664 -> 4728; custom 4760 -> 4792; decode3 4696 -> 4728;
+long_plus_two 4728 -> 4792. Growth <= +64 MiB (gate 128). RSS unchanged (273-310
+MiB). The cache is resident for the life of the server; admission sees it.
+
+## Correctness
+
+- `qwen35_prefix.rs`: stored prefix + tail logits equal a full prefill bit for bit,
+  twice from the same stored cache, after a copy was extended and discarded, and the
+  stored cache keeps `used() == prefix length` (fixture INT8 and real model).
+- `shared_prefix.rs` (real tokenizer): ordinary and leading-space user messages share
+  the 31-token prefix; a user message starting with a newline does not (token 271)
+  and still matches the first 30, so a text-based match would have been wrong.
+- `10-checks.py` on base and new servers at `--ctx 512`: output identical field for
+  field: stateless, newline-leading and custom-system answers, code / chat session
+  pairs (turn-2 reuse 170 and 186 tokens, turn-2 text equals the stateless text),
+  concurrent sessions isolated (one answered, one 404 as one slot is kept), same
+  session twice -> 200 + 404, answer after a mid-stream disconnect, five simultaneous
+  requests all 200.
+- `10-cancel.py`: a client dropping 2 s into a three-way batched decode leaves both
+  survivors equal to the reference text, and the same prompt afterwards matches.
+- Pinned HF check, fmt, check, Clippy -D warnings, line-limit, unsafe, CUDA and
+  forced-scalar workspace tests: see the end of this file.
+
+## Gate evaluation
+
+| Gate | Result |
+|---|---|
+| C1 bit-identical restore, greedy text equal, HF unchanged | PASS |
+| C2 immutable, isolated, non-matching requests unchanged | PASS |
+| C3 sessions, rollback, cancellation, eviction, admission unchanged | PASS |
+| P1 solo TTFT >= 30% lower | PASS: -66% |
+| P2 3 short clients p95 >= 25% lower; completion lower; long job <= +3% | PASS: -69%; 1.51 -> 0.81 s; long job -4.6% |
+| P3 non-matching within +3%; decode3 >= 0.97x | PASS: 0.430 -> 0.430 s; 1.11x |
+| P4 process VRAM growth <= 128 MiB | PASS: <= +64 MiB sampled, +87 MiB resident cache |
+
+## Next bottleneck
+
+A short request is now 16 tokens of real prefill (about 0.11 s): 7 user tokens plus
+the 9-token tail `<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`, which
+depends on the user text. The matmul kernel at 0.55-1.07 TFLOP/s (about 7.5 ms per
+token) is the limit; the prefix cache cannot cover the user's own tokens. A custom
+system message pays the full prefill; a second prefix per distinct system message was
+not built (a prefix cache would need an eviction policy and a key, which is the
+framework this milestone excluded).
+
+## Verification
+
+fmt, check, Clippy -D warnings, line-limit, unsafe clean. Workspace tests with
+MARIN_REQUIRE_CUDA=1 (real-model tests enabled) and with MARIN_MATMUL_SCALAR=1:
+649 passed, 0 failed, 5 ignored each (646 before plus the three new tests). Pinned
+HF verify unchanged: max logit 1.31e-5, max layer 1.18e-5, normalized max 3.879e-6,
+relative RMS 3.288e-6.

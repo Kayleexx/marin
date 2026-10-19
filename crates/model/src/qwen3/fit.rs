@@ -1,5 +1,5 @@
 /// Memory the GPU needs beyond weights and the KV cache: activations and kernel code.
-pub(super) const GPU_SLACK_BYTES: u64 = 512 * 1024 * 1024;
+pub const GPU_SLACK_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum GpuFit {

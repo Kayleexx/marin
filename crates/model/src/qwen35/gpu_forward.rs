@@ -5,11 +5,21 @@ use super::gpu_weights::{Delta, Full, Mixer};
 use super::math::{invalid, size};
 use crate::qwen3::gpu_probe::GpuProbe;
 use crate::{ModelError, Observer};
-use cuda::{DeltaDims, DeltaInputs, Gpu};
+use cuda::{DeltaDims, DeltaInputs, DeviceKv, Gpu};
 use metrics::{Stage, StageTimes};
 use runtime::SequenceCache;
 
 const CHUNK: usize = 512;
+
+/// The sequences one pass serves: the chunk of a single sequence, or one token each of several.
+pub(super) enum Rows<'a> {
+    One(&'a mut GpuCache),
+    Batch {
+        caches: Vec<&'a mut GpuCache>,
+        /// Single-row buffers the per-sequence stages work in.
+        scratch: Box<Workspace>,
+    },
+}
 
 pub(super) fn forward(
     model: &Qwen35Gpu,
@@ -60,7 +70,7 @@ pub(super) fn forward(
     for (i, chunk) in input.chunks(CHUNK).enumerate() {
         logits = pass_chunk(
             model,
-            &mut staged,
+            &mut Rows::One(&mut staged),
             chunk,
             &mut probe,
             if i.saturating_add(1) == chunk_count {
@@ -83,22 +93,25 @@ pub(super) fn forward(
     Ok(logits)
 }
 
-fn pass_chunk(
+pub(super) fn pass_chunk(
     model: &Qwen35Gpu,
-    cache: &mut GpuCache,
+    rows: &mut Rows<'_>,
     tokens: &[u32],
     probe: &mut GpuProbe<'_>,
     mut observe: crate::Observer<'_>,
 ) -> Result<Vec<f32>, ModelError> {
     let (gpu, c, count) = (&model.gpu, &model.config.block, tokens.len());
-    let mut ws = Workspace::new(gpu, &model.config, count)?;
+    let logit_rows = match rows {
+        Rows::One(_) => 1,
+        Rows::Batch { caches, .. } => caches.len(),
+    };
+    let mut ws = Workspace::new(gpu, &model.config, (count, logit_rows))?;
     probe.stage(Stage::Embedding, || {
         Ok(model
             .embed
             .embed(gpu, tokens, &mut ws.ids, &mut ws.hidden)?)
     })?;
     watch(&mut observe, gpu, 0, &ws.hidden, c.hidden_size)?;
-    let start = cache.kv.len();
     for (index, layer) in model.layers.iter().enumerate() {
         probe.layer(Some(index));
         probe.stage(Stage::Norm, || {
@@ -110,15 +123,8 @@ fn pass_chunk(
             )?)
         })?;
         match &layer.mixer {
-            Mixer::Delta(w) => {
-                let state = cache
-                    .delta
-                    .get_mut(index)
-                    .and_then(Option::as_mut)
-                    .ok_or_else(|| invalid("missing GPU Delta state"))?;
-                delta(gpu, w, c, &mut ws, state, count, probe)?;
-            }
-            Mixer::Full(w) => full(gpu, w, c, &mut ws, &mut cache.kv, (count, start), probe)?,
+            Mixer::Delta(w) => delta(gpu, w, c, &mut ws, (rows, index), count, probe)?,
+            Mixer::Full(w) => full(gpu, w, c, &mut ws, rows, count, probe)?,
         }
         probe.stage(Stage::Residual, || {
             Ok(gpu.add(&mut ws.hidden, &ws.attended)?)
@@ -156,23 +162,54 @@ fn pass_chunk(
         )?;
     }
     probe.layer(None);
-    probe.stage(Stage::Norm, || {
-        gpu.copy_range_into(
-            &ws.hidden,
-            size(count.saturating_sub(1), c.hidden_size)?,
-            &mut ws.last,
-        )?;
-        Ok(gpu.rms_norm(&mut ws.last, &model.norm, c.rms_norm_eps)?)
-    })?;
-    probe.stage(Stage::LmHead, || {
-        Ok(model
-            .embed
-            .matmul_precise(gpu, &ws.last, 1, &mut ws.logits)?)
-    })?;
+    match rows {
+        Rows::One(_) => {
+            probe.stage(Stage::Norm, || {
+                gpu.copy_range_into(
+                    &ws.hidden,
+                    size(count.saturating_sub(1), c.hidden_size)?,
+                    &mut ws.last,
+                )?;
+                Ok(gpu.rms_norm(&mut ws.last, &model.norm, c.rms_norm_eps)?)
+            })?;
+            probe.stage(Stage::LmHead, || {
+                Ok(model
+                    .embed
+                    .matmul_precise(gpu, &ws.last, 1, &mut ws.logits)?)
+            })?;
+        }
+        Rows::Batch { .. } => {
+            probe.stage(Stage::Norm, || {
+                Ok(gpu.rms_norm(&mut ws.hidden, &model.norm, c.rms_norm_eps)?)
+            })?;
+            probe.stage(Stage::LmHead, || {
+                Ok(model
+                    .embed
+                    .matmul_precise(gpu, &ws.hidden, count, &mut ws.logits)?)
+            })?;
+        }
+    }
     let logits = gpu.download(&ws.logits)?;
     tensor::ensure_finite(&logits, "Qwen3.5 CUDA logits")?;
-    cache.kv.advance(count)?;
+    match rows {
+        Rows::One(cache) => cache.kv.advance(count)?,
+        Rows::Batch { caches, .. } => {
+            for cache in caches.iter_mut() {
+                cache.kv.advance(1)?;
+            }
+        }
+    }
     Ok(logits)
+}
+
+fn delta_dims(c: &super::Config) -> DeltaDims {
+    DeltaDims {
+        key_heads: c.linear_num_key_heads,
+        value_heads: c.linear_num_value_heads,
+        key_dim: c.linear_key_head_dim,
+        value_dim: c.linear_value_head_dim,
+        kernel: c.linear_conv_kernel_dim,
+    }
 }
 
 fn delta(
@@ -180,23 +217,52 @@ fn delta(
     w: &Delta,
     c: &super::Config,
     ws: &mut Workspace,
-    state: &mut super::gpu_cache::DeltaState,
+    (rows, index): (&mut Rows<'_>, usize),
     count: usize,
     probe: &mut GpuProbe<'_>,
 ) -> Result<(), ModelError> {
-    let dims = DeltaDims {
-        key_heads: c.linear_num_key_heads,
-        value_heads: c.linear_num_value_heads,
-        key_dim: c.linear_key_head_dim,
-        value_dim: c.linear_value_head_dim,
-        kernel: c.linear_conv_kernel_dim,
-    };
     probe.stage(Stage::Qkv, || {
         w.qkv.matmul_precise(gpu, &ws.normed, count, &mut ws.qkv)?;
         w.z.matmul_precise(gpu, &ws.normed, count, &mut ws.z)?;
         w.a.matmul_precise(gpu, &ws.normed, count, &mut ws.a)?;
         Ok(w.b.matmul_precise(gpu, &ws.normed, count, &mut ws.b)?)
     })?;
+    match rows {
+        Rows::One(cache) => {
+            let state = cache
+                .delta
+                .get_mut(index)
+                .and_then(Option::as_mut)
+                .ok_or_else(|| invalid("missing GPU Delta state"))?;
+            delta_state(gpu, (w, c), ws, state, count, probe)?;
+        }
+        Rows::Batch { caches, scratch } => {
+            super::gpu_batch::delta_each(
+                gpu,
+                (w, c),
+                (ws, scratch),
+                (caches.as_mut_slice(), index),
+                probe,
+            )?;
+        }
+    }
+    probe.stage(Stage::OutProj, || {
+        Ok(w.out
+            .matmul_precise(gpu, &ws.core, count, &mut ws.attended)?)
+    })?;
+    Ok(())
+}
+
+/// The convolution and recurrence over the rows in `ws`, advancing one sequence's state.
+pub(super) fn delta_state(
+    gpu: &Gpu,
+    (w, c): (&Delta, &super::Config),
+    ws: &mut Workspace,
+    state: &mut super::gpu_cache::DeltaState,
+    count: usize,
+    probe: &mut GpuProbe<'_>,
+) -> Result<(), ModelError> {
+    let dims = delta_dims(c);
     probe.stage(Stage::Convolution, || {
         Ok(gpu.q35_convolution(
             &ws.qkv,
@@ -224,12 +290,7 @@ fn delta(
             count,
             c.rms_norm_eps,
         )?)
-    })?;
-    probe.stage(Stage::OutProj, || {
-        Ok(w.out
-            .matmul_precise(gpu, &ws.core, count, &mut ws.attended)?)
-    })?;
-    Ok(())
+    })
 }
 
 fn full(
@@ -237,8 +298,8 @@ fn full(
     w: &Full,
     c: &super::Config,
     ws: &mut Workspace,
-    kv: &mut cuda::DeviceKv,
-    (count, start): (usize, usize),
+    rows: &mut Rows<'_>,
+    count: usize,
     probe: &mut GpuProbe<'_>,
 ) -> Result<(), ModelError> {
     probe.stage(Stage::Qkv, || {
@@ -257,6 +318,34 @@ fn full(
         gpu.rms_norm(&mut ws.q, &w.q_norm, c.rms_norm_eps)?;
         Ok(gpu.rms_norm(&mut ws.k, &w.k_norm, c.rms_norm_eps)?)
     })?;
+    match rows {
+        Rows::One(cache) => {
+            let start = cache.kv.len();
+            full_attention(gpu, (w, c), ws, &mut cache.kv, (count, start), probe)?;
+        }
+        Rows::Batch { caches, scratch } => {
+            super::gpu_batch::full_each(gpu, (w, c), (ws, scratch), caches.as_mut_slice(), probe)?;
+        }
+    }
+    probe.stage(Stage::Attention, || {
+        Ok(gpu.q35_gate_attention(&mut ws.context, &ws.q_gate)?)
+    })?;
+    probe.stage(Stage::OutProj, || {
+        Ok(w.out
+            .matmul_precise(gpu, &ws.context, count, &mut ws.attended)?)
+    })?;
+    Ok(())
+}
+
+/// Position encoding, cache write and attention for the rows in `ws` against one sequence's cache.
+pub(super) fn full_attention(
+    gpu: &Gpu,
+    (w, c): (&Full, &super::Config),
+    ws: &mut Workspace,
+    kv: &mut DeviceKv,
+    (count, start): (usize, usize),
+    probe: &mut GpuProbe<'_>,
+) -> Result<(), ModelError> {
     probe.stage(Stage::Rope, || {
         gpu.q35_partial_rope(
             &mut ws.q,
@@ -277,21 +366,15 @@ fn full(
     })?;
     probe.stage(Stage::KvWrite, || Ok(kv.write(gpu, w.index, &ws.k, &ws.v)?))?;
     probe.stage(Stage::Attention, || {
-        gpu.attention(
+        Ok(gpu.attention(
             &ws.q,
             kv,
             w.index,
             c.num_attention_heads,
             count,
             &mut ws.context,
-        )?;
-        Ok(gpu.q35_gate_attention(&mut ws.context, &ws.q_gate)?)
-    })?;
-    probe.stage(Stage::OutProj, || {
-        Ok(w.out
-            .matmul_precise(gpu, &ws.context, count, &mut ws.attended)?)
-    })?;
-    Ok(())
+        )?)
+    })
 }
 
 fn watch(

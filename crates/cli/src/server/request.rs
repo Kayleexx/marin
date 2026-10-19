@@ -37,6 +37,38 @@ enum InputRole {
     Assistant,
 }
 
+fn encode_chat(loaded: &Loaded, messages: &[Message]) -> Result<Vec<u32>, String> {
+    let specials = loaded.dir.tokenizer.special_tokens();
+    let text = chat::render(messages, &specials).map_err(|e| e.to_string())?;
+    loaded
+        .dir
+        .tokenizer
+        .encode(&text)
+        .map_err(|e| e.to_string())
+}
+
+pub(super) fn default_prefix(loaded: &Loaded) -> Result<Vec<u32>, String> {
+    let encode = |user: &str| {
+        encode_chat(
+            loaded,
+            &[
+                Message::new(Role::System, chat::DEFAULT_SYSTEM),
+                Message::new(Role::User, user),
+            ],
+        )
+    };
+    let (first, second) = (encode("Hello")?, encode("The quick brown fox")?);
+    let shared = first
+        .iter()
+        .zip(&second)
+        .take_while(|(a, b)| a == b)
+        .count();
+    first
+        .get(..shared)
+        .map(<[u32]>::to_vec)
+        .ok_or_else(|| "the default prompts share no prefix".into())
+}
+
 pub(super) fn validated_prompt(
     loaded: &Loaded,
     input: &Completion,
@@ -73,12 +105,7 @@ pub(super) fn validated_prompt(
         messages.insert(0, Message::new(Role::System, chat::DEFAULT_SYSTEM));
     }
     let specials = loaded.dir.tokenizer.special_tokens();
-    let text = chat::render(&messages, &specials).map_err(|e| e.to_string())?;
-    let prompt = loaded
-        .dir
-        .tokenizer
-        .encode(&text)
-        .map_err(|e| e.to_string())?;
+    let prompt = encode_chat(loaded, &messages)?;
     let history = if input.marin_session_id.is_some() {
         let history = chat::render_history(&messages, &specials).map_err(|e| e.to_string())?;
         loaded

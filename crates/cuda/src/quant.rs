@@ -154,6 +154,9 @@ impl Gpu {
         if tokens == 1 {
             return self.matvec_quant(w, x, out);
         }
+        if !allow_tensor_cores && w.scheme.bits == QuantBits::Int8 && (2..=4).contains(&tokens) {
+            return self.matvec_quant_multi(w, x, tokens, out);
+        }
         let tensor_cores = allow_tensor_cores && tokens >= MMA_MIN_TOKENS;
         let k = &self.kernels;
         let function = match (w.scheme.bits, tensor_cores) {
@@ -192,6 +195,42 @@ impl Gpu {
                 .arg(&x.data)
                 .arg(&mut out.data);
             a.arg(&rows).arg(&cols).arg(&tokens).arg(&group);
+        })
+    }
+
+    fn matvec_quant_multi(
+        &self,
+        w: &DeviceQuantMatrix,
+        x: &Buffer,
+        tokens: usize,
+        out: &mut Buffer,
+    ) -> Result<(), CudaError> {
+        let function = self
+            .kernels
+            .matvec_q8_multi
+            .get(tokens.saturating_sub(2))
+            .ok_or(CudaError::Overflow { what: "multi" })?;
+        let rows_per_block = WARPS_PER_BLOCK.saturating_mul(ROWS_PER_WARP);
+        let config = LaunchConfig {
+            grid_dim: (blocks(w.rows, rows_per_block)?, 1, 1),
+            block_dim: (
+                to_u32(WARPS_PER_BLOCK.saturating_mul(32), "block size")?,
+                1,
+                1,
+            ),
+            shared_mem_bytes: 0,
+        };
+        let (rows, cols, group) = (
+            to_u32(w.rows, "rows")?,
+            to_u32(w.cols, "cols")?,
+            to_u32(w.scheme.group, "group size")?,
+        );
+        self.launch(function, config, |a| {
+            a.arg(&w.codes)
+                .arg(&w.scales)
+                .arg(&x.data)
+                .arg(&mut out.data);
+            a.arg(&rows).arg(&cols).arg(&group);
         })
     }
 

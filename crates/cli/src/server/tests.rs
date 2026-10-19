@@ -1,6 +1,11 @@
-use super::*;
-use std::net::TcpListener;
+use std::io;
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::Duration;
+
+use super::watch::watch_disconnect;
 
 #[test]
 fn write_half_close_does_not_cancel_but_generation_deadline_does() -> io::Result<()> {

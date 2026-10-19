@@ -1,0 +1,230 @@
+# V7 multi-request responsiveness, 2026-10-18
+
+Machine: Ryzen 7 260, 16 GB RAM, RTX 5050 Laptop (8 GB, ~40 W). Model:
+`~/models/Qwen3.5-4B-Q8`, `--backend cuda --quantize int8 --ctx 2048
+--temp 0`, one release-build server per variant, warm model, nothing else on
+the GPU. Load generator: `06-load.py PORT PID SCENARIO RUNS` (streaming
+clients, TTFT = first non-empty SSE content delta, process RSS from
+/proc, process VRAM and device util from nvidia-smi at 2 Hz).
+
+Scenarios (client: arrival offset, prompt, max_tokens):
+- solo_short: 1 x 47-token greeting, 32.
+- solo_long: 1 x 1317-token code-review prompt, 64.
+- three_interactive: 3 short prompts at +0/+0.05/+0.10 s, 32 each.
+- long_plus_two: the 1317-token job at +0 s, short clients at +1 s and +2 s.
+
+## Gates, fixed BEFORE implementation
+
+Compared against the current sequential server (`BASE`) and, for
+long_plus_two, against `BASE-WAIT`: the same binary with the 10 s queue wait
+raised to 120 s so the interactive requests are not rejected (matched
+conditions; the shipped limit is unchanged). Medians of three runs.
+
+Correctness (all required):
+- C1 Every client's greedy text is byte-identical to the same request run
+  alone on BASE. Streamed text equals non-streamed text.
+- C2 The engine and its HF-verified math are untouched. A real-model test
+  must show prefill split into scheduler slices equals one-shot prefill:
+  same greedy token, normalized max <= 1e-4, relative RMS <= 1e-5.
+  The pinned Qwen3.5-4B Q8 CUDA `verify` figures must be unchanged.
+- C3 Per-request KV/DeltaNet state is never shared. Concurrent sessions are
+  isolated; a session in use by another request is refused, not mixed;
+  checkpoint reuse still skips >= 90% of turn-one tokens; disconnect, 300 s
+  cancel, inference failure and changed-prefix fallback leave the session
+  and the next request intact.
+- C4 Bounded admission: active requests <= a fixed cap derived from free VRAM;
+  at most two more wait in FIFO order; further connections get 503; wait
+  >10 s gives 408.
+
+Latency / throughput (all required):
+- L1 long_plus_two: both interactive requests succeed (BASE: 408) and their
+  TTFT p95 <= 2.0 s (BASE-WAIT: ~11.4 s).
+- L2 three_interactive: p95 TTFT at least 25% below BASE (1.87 s -> <= 1.40 s)
+  and p50 TTFT within +10% of BASE (0.95 s).
+- T1 Aggregate SSE events/s on three_interactive and long_plus_two >= 95% of
+  BASE-WAIT; long_plus_two makespan <= BASE-WAIT +5%.
+- T2 The long job in long_plus_two completes in <= 1.25x its solo BASE time
+  (12.0 s -> <= 15.0 s).
+- T3 No solo regression: solo_short TTFT and solo_long total time within +5%
+  of BASE; decode events/s within -5%.
+
+Memory (all required):
+- M1 Three repeated long_plus_two runs: second-to-third process RSS and
+  process VRAM growth each < 128 MiB; device free VRAM at peak >= 512 MiB.
+
+Decision: keep the scheduler only if every gate passes. Otherwise revert it
+and record NO-GO with the failing numbers. Continuous batching is added only
+if, after interleaving, aggregate decode throughput is the measured limit.
+
+## Baseline (BASE, sequential, queue wait 10 s)
+
+Raw: scratchpad base-profile.txt, reproduced below.
+
+--- solo_short run 1: wall 0.59s events 9 agg 15.2 ev/s  rss_peak 267MiB vram_peak 4440MiB gpu_util_avg 100% pw_avg 34W
+  s1: status=200 start=0.00 ttft=0.349 total=0.59 events=9 rate=33.2
+--- solo_short run 2: wall 0.50s events 9 agg 17.9 ev/s  rss_peak 267MiB vram_peak 4440MiB gpu_util_avg 82% pw_avg 27W
+  s1: status=200 start=0.00 ttft=0.31 total=0.50 events=9 rate=41.6
+--- solo_short run 3: wall 0.63s events 9 agg 14.2 ev/s  rss_peak 267MiB vram_peak 4472MiB gpu_util_avg 90% pw_avg 36W
+  s1: status=200 start=0.00 ttft=0.353 total=0.63 events=9 rate=28.5
+--- solo_long run 1: wall 11.88s events 64 agg 5.4 ev/s  rss_peak 267MiB vram_peak 4696MiB gpu_util_avg 95% pw_avg 39W
+  L: status=200 start=0.00 ttft=10.233 total=11.88 events=64 rate=38.3
+--- solo_long run 2: wall 11.70s events 64 agg 5.5 ev/s  rss_peak 267MiB vram_peak 4696MiB gpu_util_avg 95% pw_avg 39W
+  L: status=200 start=0.00 ttft=10.046 total=11.69 events=64 rate=38.2
+--- solo_long run 3: wall 11.87s events 64 agg 5.4 ev/s  rss_peak 267MiB vram_peak 4728MiB gpu_util_avg 99% pw_avg 40W
+  L: status=200 start=0.00 ttft=10.211 total=11.87 events=64 rate=37.9
+--- three_interactive run 1: wall 2.17s events 41 agg 18.9 ev/s  rss_peak 267MiB vram_peak 4728MiB gpu_util_avg 80% pw_avg 36W
+  a: status=200 start=0.00 ttft=0.331 total=0.54 events=9 rate=38.4
+  b: status=200 start=0.05 ttft=0.942 total=1.45 events=23 rate=43.0
+  c: status=200 start=0.10 ttft=1.797 total=2.07 events=9 rate=29.1
+--- three_interactive run 2: wall 2.16s events 41 agg 19.0 ev/s  rss_peak 267MiB vram_peak 4568MiB gpu_util_avg 75% pw_avg 35W
+  a: status=200 start=0.00 ttft=0.338 total=0.54 events=9 rate=40.3
+  b: status=200 start=0.05 ttft=0.943 total=1.45 events=23 rate=43.1
+  c: status=200 start=0.10 ttft=1.786 total=2.06 events=9 rate=29.3
+--- three_interactive run 3: wall 2.20s events 41 agg 18.6 ev/s  rss_peak 267MiB vram_peak 4600MiB gpu_util_avg 99% pw_avg 40W
+  a: status=200 start=0.00 ttft=0.339 total=0.55 events=9 rate=37.1
+  b: status=200 start=0.05 ttft=0.971 total=1.52 events=23 rate=40.3
+  c: status=200 start=0.10 ttft=1.887 total=2.10 events=9 rate=37.8
+--- long_plus_two run 1: wall 12.50s events 64 agg 5.1 ev/s  rss_peak 267MiB vram_peak 4696MiB gpu_util_avg 97% pw_avg 39W
+  L: status=200 start=0.00 ttft=10.609 total=12.30 events=64 rate=37.4
+  a: status=408 start=1.00 ttft=None total=11.40 events=0 rate=None
+  b: status=408 start=2.00 ttft=None total=10.50 events=0 rate=None
+--- long_plus_two run 2: wall 12.32s events 64 agg 5.2 ev/s  rss_peak 267MiB vram_peak 4760MiB gpu_util_avg 94% pw_avg 39W
+  L: status=200 start=0.00 ttft=10.441 total=12.11 events=64 rate=37.7
+  a: status=408 start=1.00 ttft=None total=11.22 events=0 rate=None
+  b: status=408 start=2.00 ttft=None total=10.32 events=0 rate=None
+--- long_plus_two run 3: wall 12.41s events 64 agg 5.2 ev/s  rss_peak 267MiB vram_peak 4760MiB gpu_util_avg 100% pw_avg 40W
+  L: status=200 start=0.00 ttft=10.521 total=12.20 events=64 rate=37.5
+  a: status=408 start=1.00 ttft=None total=11.31 events=0 rate=None
+  b: status=408 start=2.00 ttft=None total=10.41 events=0 rate=None
+
+## Baseline-wait (BASE-WAIT: same code, queue wait 120 s)
+
+--- long_plus_two run 1: wall 13.63s events 96 agg 7.0 ev/s  rss_peak 290MiB vram_peak 4632MiB gpu_util_avg 100% pw_avg 40W
+  L: status=200 start=0.00 ttft=10.287 total=12.02 events=64 rate=36.3
+  a: status=200 start=1.00 ttft=11.394 total=11.62 events=9 rate=34.9
+  b: status=200 start=2.00 ttft=11.054 total=11.63 events=23 rate=38.2
+--- long_plus_two run 2: wall 14.08s events 96 agg 6.8 ev/s  rss_peak 290MiB vram_peak 4664MiB gpu_util_avg 96% pw_avg 39W
+  L: status=200 start=0.00 ttft=10.793 total=12.46 events=64 rate=37.7
+  a: status=200 start=1.00 ttft=11.849 total=12.08 events=9 rate=34.5
+  b: status=200 start=2.00 ttft=11.494 total=12.08 events=23 rate=37.8
+--- long_plus_two run 3: wall 14.13s events 96 agg 6.8 ev/s  rss_peak 290MiB vram_peak 4632MiB gpu_util_avg 100% pw_avg 40W
+  L: status=200 start=0.00 ttft=10.808 total=12.48 events=64 rate=37.7
+  a: status=200 start=1.00 ttft=11.86 total=12.10 events=9 rate=33.3
+  b: status=200 start=2.00 ttft=11.547 total=12.13 events=23 rate=37.6
+--- three_interactive run 1: wall 2.19s events 41 agg 18.7 ev/s  rss_peak 290MiB vram_peak 4536MiB gpu_util_avg 99% pw_avg 39W
+  a: status=200 start=0.00 ttft=0.34 total=0.56 events=9 rate=36.4
+  b: status=200 start=0.05 ttft=0.964 total=1.53 events=23 rate=38.6
+  c: status=200 start=0.10 ttft=1.874 total=2.09 events=9 rate=37.6
+--- three_interactive run 2: wall 2.20s events 41 agg 18.7 ev/s  rss_peak 290MiB vram_peak 4600MiB gpu_util_avg 99% pw_avg 40W
+  a: status=200 start=0.00 ttft=0.35 total=0.60 events=9 rate=32.1
+  b: status=200 start=0.05 ttft=0.967 total=1.58 events=23 rate=36.1
+  c: status=200 start=0.10 ttft=1.877 total=2.10 events=9 rate=36.5
+--- three_interactive run 3: wall 2.21s events 41 agg 18.5 ev/s  rss_peak 290MiB vram_peak 4600MiB gpu_util_avg 80% pw_avg 36W
+  a: status=200 start=0.00 ttft=0.335 total=0.56 events=9 rate=35.7
+  b: status=200 start=0.05 ttft=0.999 total=1.51 events=23 rate=42.7
+  c: status=200 start=0.10 ttft=1.872 total=2.11 events=9 rate=33.3
+
+Prompt sizes: 1317 prompt tokens for the long job (prefill ~10.2 s, ~129 tok/s). Decode ~38 events/s. A single client already keeps the GPU 95-100% busy (decode is weight-bandwidth bound).
+
+## Candidate V7 (gate + 64-token slices + worker threads), final binary
+
+Same machine and scenarios; `up to 3 at once` was chosen by the free-VRAM rule. Medians of three runs unless noted.
+
+--- solo_short run 1: wall 0.62s events 9 agg 14.5 ev/s  rss_peak 273MiB vram_peak 4440MiB gpu_util_avg 98% pw_avg 37W
+  s1: status=200 start=0.00 ttft=0.411 total=0.62 events=9 rate=38.1
+--- solo_short run 2: wall 0.54s events 9 agg 16.6 ev/s  rss_peak 273MiB vram_peak 4440MiB gpu_util_avg 4% pw_avg 27W
+  s1: status=200 start=0.00 ttft=0.335 total=0.54 events=9 rate=38.8
+--- solo_short run 3: wall 0.66s events 9 agg 13.5 ev/s  rss_peak 273MiB vram_peak 4472MiB gpu_util_avg 100% pw_avg 37W
+  s1: status=200 start=0.00 ttft=0.402 total=0.66 events=9 rate=30.5
+--- solo_long run 1: wall 12.33s events 64 agg 5.2 ev/s  rss_peak 273MiB vram_peak 4632MiB gpu_util_avg 96% pw_avg 39W
+  L: status=200 start=0.00 ttft=10.635 total=12.33 events=64 rate=37.1
+--- solo_long run 2: wall 12.42s events 64 agg 5.2 ev/s  rss_peak 273MiB vram_peak 4632MiB gpu_util_avg 100% pw_avg 40W
+  L: status=200 start=0.00 ttft=10.734 total=12.42 events=64 rate=37.3
+--- solo_long run 3: wall 12.35s events 64 agg 5.2 ev/s  rss_peak 273MiB vram_peak 4600MiB gpu_util_avg 100% pw_avg 40W
+  L: status=200 start=0.00 ttft=10.671 total=12.35 events=64 rate=37.5
+--- three_interactive run 1: wall 2.17s events 41 agg 18.9 ev/s  rss_peak 279MiB vram_peak 4664MiB gpu_util_avg 99% pw_avg 39W
+  a: status=200 start=0.00 ttft=0.331 total=1.72 events=9 rate=5.7
+  b: status=200 start=0.05 ttft=0.684 total=2.12 events=23 rate=15.3
+  c: status=200 start=0.10 ttft=1.042 total=1.70 events=9 rate=12.2
+--- three_interactive run 2: wall 2.22s events 41 agg 18.5 ev/s  rss_peak 279MiB vram_peak 4664MiB gpu_util_avg 76% pw_avg 37W
+  a: status=200 start=0.00 ttft=0.342 total=1.75 events=9 rate=5.7
+  b: status=200 start=0.05 ttft=0.696 total=2.17 events=23 rate=14.9
+  c: status=200 start=0.10 ttft=1.077 total=1.73 events=9 rate=12.3
+--- three_interactive run 3: wall 2.22s events 41 agg 18.5 ev/s  rss_peak 279MiB vram_peak 4696MiB gpu_util_avg 81% pw_avg 37W
+  a: status=200 start=0.00 ttft=0.341 total=1.72 events=9 rate=5.8
+  b: status=200 start=0.05 ttft=0.693 total=2.16 events=23 rate=14.9
+  c: status=200 start=0.10 ttft=1.073 total=1.70 events=9 rate=12.8
+--- long_plus_two run 1: wall 14.10s events 96 agg 6.8 ev/s  rss_peak 279MiB vram_peak 4760MiB gpu_util_avg 96% pw_avg 39W
+  L: status=200 start=0.00 ttft=12.403 total=14.10 events=64 rate=37.1
+  a: status=200 start=1.00 ttft=0.85 total=1.62 events=9 rate=10.3
+  b: status=200 start=2.00 ttft=0.421 total=1.21 events=23 rate=28.1
+--- long_plus_two run 2: wall 14.17s events 96 agg 6.8 ev/s  rss_peak 279MiB vram_peak 4760MiB gpu_util_avg 96% pw_avg 39W
+  L: status=200 start=0.00 ttft=12.463 total=14.17 events=64 rate=37.0
+  a: status=200 start=1.00 ttft=0.871 total=1.63 events=9 rate=10.5
+  b: status=200 start=2.00 ttft=0.428 total=1.22 events=23 rate=27.9
+--- long_plus_two run 3: wall 14.08s events 96 agg 6.8 ev/s  rss_peak 279MiB vram_peak 4728MiB gpu_util_avg 96% pw_avg 39W
+  L: status=200 start=0.00 ttft=12.362 total=14.07 events=64 rate=36.8
+  a: status=200 start=1.00 ttft=0.36 total=0.55 events=9 rate=42.9
+  b: status=200 start=2.00 ttft=0.507 total=1.18 events=23 rate=32.8
+
+## Gate evaluation summary (script output; TTFT is of interactive clients, p95 of the 6-9 samples)
+
+('BASE', 'solo_short') {'ttft_p50': 0.349, 'ttft_p95': 0.353, 'ttft_max': 0.353, 'wall': 0.59, 'agg': 15.25, 'total': 0.59, 'fail': 0}
+('BASE', 'solo_long') {'ttft_p50': nan, 'ttft_p95': nan, 'ttft_max': nan, 'wall': 11.874, 'agg': 5.39, 'total': 11.873, 'fail': 0}
+('BASE', 'three_interactive') {'ttft_p50': 0.943, 'ttft_p95': 1.887, 'ttft_max': 1.887, 'wall': 2.172, 'agg': 18.873, 'total': 1.454, 'fail': 0}
+('BASE', 'long_plus_two') {'ttft_p50': nan, 'ttft_p95': nan, 'ttft_max': nan, 'wall': 12.41, 'agg': 5.157, 'total': 12.2, 'fail': 6}
+('BASE-WAIT', 'three_interactive') {'ttft_p50': 0.967, 'ttft_p95': 1.877, 'ttft_max': 1.877, 'wall': 2.196, 'agg': 18.667, 'total': 1.534, 'fail': 0}
+('BASE-WAIT', 'long_plus_two') {'ttft_p50': 11.52, 'ttft_p95': 11.86, 'ttft_max': 11.86, 'wall': 14.076, 'agg': 6.82, 'total': 12.463, 'fail': 0}
+('V7', 'solo_short') {'ttft_p50': 0.402, 'ttft_p95': 0.411, 'ttft_max': 0.411, 'wall': 0.622, 'agg': 14.48, 'total': 0.621, 'fail': 0}
+('V7', 'solo_long') {'ttft_p50': nan, 'ttft_p95': nan, 'ttft_max': nan, 'wall': 12.35, 'agg': 5.182, 'total': 12.35, 'fail': 0}
+('V7', 'three_interactive') {'ttft_p50': 0.693, 'ttft_p95': 1.077, 'ttft_max': 1.077, 'wall': 2.215, 'agg': 18.509, 'total': 1.729, 'fail': 0}
+('V7', 'long_plus_two') {'ttft_p50': 0.468, 'ttft_p95': 0.871, 'ttft_max': 0.871, 'wall': 14.102, 'agg': 6.808, 'total': 14.101, 'fail': 0}
+
+Mean completion time of the three_interactive clients: BASE 1.35 s, BASE-WAIT 1.40 s, V7 1.86 s (a 0.54->1.72, b 1.45->2.16, c 2.07->1.70). Interleaving trades mean completion of short requests for a lower tail TTFT.
+
+Solo short TTFT, 20 back-to-back runs after 5 warm-ups, two server restarts each: BASE 0.340 / 0.3395 s median, V7 0.341 / 0.3375 s.
+
+## Correctness and behaviour checks (behave.py, kept in the scratchpad; results)
+
+- Greedy text of every client in every run above is byte-identical to the sequential BASE text (solo, three_interactive, long_plus_two).
+- Real-model sliced prefill (1266 tokens, slices of 64 and 128) vs one pass: normalized max 0, relative RMS 0 (bit-identical logits and one decode step later); test `crates/model/tests/qwen35_slices.rs`.
+- Concurrent turn 1 of two new sessions equals the sequential text. Turn 2: session A 200 (41 tokens reused, text equals fresh), session B 404 because the single resident slot holds only the last finished session. Same session ID used by two requests at once: one 200, one 404 (in use).
+- Client disconnects 1.5 s into a 1317-token prefill: the next short request completes 2.64 s after the disconnect (cancel takes effect at the next slice; the old server would finish the 10 s prefill first).
+- Five long requests plus two extras with 3 active: 3 x 200, 2 x 408 (waited >10 s), both extras 503.
+- Session checkpoint regression (ctx 512, 3 pairs each, medians): code pair BASE 3.511 s / V7 3.499 s, chat 3.624 / 3.622 s; turn-2 TTFT 0.494 / 0.490 and 0.517 / 0.514 s; reuse-off pairs 4.743 / 4.825 and 5.025 / 5.055 s.
+
+### Defect found and fixed during validation
+
+With worker threads, evicting a stored session from a request thread that had not yet made a GPU call freed device memory with no current CUDA context (cudarc does not bind the context in `CudaSlice::drop`), recording CUDA_ERROR_INVALID_CONTEXT that failed the next allocation (HTTP 500). Each worker now calls `Gpu::bind_to_thread` first. Reproduced with: session request, then any request.
+
+### Decisions
+
+- Slice size 64, hold 10 ms and aging 2 s were chosen once and not tuned; other values are untested.
+- Continuous batching not built: after interleaving, the GPU is already 95-100% busy and aggregate throughput equals the sequential server (6.81 vs 6.82 events/s), so the measured limit is single-stream decode, not scheduling.
+
+
+## Verbatim BENCHMARKS.md section before the V8 consolidation (2026-10-18)
+
+## V7 multi-request responsiveness — GO for Qwen3.5 CUDA
+
+Gates were fixed first ([scheduling archive](docs/benchmarks/archive/06-server-scheduling.log)).
+Qwen3.5-4B Q8 CUDA, `--ctx 2048`, temperature 0, a 1,317-token job (64 output
+tokens) plus 47-token interactive requests, medians of 3; "wait 120 s" is the
+sequential server with the queue wait raised from 10 s for a matched baseline.
+Each connection runs on its own thread (up to 3, fewer if free VRAM is short;
+one on every other backend); GPU passes go through a gate, one at a time,
+prompts in 64-token slices, decode steps and short prompts before full slices
+(10 ms hold, 2 s aging). Sliced prefill is bit-identical to one pass.
+
+| Metric | Sequential | Wait 120 s | Scheduled |
+|---|---:|---:|---:|
+| Long + 2 short: short TTFT p50 / p95 | rejected (408) | 11.5 / 11.9 s | **0.47 / 0.87 s** |
+| Long + 2 short: long job / events/s | 12.2 s / 5.16 | 12.5 s / 6.82 | 14.1 s / 6.81 |
+| 3 short: TTFT p50 / p95; mean completion | 0.94 / 1.89 s; 1.35 s | 0.97 / 1.88 s; 1.40 s | 0.69 / 1.08 s; **1.86 s** |
+| Solo short TTFT / solo long total | 0.340 s / 11.87 s | | 0.339 s / 12.35 s |
+
+Greedy text matched the sequential server in every run; sessions stay
+isolated, a mid-prefill disconnect frees the GPU at the next slice, 503/408
+admission is unchanged. Round-robin lowered tail TTFT but raised short-only
+mean completion 33% until decode was batched (below).
+

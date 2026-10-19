@@ -99,13 +99,9 @@ for exact command lines, ranges, context limits and raw-result paths.
 
 ## Persistent server gate: Qwen3.5-4B INT8 CUDA
 
-**GO for sequential local text requests.** One release-build process loaded
-`/home/mitali/models/Qwen3.5-4B-Q8` in 4.41 s, then answered three requests
-without another model load. Configuration: RTX 5050, `--backend cuda
---quantize int8 --ctx 256 --temp 0`, 47 prompt tokens, up to 24 output tokens,
-the same one-sentence greeting each time. A separate non-streaming request
-reported nine completion tokens. This is one focused run with warm file cache,
-not a throughput distribution or a multi-client benchmark.
+**GO for local text requests.** One release process loaded
+`~/models/Qwen3.5-4B-Q8` in 4.41 s and answered three requests with no reload
+(RTX 5050, `--ctx 256 --temp 0`, 47 prompt tokens, one warm run):
 
 | Request | First visible token | Total response | Current RSS after | Process VRAM after |
 |---|---:|---:|---:|---:|
@@ -114,61 +110,21 @@ not a throughput distribution or a multi-client benchmark.
 | 2 | 0.438 s | 0.722 s | 269.2 MiB | 4,440 MiB |
 | 3 | 0.327 s | 0.737 s | 269.2 MiB | 4,472 MiB |
 
-The process RSS high-water mark was 870.8 MiB. From request 2 to 3,
-resident RSS rose <1 MiB and process VRAM rose 32 MiB, below the fixed
-128 MiB gate. The greeting was identical in streaming, non-streaming and
-`marin run`: `Hello! How can I help you today?` The focused fixture test
-also exercises a bad model name, A→B→A request isolation, disconnect recovery
-and CLI parity. The pinned one-case 128-token Qwen3.5-4B Q8 CUDA HF verifier
-also passed: exact token choice, max logit difference 1.31e-5, max layer
-difference 1.18e-5, normalized max 3.879e-6 and relative RMS 3.288e-6.
-This verifies the shared inference engine; it is not a separate HTTP-level HF
-trace. The stream sends nine content pieces; the eight post-first
-pieces divided by remaining response time imply about 20–42 pieces/s here,
-but this is a short-run proxy, not Marin's formal decode TPS metric. Power
-and clocks were not sampled for these requests.
+RSS high-water mark 870.8 MiB; request 2 to 3 grew RSS <1 MiB and VRAM
+32 MiB (gate 128 MiB). The greeting was identical streamed, non-streamed and
+in `marin run`; the fixture test covers a bad model name, A→B→A isolation,
+disconnect recovery and CLI parity. The pinned 128-token Q8 CUDA HF check
+passed: exact token, max logit 1.31e-5, max layer 1.18e-5, normalized max
+3.879e-6, relative RMS 3.288e-6 (shared engine, not an HTTP-level trace).
+Streamed pieces/s is a short-run proxy, not decode TPS; power was not sampled.
+The server binds loopback only: no continuous batching, authentication,
+conversation store, vision or tools; string messages within the context and
+1 MiB body. A graceful client half-close can count as cancellation.
+Command lines are in the [server archive](docs/benchmarks/archive/04-server-sessions.log) and the README.
 
-Reproduce the serving setup and a streamed request:
+### Gates for session reuse and bounded queuing
 
-```bash
-marin --model ~/models/Qwen3.5-4B-Q8 --backend cuda --quantize int8 \
-  --ctx 256 --temp 0 serve --port 8000
-curl -N http://127.0.0.1:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"Qwen3.5-4B-Q8","messages":[{"role":"user","content":"Say hello in one short sentence."}],"temperature":0,"max_tokens":24,"stream":true}'
-```
-
-The server accepts one request at a time on loopback. It has no batching,
-remote authentication, persistent conversation store, vision or tool calls.
-OpenAI clients must send string-message chat completions within the selected
-context and the 1 MiB request-body limit. A graceful client half-close can be
-treated as cancellation, so clients should keep the connection open to read
-the response. A long concurrent-client or adverse-network load test remains
-unverified.
-
-### Gates fixed before session reuse and bounded queuing
-
-- Opt-in bearer session IDs are scoped to one loaded model process. Reuse only
-  when the complete retained token ledger is an exact prefix of the next
-  rendered prompt, with at least one new token. A changed or shorter prompt
-  must report zero reused tokens and match fresh greedy text exactly. IDs
-  from another server instance must not access state.
-- A complete Qwen3.5-4B CUDA INT8 two-turn chat must produce identical greedy
-  text with reuse on/off and exact streamed/non-streamed output. Reused turn 2
-  must skip at least 90% of turn 1's prompt tokens and cut matched, warmed
-  turn-2 TTFT by at least 20% across three runs. Decode throughput must stay
-  within 10%; retain the original HF tolerances and exact token choices.
-- Only one session cache may be resident. New, anonymous, reset or incompatible
-  requests evict before allocating a replacement. Across three repeated
-  turn pairs, second-to-third process RSS and VRAM growth must each stay below
-  128 MiB. No extra model-weight copy or unbudgeted parallel cache is allowed.
-- One request executes while at most two wait in FIFO order. A further
-  connection gets HTTP 503; a queued request older than 10 s or a partially
-  read request older than 10 s fails clearly. At 300 s, active-generation
-  cancellation must be requested and take effect at the next generation
-  boundary. Disconnect, timeout and inference failure must never publish a
-  partially updated session; the next request remains usable. TCP write
-  half-close must still receive a valid response.
+Fixed before implementation; text archived in the [server archive](docs/benchmarks/archive/04-server-sessions.log). In short: exact-prefix reuse only, one resident session cache, one request running with two waiting in FIFO order, 503 beyond that, 408 after 10 s, 300 s cancellation, and no partial session ever published.
 
 ### Opt-in server sessions: measured result
 
@@ -203,21 +159,9 @@ wall-clock timeout and long-duration load were not tested; the deadline had
 only a 250 ms equivalent unit test. Prior checks and traces are in the
 [server archive](docs/benchmarks/archive/04-server-sessions.log).
 
-## End-to-end session checkpoint gates (set before implementation)
+## End-to-end session checkpoint gates
 
-On the same Qwen3.5-4B packed INT8 artifact, RTX 5050, context 512 and
-temperature zero, use three matched two-turn coding pairs and three chat
-pairs, with the exact returned assistant text in turn two. Compare reuse off,
-the replay-based server, and the candidate on a warm model with no competing
-benchmark. Accept only if greedy text and the pinned HF logit tolerances stay
-unchanged; template boundaries, changed-prefix fallback, rollback,
-cancellation, isolation and streaming/non-streaming equality pass. The median
-whole-pair response time must improve at least 10% over reuse off and 20%
-over replay-based reuse. Turn-two TTFT must remain at least 20% below fresh;
-decode event rate must stay within 5% of replay-based reuse. Process RSS and
-VRAM after three pairs may grow less than 128 MiB; checkpoint allocation must
-respect the existing admission slack. Reject the candidate if any of these
-gates fails. Archive raw timings and the measured breakdown separately.
+Fixed before implementation ([archive](docs/benchmarks/archive/05-server-checkpoints.log)): identical greedy text and HF tolerances, whole-pair latency at least 10% below reuse off and 20% below replay reuse, turn-two TTFT at least 20% below fresh, decode within 5%, RSS/VRAM growth under 128 MiB.
 
 ### Measured checkpoint result — GO for Qwen3.5 CUDA sessions
 
@@ -253,6 +197,53 @@ cache exists only during an active request, so long-context checkpoint fit
 remains a memory-limit case rather than a promise of speed at every context.
 Full CUDA-required workspace tests, forced-scalar server/model tests, fmt,
 check, Clippy `-D warnings`, line-limit and unsafe checks passed.
+
+## V7/V7c multi-request serving — GO for Qwen3.5 CUDA
+
+Archives: [scheduling](docs/benchmarks/archive/06-server-scheduling.log),
+[batched decode](docs/benchmarks/archive/07-batched-decode.log),
+[memory](docs/benchmarks/archive/08-batched-memory.log). Up to 3 request threads;
+GPU passes go through a gate one at a time, prompts in 64-token slices (bit-identical
+to one pass), decode steps of up to 3 requests share one `forward_batch` pass
+(N-token Q8 matvec, caches updated in place; a pass that fails after writing marks
+the batch for replay from the token ledger, 5.7e-6 from incremental decoding).
+
+| Qwen3.5-4B Q8 CUDA, 128 tokens/client | V7 sequential | Batched |
+|---|---:|---:|
+| 1 / 2 / 3 decoders, events/s | 29.5 / 29.1 / 29.0 | 29.3 / 44.5 / **54.5 (1.88x)** |
+| Long + 2 short: short TTFT p50 / p95 | rejected (408) | 0.47 / 0.87 s |
+| 3 short: mean completion; process VRAM growth | 2.05 s | 1.60 s; <= 0 MiB (gate 128) |
+
+Greedy text equals the sequential server's in every run; HF check, isolation,
+cancellation, session pairs and CUDA/scalar tests hold. Engine ceiling 2.35x at B = 3.
+
+## V8 batched prompt prefill — NO-GO, not built
+
+Prefill is a flat 7.1–7.7 ms/token from 8 tokens (82% matmul, 17% recurrence, <2%
+launches/state/sync), so one pass over two prompts' rows cost −8% to +13% versus
+two passes, against a >= 10% gate ([archive](docs/benchmarks/archive/09-batched-prefill.log)).
+
+## V9 shared prompt prefix — GO for Qwen3.5 CUDA
+
+Gates fixed first ([archive](docs/benchmarks/archive/10-shared-prefix.log)). Every
+default-system request starts with the same 31 token IDs; a user message beginning
+with a newline merges with the last one, so requests are matched by token ID.
+Restoring a stored prefix cache costs 0.45 ms against 239 ms to recompute, and the
+restored cache plus tail gives bit-identical logits. The server builds one
+immutable cache at start (200 ms, 87 MiB) and each matching request starts from a
+copy; others take the old path. Interleaved A/B, 3 sessions each:
+
+| Scenario | Before | After |
+|---|---:|---:|
+| Solo short TTFT p50 / total | 0.333 / 0.581 s | **0.112 / 0.296 s** |
+| 3 short: TTFT p50 / p95; mean completion | 0.60 / 0.99 s; 1.51 s | **0.24 / 0.30 s; 0.81 s** |
+| Custom system message (no match) TTFT p50 | 0.430 s | 0.430 s |
+| 3 decoders events/s; long + 2 short long job | 55.7; 13.71 s | 61.7; 13.08 s |
+
+Greedy text identical in all 36 runs; session pairs (170/186 reused), isolation,
+cancellation and 200/404 behavior match the old server field for field; process
+VRAM +0–64 MiB (gate 128). Next: 16 tokens of real prefill remain (user text and
+9-token tail) at 7.5 ms/token; other system messages get no prefix.
 
 ## Results that changed the runtime
 
@@ -348,3 +339,4 @@ Section numbers and their original gates remain unchanged inside them:
 - [22–31: CPU SIMD, INT8, KV, INT4 pilots and consolidation](docs/benchmarks/archive/02-cpu-stages.log)
 - [32–40: packed loader, Qwen3.5 and V9 planner](docs/benchmarks/archive/03-loader-qwen35-planner.log)
 - [41–46: Granite MoE, numerical NO-GOs and H-Tiny pilot](docs/benchmarks/archive/04-granite-moe.log)
+- Server logs: [sessions](docs/benchmarks/archive/04-server-sessions.log), [checkpoints](docs/benchmarks/archive/05-server-checkpoints.log), [V7 scheduling](docs/benchmarks/archive/06-server-scheduling.log), [V7b batched decode](docs/benchmarks/archive/07-batched-decode.log), [V7c memory](docs/benchmarks/archive/08-batched-memory.log), [V8 prefill](docs/benchmarks/archive/09-batched-prefill.log), [V9 prefix](docs/benchmarks/archive/10-shared-prefix.log) (load generator `06-load.py`, prompt `06-long-prompt.txt`)

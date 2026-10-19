@@ -72,10 +72,15 @@ FP32 precision. Qwen3 GPU chat uses FP16 KV by default; CPU KV is FP32.
 
 ## Serving text requests
 
-`marin serve` loads one chat model once and accepts sequential requests on
-`127.0.0.1` only. It supports OpenAI-style `/v1/models` and
+`marin serve` loads one chat model once and accepts requests on
+`127.0.0.1` only. Qwen3.5 on CUDA runs up to three requests at once (fewer when
+free GPU memory is short): each keeps its own state, prompts are fed in
+64-token slices, and decode steps and short prompts run ahead of a long
+prefill, so a short request is not stuck behind a long one. Decode steps of
+concurrent requests share one GPU pass (up to three). Every other
+backend runs one request at a time. It supports OpenAI-style `/v1/models` and
 `/v1/chat/completions` with string messages, non-streaming JSON or SSE token
-streaming. Anonymous requests use a fresh inference cache. It does not batch,
+streaming. Anonymous requests use a fresh inference cache. It does not batch prompts,
 execute tools, accept multimodal content or provide network authentication;
 keep it on loopback. Snapshots are unavailable in server mode and `--snapshot`
 is rejected. Opt-in sessions retain one conversation prefix in memory; a new
@@ -106,8 +111,8 @@ still rebuild that history after each opt-in turn.
 
 Add `"stream":true` for `text/event-stream` chunks ending in `[DONE]`;
 the final chunk includes the session ID and reuse count. TCP write half-close
-still permits a response. One request runs while at most two wait; further
-connections receive 503. Queued and partial-read requests time out after
+still permits a response. At most two requests wait beyond those running;
+further connections receive 503. A session ID in use by another request returns 404. Queued and partial-read requests time out after
 10 seconds; generation requests cancellation after 300 seconds, effective
 at the next model boundary. The 1 MiB body and selected context limits still
 apply. A failed or cancelled turn never publishes partial state; a session

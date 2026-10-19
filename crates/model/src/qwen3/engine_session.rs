@@ -1,7 +1,26 @@
 use super::{Engine, EngineCache, GPU_SLACK_BYTES, wrong_backend};
 use crate::ModelError;
+use kv::KvCache;
+use runtime::CausalLm;
+
+impl EngineCache {
+    /// An empty stand-in to leave behind while the real cache is lent out; it holds no memory.
+    pub fn vacant() -> Option<Self> {
+        KvCache::new(0, 1, 1, 1).ok().map(Self::Cpu)
+    }
+}
 
 impl Engine {
+    /// Prepares the calling thread to use and free this model's GPU memory. Does nothing on the CPU.
+    pub fn bind_to_thread(&self) -> Result<(), ModelError> {
+        match self {
+            Self::Cpu(_) | Self::Qwen35(_) | Self::Granite(_) => Ok(()),
+            Self::GraniteCuda(m) => Ok(m.gpu().bind_to_thread()?),
+            Self::Cuda(m) => Ok(m.gpu().bind_to_thread()?),
+            Self::Qwen35Cuda(m) => Ok(m.gpu().bind_to_thread()?),
+        }
+    }
+
     /// Snapshot a Qwen3.5 GPU history boundary while leaving the generation cache writable.
     pub fn session_checkpoint(
         &self,
@@ -22,4 +41,69 @@ impl Engine {
             _ => Ok(None),
         }
     }
+
+    /// How many sequences `decode_batch` serves in one pass; 1 where batching is not supported.
+    pub fn batch_limit(&self) -> usize {
+        match self {
+            Self::Qwen35Cuda(_) => crate::qwen35::MAX_BATCH,
+            _ => 1,
+        }
+    }
+
+    /// One decode step for each sequence in a single pass, with the logits each `forward` would give. If the pass
+    /// cannot run as a batch, every sequence is stepped alone, so a failure is reported only for the sequence it
+    /// belongs to.
+    pub fn decode_batch(
+        &self,
+        steps: Vec<(u32, EngineCache)>,
+    ) -> Vec<(EngineCache, Result<Vec<f32>, ModelError>)> {
+        let Self::Qwen35Cuda(model) = self else {
+            return alone(self, steps);
+        };
+        if steps
+            .iter()
+            .any(|(_, cache)| !matches!(cache, EngineCache::Qwen35Cuda(_)))
+        {
+            return alone(self, steps);
+        }
+        let (tokens, mut caches): (Vec<u32>, Vec<_>) = steps
+            .into_iter()
+            .filter_map(|(token, cache)| match cache {
+                EngineCache::Qwen35Cuda(gpu) => Some((token, gpu)),
+                _ => None,
+            })
+            .unzip();
+        let mut refs: Vec<&mut crate::qwen35::GpuCache> =
+            caches.iter_mut().map(|c| &mut **c).collect();
+        let batched = model.forward_batch(&tokens, &mut refs);
+        drop(refs);
+        match batched {
+            Ok(rows) => caches
+                .into_iter()
+                .zip(rows)
+                .map(|(cache, row)| (EngineCache::Qwen35Cuda(cache), Ok(row)))
+                .collect(),
+            Err(_) => alone(
+                self,
+                tokens
+                    .into_iter()
+                    .zip(caches)
+                    .map(|(token, cache)| (token, EngineCache::Qwen35Cuda(cache)))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+fn alone(
+    engine: &Engine,
+    steps: Vec<(u32, EngineCache)>,
+) -> Vec<(EngineCache, Result<Vec<f32>, ModelError>)> {
+    steps
+        .into_iter()
+        .map(|(token, mut cache)| {
+            let logits = engine.forward(&[token], &mut cache);
+            (cache, logits)
+        })
+        .collect()
 }

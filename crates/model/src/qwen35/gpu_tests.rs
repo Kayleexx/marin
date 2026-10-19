@@ -54,7 +54,7 @@ fn delta_device_steps_match_cpu_reference() -> Result {
         return Err("expected Delta".into());
     };
     let gpu = &model.gpu;
-    let mut ws = Workspace::new(gpu, &model.config, 1)?;
+    let mut ws = Workspace::new(gpu, &model.config, (1, 1))?;
     ws.hidden = gpu.upload(&x)?;
     gpu.rms_norm_into(
         &ws.hidden,
@@ -225,6 +225,30 @@ fn gpu_sessions_replay_reset_and_late_failure_are_transactional() -> Result {
             "failure rollback continuation",
         );
         assert_eq!(contents(&model, &whole)?, contents(&model, &fresh)?);
+
+        let mut pair = Vec::new();
+        for prompt in [&[21_u32, 27, 31][..], &[11, 12][..]] {
+            let (mut live, mut twin) = (model.new_cache(64)?, model.new_cache(64)?);
+            model.forward(prompt, &mut live)?;
+            model.forward(prompt, &mut twin)?;
+            pair.push((live, twin));
+        }
+        let bad = model
+            .gpu
+            .upload(&vec![f32::NAN; model.config.block.hidden_size])?;
+        let saved = std::mem::replace(&mut model.norm, bad);
+        let mut refs: Vec<_> = pair.iter_mut().map(|(live, _)| live).collect();
+        assert!(model.forward_batch(&[5, 6], &mut refs).is_err());
+        model.norm = saved;
+        for ((live, twin), (token, used)) in pair.iter_mut().zip([(5, 3), (6, 2)]) {
+            assert_eq!(live.used(), used);
+            close(
+                &model.forward(&[token], live)?,
+                &model.forward(&[token], twin)?,
+                "batch failure continuation",
+            );
+            assert_eq!(contents(&model, live)?, contents(&model, twin)?);
+        }
     }
     Ok(())
 }

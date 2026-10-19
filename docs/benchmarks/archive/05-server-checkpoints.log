@@ -113,3 +113,22 @@ Use `/proc/$PID/status` for RSS and `nvidia-smi --query-compute-apps=pid,used_gp
 --format=csv,noheader` for process VRAM. The pinned reference command is
 `target/release/marin-run verify /home/mitali/models/Qwen3.5-4B-Q8 --backend
 cuda --quantize int8 --reference bench-results/qwen35-4b/hf-int8-128.json`.
+
+
+# Gate text moved verbatim from BENCHMARKS.md (V7 consolidation)
+
+## End-to-end session checkpoint gates (set before implementation)
+
+On the same Qwen3.5-4B packed INT8 artifact, RTX 5050, context 512 and
+temperature zero, use three matched two-turn coding pairs and three chat
+pairs, with the exact returned assistant text in turn two. Compare reuse off,
+the replay-based server, and the candidate on a warm model with no competing
+benchmark. Accept only if greedy text and the pinned HF logit tolerances stay
+unchanged; template boundaries, changed-prefix fallback, rollback,
+cancellation, isolation and streaming/non-streaming equality pass. The median
+whole-pair response time must improve at least 10% over reuse off and 20%
+over replay-based reuse. Turn-two TTFT must remain at least 20% below fresh;
+decode event rate must stay within 5% of replay-based reuse. Process RSS and
+VRAM after three pairs may grow less than 128 MiB; checkpoint allocation must
+respect the existing admission slack. Reject the candidate if any of these
+gates fails. Archive raw timings and the measured breakdown separately.

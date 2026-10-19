@@ -1,0 +1,110 @@
+# V8 batched prompt prefill investigation, 2026-10-18 — NO-GO, nothing built
+
+Machine, model and flags as in 06-server-scheduling.log (RTX 5050 Laptop, 40 W cap,
+Qwen3.5-4B Q8 CUDA INT8, greedy). Code at the V7c state (08-batched-memory.log);
+no source file changed in this milestone.
+
+## Gates, fixed before any implementation
+
+Written after the profile below and before writing batched-prefill code.
+
+Performance (all required to keep batching):
+- G1 Aggregate prefill throughput of 2 and 3 concurrent prompts at least 1.10x the
+  one-pass-at-a-time scheduler (same prompts, same session).
+- G2 Short-only (3 x 48-token prompts): TTFT p95 not worse than V7c by more than
+  5%, mean completion not worse. Mixed long + 2 short: interactive TTFT p95 <= 1.0 s
+  and long job <= 15 s (V7c: 0.82 s, 14.1 s). A hold that waits for a second prompt
+  counts against TTFT.
+- G3 Solo short TTFT and solo long total within +3%; decode throughput at 3
+  decoders not below 54.5 events/s x 0.97.
+- G4 Peak process VRAM growth <= 128 MiB over V7c; no extra staged copies.
+Correctness: batch of 2 logits within the sliced-vs-one-pass tolerance (bit-equal
+expected), HF check unchanged, rollback / cancellation / session isolation /
+checkpoint reuse / replay recovery unchanged. Extend to 3 only after 2 passes.
+Decision rule: if the cheapest measurement of the shared work shows the upper bound
+below G1, stop; do not build to confirm a loss.
+
+## Profile: where prefill time goes
+
+`marin-run bench --profile`, ctx 1024, profiled prefill pass (stage times on the
+GPU clock), % of pass:
+
+| Prompt tokens | mlp | qkv proj | DeltaNet recurrence | attn out proj | all else |
+|---|---:|---:|---:|---:|---:|
+| 32 | n/a (cut) | 25.0 | 18.6 | 8.4 | |
+| 48 (full table below) | 51.6 | 22.3 | 16.6 | 7.8 | 1.7 |
+| 64 | n/a (cut) | 22.4 | 16.8 | 7.8 | |
+| 256 | n/a (cut) | 22.8 | 17.9 | 7.7 | |
+
+48-token pass, 394 ms: mlp 203.4 ms (1.07 TFLOP/s), qkv 88.0 (0.55), DeltaNet
+recurrence 65.4, attention out-proj 30.7 (1.05), lm head 1.8, causal conv 1.2,
+norm 0.9, attention 0.67, residual 0.4, state transaction copy 0.22, KV write 0.1,
+rope 0.06, embedding 0.02; outside timed stages 1.3 ms (0.3%). 523 kernel launches
+and 72 device allocations per pass; 334 ms of the pass spent waiting for queued GPU
+work. So: dense matmul 82%, recurrence 17%, launches / state copy / sync / norm /
+attention / glue under 2%. The recurrence is sequential per token and per sequence,
+so it cannot be shared by batching either way.
+
+Time per token is flat (`bench --prompt-tokens N --tokens 2`, TTFT median; first
+sweep, faster clocks): N=8 63.0 ms (7.9 ms/token), 16 121.3 (7.6), 24 174.3 (7.3),
+32 226.6 (7.1), 48 338.4 (7.05), 64 495.3 (7.7), 96 727.1 (7.6), 128 938.4 (7.3),
+192 1557 (8.1), 256 1950 (7.6), 512 3916 (7.65). A decode step is 16.7-24 ms for
+one token; the 2-4 token decode kernel gives 7.4 ms/token. The multi-row prefill
+kernel is already as cheap per token as the best weight-sharing kernel we have, so
+batching more rows does not buy another weight-read amortization.
+
+## Upper bound for shared projections (the decisive measurement)
+
+If two prompts of n tokens are batched, projections / MLP / LM head run once over 2n
+rows with the same kernels, and conv / recurrence / attention run per sequence
+(cost unchanged). A single sequence of 2n tokens measures exactly that shared work
+and is a faithful upper bound (it even omits the per-sequence row copies a batch
+needs). TTFT, median of 5 runs, second sweep (slower clocks, 7.5 ms/token):
+
+| Prompts | two separate passes | one pass of combined rows | merged vs separate |
+|---|---:|---:|---:|
+| 2 x 16 | 256 ms | 236 ms | -8.0% |
+| 2 x 32 | 472 ms | 533 ms | +12.9% |
+| 2 x 49 | 748 ms | 761 ms | +1.8% |
+| 2 x 64 | 1065 ms | 996 ms | -6.4% |
+| 2 x 98 | 1522 ms | 1477 ms | -3.0% |
+| 2 x 128 | 1993 ms | 1940 ms | -2.6% |
+| 3 x 49 | 1122 ms | 1111 ms | -1.0% |
+
+Best case -8%, typical -1% to -3%, one shape +13% (a kernel / tile switch near 64
+rows). G1 needs -9% on every shape, at no latency cost; batching also needs the first
+arrival to wait for the second (HOLD / COLLECT style), which raises its TTFT.
+Verdict: below G1 on 6 of 7 shapes and worse than separate on 2 of 7 -> NO-GO,
+not built. 08 showed the same result at the decode side only because the 2-4 token
+kernel shares weight decode across rows; prefill kernels already process 8+ rows.
+
+## Real 3-client workload (server)
+
+Prompt = the Marin system message + chat template + user text: 40 tokens fixed
+(`prompt_tokens` for 1 / 8 / 16 / 32 / 64 / 128 filler words = 41 / 48 / 56 / 72 /
+104 / 168; non-streaming TTFT 0.28-0.36 / 0.32-0.41 / 0.39-0.46 / 0.56-0.60 /
+0.77-0.81 / 1.24-1.25 s, about 7.5 ms per token plus about 0.07 s fixed). The
+"Say hello in one short sentence." request is 48 tokens: 40 shared + 8 user.
+three_interactive (0 / 0.05 / 0.10 s arrivals): TTFT about 0.34 / 0.65 / 1.03 s =
+one 0.33 s prefill each, back to back. Queue time is 0 / 0.30 / 0.66 s; kernel time
+0.33 s each; thread, template, allocation, staging and sampling overhead together
+within the 0.07 s intercept. 83% of every short request's prefill recomputes the
+same 40 tokens.
+
+## Decision and next bottleneck
+
+NO-GO: batching independent prompt slices into shared projection passes cannot beat
+sequential slices on this kernel (flat 7.1-7.7 ms/token, <= 8% best case, negative
+on some shapes) and would add a hold to the first arrival. Existing sliced prefill,
+batched decode, checkpoint reuse, memory admission and replay recovery are untouched.
+
+Measured next levers, largest first:
+1. The 40-token system / template prefix is identical across requests and is 83% of
+   a short request. Reusing its state (the checkpoint machinery already restores
+   exact recurrent + KV state; one shared prefix state per model and context)
+   would cut a 48-token prefill from about 0.33 s to about 0.07 s and the third
+   client's TTFT from about 1.03 s to about 0.3 s. Needs a separate design and
+   gates: the state is shared read-only and copied per request.
+2. Prefill matmul runs at 0.55-1.07 TFLOP/s on the non-tensor-core precise path
+   (kept for exact HF parity). A tiled GEMM is a kernel project and was out of scope.
+3. DeltaNet recurrence is 17% and sequential per token.

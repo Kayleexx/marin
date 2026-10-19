@@ -129,6 +129,70 @@ __device__ void matvec_rows(const void* codes, const float* scales, const float*
     }
 }
 
+// The same traversal for NT tokens at once: each weight is read and decoded once and used for every token.
+template <int NT>
+__device__ void matvec_rows_multi(const signed char* codes, const float* scales, const float* x, float* y,
+                                  unsigned int rows, unsigned int cols, unsigned int group, unsigned int first_row) {
+    const unsigned int lane = threadIdx.x & 31, groups = cols / group;
+    float acc[ROWS_PER_WARP][NT];
+    for (int r = 0; r < ROWS_PER_WARP; ++r)
+        for (int t = 0; t < NT; ++t) acc[r][t] = 0.0f;
+    for (unsigned int c0 = lane * 8; c0 < cols; c0 += 256 * UNROLL) {
+        uint2 raw[UNROLL][ROWS_PER_WARP];
+        float scale[UNROLL][ROWS_PER_WARP];
+        float4 xa[UNROLL][NT], xb[UNROLL][NT];
+        bool valid[UNROLL];
+#pragma unroll
+        for (int u = 0; u < UNROLL; ++u) {
+            valid[u] = c0 + 256 * u < cols;
+            const unsigned int c = valid[u] ? c0 + 256 * u : c0;
+#pragma unroll
+            for (int t = 0; t < NT; ++t) {
+                xa[u][t] = *reinterpret_cast<const float4*>(x + (size_t)t * cols + c);
+                xb[u][t] = *reinterpret_cast<const float4*>(x + (size_t)t * cols + c + 4);
+            }
+#pragma unroll
+            for (int r = 0; r < ROWS_PER_WARP; ++r) {
+                const unsigned int row = min(first_row + r, rows - 1);
+                raw[u][r] = *reinterpret_cast<const uint2*>(codes + (size_t)row * cols + c);
+                scale[u][r] = scales[(size_t)row * groups + c / group];
+            }
+        }
+#pragma unroll
+        for (int u = 0; u < UNROLL; ++u) {
+#pragma unroll
+            for (int r = 0; r < ROWS_PER_WARP; ++r) {
+                float w[8];
+                decode_q8(raw[u][r], w);
+#pragma unroll
+                for (int t = 0; t < NT; ++t) {
+                    const float xv[8] = {xa[u][t].x, xa[u][t].y, xa[u][t].z, xa[u][t].w,
+                                         xb[u][t].x, xb[u][t].y, xb[u][t].z, xb[u][t].w};
+                    if (valid[u]) acc[r][t] += scale[u][r] * dot8(w, xv);
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < ROWS_PER_WARP; ++r)
+#pragma unroll
+        for (int t = 0; t < NT; ++t) {
+            const float total = warp_sum(acc[r][t]);
+            if (lane == 0 && first_row + r < rows) y[(size_t)t * rows + first_row + r] = total;
+        }
+}
+
+#define MULTI_KERNEL(NT)                                                                                           \
+    extern "C" __global__ void matvec_q8_t##NT(const signed char* codes, const float* scales, const float* x,     \
+                                               float* y, unsigned int rows, unsigned int cols,                    \
+                                               unsigned int group) {                                              \
+        const unsigned int first_row = (blockIdx.x * WARPS_PER_BLOCK + (threadIdx.x >> 5)) * ROWS_PER_WARP;        \
+        if (first_row < rows) matvec_rows_multi<NT>(codes, scales, x, y, rows, cols, group, first_row);            \
+    }
+MULTI_KERNEL(2)
+MULTI_KERNEL(3)
+MULTI_KERNEL(4)
+
 extern "C" __global__ void matvec_q8(const signed char* codes, const float* scales, const float* x, float* y,
                                      unsigned int rows, unsigned int cols, unsigned int group) {
     const unsigned int first_row = (blockIdx.x * WARPS_PER_BLOCK + (threadIdx.x >> 5)) * ROWS_PER_WARP;
