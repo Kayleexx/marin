@@ -16,7 +16,7 @@ fn tiny_model_matches_the_huggingface_reference() {
     let reference = read_reference(&fixture().join("reference.json")).unwrap();
     assert!(!reference.cases.is_empty());
     for case in &reference.cases {
-        let report = check_case(&model, &dir.tokenizer, case).unwrap();
+        let report = check_case(&model, &dir.tokenizer, case, &AtomicBool::new(false)).unwrap();
         assert_eq!(report.failure, None, "{report:?}");
         assert!(report.steps > 0);
         eprintln!(
@@ -40,7 +40,7 @@ fn tiny_model_matches_the_huggingface_reference_on_the_gpu() {
     let model = Engine::load(&dir, selected.backend, None, |_, _| {}).unwrap();
     let reference = read_reference(&fixture().join("reference.json")).unwrap();
     for case in &reference.cases {
-        let report = check_case(&model, &dir.tokenizer, case).unwrap();
+        let report = check_case(&model, &dir.tokenizer, case, &AtomicBool::new(false)).unwrap();
         assert_eq!(report.failure, None, "{report:?}");
         eprintln!(
             "gpu {:?}: max logit diff {:.3e}, max layer diff {:.3e}",
@@ -57,7 +57,7 @@ fn load_fixture() -> (ModelDir, Engine, Reference) {
 }
 
 fn failure(case: &Case, dir: &ModelDir, model: &Engine) -> String {
-    check_case(model, &dir.tokenizer, case)
+    check_case(model, &dir.tokenizer, case, &AtomicBool::new(false))
         .unwrap()
         .failure
         .unwrap_or_default()

@@ -1,26 +1,32 @@
 //! Session files on disk: one private folder, plain names, whole files only. A file is written complete under a
 //! temporary name and renamed into place, so a reader sees the old session or the new one, never half of either.
 
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::check::valid_name;
+use super::trust::{Trust, existing_ancestor};
 use super::{MAX_FILE, MAX_SESSIONS, Saved, SavedError};
 
 /// A temporary file older than this was left by a run that died while writing.
 const STALE: Duration = Duration::from_secs(600);
+/// How long a save waits for another run that is saving at the same moment.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
 
 pub struct Store {
-    dir: PathBuf,
+    pub(super) dir: PathBuf,
+    trust: Trust,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Written {
-    Created(PathBuf),
-    Replaced(PathBuf),
+pub struct Written {
+    pub path: PathBuf,
+    /// The number the file now carries; the next save of it must say it started from this one.
+    pub revision: u64,
+    pub replaced: bool,
 }
 
 pub struct Summary {
@@ -30,6 +36,8 @@ pub struct Summary {
     pub model: String,
     pub exchanges: (usize, usize),
     pub code: bool,
+    /// Size of the checkpoint kept for it, if there is one.
+    pub state_bytes: Option<u64>,
 }
 
 pub enum Listed {
@@ -52,14 +60,18 @@ pub fn now() -> u64 {
 
 impl Store {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self::trusting(dir, Trust::current())
+    }
+
+    pub fn trusting(dir: PathBuf, trust: Trust) -> Self {
+        Self { dir, trust }
     }
 
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
-    fn path(&self, name: &str) -> Result<PathBuf, SavedError> {
+    pub(super) fn path(&self, name: &str) -> Result<PathBuf, SavedError> {
         if valid_name(name) {
             Ok(self.dir.join(format!("{name}.json")))
         } else {
@@ -67,24 +79,22 @@ impl Store {
         }
     }
 
-    /// Checks the folder is a real one only this user can enter, making it when `create` is set. False if it does
-    /// not exist and was not made.
-    fn ready(&self, create: bool) -> Result<bool, SavedError> {
+    /// Checks the folder is a real one only this user can enter, on a path others cannot redirect, making it when
+    /// `create` is set. False if it does not exist and was not made.
+    pub(super) fn ready(&self, create: bool) -> Result<bool, SavedError> {
         let unsafe_dir = |reason: String| SavedError::UnsafeDir {
             path: self.dir.clone(),
             reason,
         };
+        self.trust
+            .path_to(&existing_ancestor(&self.dir))
+            .map_err(&unsafe_dir)?;
         match fs::symlink_metadata(&self.dir) {
-            Ok(meta) if meta.is_dir() => {
-                if meta.mode() & 0o077 != 0 {
-                    return Err(unsafe_dir(format!(
-                        "other users can enter it (mode {:o})",
-                        meta.mode() & 0o777
-                    )));
-                }
-                Ok(true)
-            }
-            Ok(_) => Err(unsafe_dir("it is a link or a file, not a folder".into())),
+            Ok(_) => self
+                .trust
+                .private_dir(&self.dir)
+                .map_err(unsafe_dir)
+                .map(|()| true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {
                 if let Some(parent) = self.dir.parent() {
                     fs::create_dir_all(parent).map_err(|e| io_error(parent, &e))?;
@@ -97,6 +107,40 @@ impl Store {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(io_error(&self.dir, &e)),
+        }
+    }
+
+    /// Holds the folder's lock, so that checking a session and replacing it cannot interleave with another run's
+    /// save. The lock goes when the returned file is dropped, including if the process dies.
+    pub(super) fn lock(&self) -> Result<File, SavedError> {
+        let path = self.dir.join(".lock");
+        if fs::symlink_metadata(&path).is_ok_and(|m| !m.is_file()) {
+            return Err(SavedError::UnsafeDir {
+                path,
+                reason: "the lock must be a plain file".into(),
+            });
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| io_error(&path, &e))?;
+        let started = Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(TryLockError::WouldBlock) if started.elapsed() < LOCK_WAIT => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(TryLockError::WouldBlock) => {
+                    return Err(SavedError::Busy {
+                        dir: self.dir.clone(),
+                    });
+                }
+                Err(TryLockError::Error(e)) => return Err(io_error(&path, &e)),
+            }
         }
     }
 
@@ -148,47 +192,67 @@ impl Store {
         }
     }
 
-    /// Writes `saved` under its name. An existing session of that name is replaced; any other file there is not.
-    pub fn save(&self, saved: &Saved) -> Result<Written, SavedError> {
+    /// Writes `saved` under its name as the next revision. `from` is the revision this conversation was opened at or
+    /// last saved as, if it came from this session: a session changed since then, or one this conversation did not
+    /// come from, is not replaced. Any other file at that name is not either.
+    pub fn save(&self, saved: &Saved, from: Option<u64>) -> Result<Written, SavedError> {
         let target = self.path(&saved.name)?;
         saved.check().map_err(|reason| SavedError::Corrupt {
             path: target.clone(),
             reason,
         })?;
-        let bytes = serde_json::to_vec(saved).map_err(|e| io_error(&target, &e.into()))?;
+        self.ready(true)?;
+        let _lock = self.lock()?;
+        let current = match fs::symlink_metadata(&target) {
+            Ok(_) => Some(self.load(&saved.name).map_err(|e| SavedError::NotOurs {
+                path: target.clone(),
+                reason: e.to_string(),
+            })?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(io_error(&target, &e)),
+        };
+        let revision = match (&current, from) {
+            (None, _) => 1,
+            (Some(kept), Some(seen)) if kept.revision == seen => seen.saturating_add(1),
+            (Some(kept), seen) => {
+                return Err(SavedError::Conflict {
+                    name: saved.name.clone(),
+                    found: kept.revision,
+                    seen,
+                });
+            }
+        };
+        let mut stamped = saved.clone();
+        stamped.revision = revision;
+        let bytes = serde_json::to_vec(&stamped).map_err(|e| io_error(&target, &e.into()))?;
         if bytes.len() as u64 > MAX_FILE {
             return Err(SavedError::TooBig {
                 path: target,
                 size: bytes.len() as u64,
             });
         }
-        self.ready(true)?;
-        let existed = match fs::symlink_metadata(&target) {
-            Ok(_) => {
-                self.load(&saved.name).map_err(|e| SavedError::NotOurs {
-                    path: target.clone(),
-                    reason: e.to_string(),
-                })?;
-                true
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => return Err(io_error(&target, &e)),
-        };
-        if !existed && self.names()?.len() >= MAX_SESSIONS {
+        if current.is_none() && self.names()?.len() >= MAX_SESSIONS {
             return Err(SavedError::TooMany {
                 dir: self.dir.clone(),
             });
         }
         self.sweep();
-        self.write_whole(&target, &bytes)?;
-        Ok(if existed {
-            Written::Replaced(target)
-        } else {
-            Written::Created(target)
+        self.write_with(&target, |file| file.write_all(&bytes))?;
+        let _ = fs::remove_file(self.state_path(&saved.name)?);
+        Ok(Written {
+            path: target,
+            revision,
+            replaced: current.is_some(),
         })
     }
 
-    fn write_whole(&self, target: &Path, bytes: &[u8]) -> Result<(), SavedError> {
+    /// Fills a temporary file through `write`, makes it durable and renames it over `target`, so that `target` is
+    /// always a whole file. A failure removes the temporary file and leaves `target` as it was.
+    pub(super) fn write_with(
+        &self,
+        target: &Path,
+        write: impl FnOnce(&mut File) -> std::io::Result<()>,
+    ) -> Result<(), SavedError> {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
@@ -200,7 +264,7 @@ impl Store {
             .create_new(true)
             .mode(0o600)
             .open(&temp)
-            .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()))
+            .and_then(|mut file| write(&mut file).and_then(|()| file.sync_all()))
             .and_then(|()| fs::rename(&temp, target));
         if let Err(e) = written {
             let _ = fs::remove_file(&temp);
@@ -264,6 +328,10 @@ impl Store {
                     model: saved.model.name.clone(),
                     exchanges: saved.exchanges(),
                     code: saved.code.is_some(),
+                    state_bytes: fs::symlink_metadata(self.dir.join(format!("{name}.state")))
+                        .ok()
+                        .filter(|m| m.is_file())
+                        .map(|m| m.len()),
                     name,
                 }),
                 Err(e) => Listed::Damaged {

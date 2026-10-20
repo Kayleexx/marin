@@ -8,6 +8,7 @@ mod gpu_batch;
 mod gpu_budget;
 mod gpu_cache;
 mod gpu_forward;
+mod gpu_state;
 mod gpu_weights;
 pub(crate) mod layout;
 mod math;
@@ -21,6 +22,7 @@ pub use gpu::Qwen35Gpu;
 pub use gpu_batch::MAX_BATCH;
 pub use gpu_budget::bytes as gpu_budget_bytes;
 pub use gpu_cache::GpuCache;
+pub use gpu_state::StateLayout;
 pub use model::{Qwen35, load_bytes, weight_bytes};
 pub use model_config::{TextConfig, is_qwen35};
 

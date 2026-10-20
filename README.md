@@ -133,13 +133,26 @@ damaged or outdated config is reported once and replaced. A packed 8-bit model n
 question for a saved model) is that opt-in, remembered with the model.
 
 Type `/` for actions and keep typing to search them: `/mode code`, `/mode chat`,
-`/model`, `/status`, `/settings`, `/save`, `/resume`, `/sessions`, `/clear`, `/help`, `/exit`. Piped input takes the same
+`/model`, `/status`, `/bench`, `/verify`, `/settings`, `/save`, `/resume`, `/sessions`, `/clear`, `/help`, `/exit`. Piped input takes the same
 commands as lines (`printf '/mode code\nwhere is main?\n' | marin`); other lines are
 questions. Each mode keeps its own conversation, `/clear` forgets the current one, a reply stopped
 with Ctrl-C is not kept (in either mode), and a
 different model starts both over. On Qwen3.5 GPU the chat history is
 read once and checkpointed, so a long conversation does not replay itself each turn. `marin run` with no text on a terminal opens the same chat;
 with text or a pipe it answers once, as before.
+
+**Checking the model you are talking to.** `/bench [PROMPT [OUTPUT]] [runs=N] [profile] [quick]` times the
+loaded model on a fixed prompt (default 128 tokens in, 64 out, 3 runs after a warmup) and prints first-token time, prefill and
+decode speed, token latency, and memory; `/verify [FILE]` compares it with a float32 Hugging Face reference and prints
+`result: PASS` only if every case matches. Both are the same code as `marin-run bench` and `marin-run verify`, run on the model
+already in memory: it is not loaded again, the conversation, its cache and any checkpoint are not touched, and Ctrl-C stops
+either one. The benchmark uses a cache of its own (a few hundred MB at most, shown in its report) and a workload that fits this
+session's window; it keeps the load time of startup apart from what it measures, and says nothing it did not measure. Peak
+process memory is the highest since `marin` started. `/verify` without a file looks for a reference made for this model (same
+weights storage, same layers, same tokenization of its prompts) in the model's folder, `tests/reference`, `tests/fixtures/*`
+and `bench-results/*` of the current directory; a reference made for something else is explained, never run, and no reference
+means no verdict. Ctrl-C takes effect at the next token or case: a long prompt pass (about 7 ms per token on Qwen3.5-4B) finishes
+first. `marin-run` is unchanged for scripts and reproducible measurements.
 
 **Saving a conversation** is opt-in: nothing is written until you ask.
 
@@ -153,11 +166,26 @@ with text or a pipe it answers once, as before.
   or oversized file is named and skipped; a file that is not a Marin session is never overwritten.
 - **A saved code session contains the source code and tool output the model read from the project.**
   Treat the file as private as the project; delete it when you no longer need it.
-- Only the text is saved, never the cache. Resuming reads the history again through the normal path
+- `/save` keeps only text, never the cache. Resuming reads the history again through the normal path
   (on Qwen3.5 GPU the next turns are cheap again after one read). It works only with the model it was
   saved with (name, configuration and tokenizer) and, for code mode, while the project folder exists;
   otherwise it says why and changes nothing. Sessions need a model loaded by `marin` itself, so they are
   not available in `marin code --port`.
+- Two runs cannot silently overwrite each other. A session carries a revision, and `/save` replaces it
+  only if your conversation started from that revision; otherwise it says another run saved since and
+  keeps theirs. Saving to a name that exists, when this conversation did not come from it, is refused. A
+  save waits a few seconds for a run that is saving at the same moment. The sessions folder must belong
+  to you, be mode 700, and sit on a path nobody else can redirect or change (links of other users and
+  group- or world-writable folders without the sticky bit are refused).
+- **`/checkpoint [name]` also keeps the model's processed state** of a saved session, so that `/resume`
+  skips reading the history again. It is separate from `/save` and off unless you ask. Qwen3.5 on the
+  GPU only; at least 256 tokens; the session must be saved and unchanged. The file is `<name>.state`
+  beside the session: about 51 MiB plus 64 KiB per token (82 MiB at 500 tokens, 307 MiB at 4,096),
+  at most 1 GiB each and 4 GiB together, mode 600. **It is derived from your conversation, code
+  included.** `/resume` uses it only if the session revision, model, weights, precision and state
+  layout match and every block of the file passes its hash; otherwise it says why and reads the
+  history instead. Saving the session again removes its checkpoint. On Qwen3.5-4B-Q8 a 2,265-token
+  resume takes 9.3 s instead of 25.6 s ([measurements](docs/benchmarks/archive/15-checkpoint-feasibility.log)).
 
 **Code mode** (`marin code [PATH]`, or `/mode code`) is read-only: the model uses three
 tools, shown as quiet `›` lines, and cannot write files, run commands or leave the project.

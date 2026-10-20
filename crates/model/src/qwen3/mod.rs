@@ -6,6 +6,7 @@ mod export;
 mod fit;
 mod gpu;
 pub(crate) mod gpu_probe;
+mod hybrid_state;
 mod kv_state;
 mod layer;
 mod mlp;

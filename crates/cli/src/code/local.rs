@@ -17,6 +17,7 @@ use super::convo::{Conversation, Item};
 use super::guide;
 use super::repo::Repo;
 use super::ui::Ui;
+use crate::CliError;
 use crate::session::Session;
 use crate::signal::Interrupt;
 
@@ -54,29 +55,37 @@ fn role(name: &str) -> Role {
     }
 }
 
+fn messages_of(values: &[Value]) -> Vec<Message> {
+    values
+        .iter()
+        .map(|m| {
+            let text = m.get("content").and_then(Value::as_str).unwrap_or("");
+            Message::new(
+                role(m.get("role").and_then(Value::as_str).unwrap_or("")),
+                text,
+            )
+        })
+        .collect()
+}
+
+/// The tokens of `messages` as the start of a later prompt: every message, none of the reply to come.
+fn history_tokens(session: &Session, messages: &[Message]) -> Result<Vec<u32>, String> {
+    let tokenizer = &session.loaded.dir.tokenizer;
+    let text =
+        chat::render_history(messages, &tokenizer.special_tokens()).map_err(|e| e.to_string())?;
+    tokenizer.encode(&text).map_err(|e| e.to_string())
+}
+
 impl LocalBrain<'_> {
     /// The prompt's tokens and how many of them end the conversation so far, before the start of the reply.
     fn prompt(&self, ask: &Ask<'_>) -> Result<(Vec<u32>, usize), ClientError> {
-        let messages: Vec<Message> = ask
-            .messages
-            .iter()
-            .map(|m| {
-                let text = m.get("content").and_then(Value::as_str).unwrap_or("");
-                Message::new(
-                    role(m.get("role").and_then(Value::as_str).unwrap_or("")),
-                    text,
-                )
-            })
-            .collect();
+        let messages = messages_of(&ask.messages);
         let tokenizer = &self.session.loaded.dir.tokenizer;
-        let specials = tokenizer.special_tokens();
         let local = |e: &dyn std::fmt::Display| ClientError::Local(e.to_string());
         let ids = tokenizer
-            .encode(&chat::render(&messages, &specials).map_err(|e| local(&e))?)
+            .encode(&chat::render(&messages, &tokenizer.special_tokens()).map_err(|e| local(&e))?)
             .map_err(|e| local(&e))?;
-        let history = tokenizer
-            .encode(&chat::render_history(&messages, &specials).map_err(|e| local(&e))?)
-            .map_err(|e| local(&e))?;
+        let history = history_tokens(self.session, &messages).map_err(ClientError::Local)?;
         let shared = history.iter().zip(&ids).take_while(|(a, b)| a == b).count();
         Ok((ids, shared))
     }
@@ -170,6 +179,15 @@ impl CodeChat {
 
     pub fn items(&self) -> &[Item] {
         self.convo.items()
+    }
+
+    /// The tokens a prompt after this conversation begins with: everything up to the last question or tool result.
+    pub fn history_ids(&self, session: &Session) -> Result<Vec<u32>, CliError> {
+        let mut messages = messages_of(&self.convo.messages());
+        if messages.last().is_some_and(|m| m.role == Role::Assistant) {
+            messages.pop();
+        }
+        history_tokens(session, &messages).map_err(CliError::BadOption)
     }
 
     /// Continues from questions and answers saved earlier.

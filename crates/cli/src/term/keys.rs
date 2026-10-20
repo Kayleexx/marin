@@ -90,7 +90,7 @@ impl App {
                     KeyCode::Enter => {
                         let (action, text) = (*action, editor.text());
                         self.mode = Mode::Input;
-                        self.apply_ask(action, &text)?;
+                        self.apply_ask(action, &text, raw)?;
                     }
                     _ => {
                         editor.handle(key);

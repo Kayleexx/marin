@@ -4,6 +4,7 @@ pub mod arg_types;
 pub mod args;
 pub mod bench;
 pub mod chat;
+pub mod checkpoint;
 pub mod choose;
 pub mod code;
 pub mod commands;
@@ -16,6 +17,7 @@ pub mod json_out;
 pub mod load;
 pub mod marin_args;
 pub mod memory;
+pub mod perf;
 pub mod plan;
 pub mod probe;
 pub mod progress;
@@ -50,3 +52,4 @@ pub fn report(error: &CliError, style: &Style) {
 }
 
 mod verify_hybrid;
+mod verify_reference;

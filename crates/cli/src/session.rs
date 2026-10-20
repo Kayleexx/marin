@@ -1,4 +1,5 @@
 mod prefill;
+mod state;
 
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;

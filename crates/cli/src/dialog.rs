@@ -8,6 +8,7 @@ use crate::CliError;
 use crate::chat::Chat;
 use crate::code::{CodeChat, Ui};
 use crate::config::Home;
+use crate::perf;
 use crate::session::Session;
 use crate::signal::Interrupt;
 use crate::style::Style;
@@ -38,6 +39,7 @@ impl Talk {
 }
 
 mod persist;
+mod state;
 
 pub struct Dialog {
     pub chat: Chat,
@@ -45,8 +47,17 @@ pub struct Dialog {
     root: PathBuf,
     log: Option<PathBuf>,
     code: Option<CodeChat>,
-    /// The saved session this conversation came from or was last saved as; `/save` updates it.
-    name: Option<String>,
+    /// The saved session this conversation came from or was last saved as, and the revision it was then at; `/save`
+    /// updates it, but only if no one else has since.
+    origin: Option<Origin>,
+}
+
+/// A saved session a conversation came from. After `/clear` it no longer holds that session's conversation, so a
+/// plain `/save` does not default to replacing it, though saving to its name on purpose still can.
+struct Origin {
+    name: String,
+    revision: u64,
+    same: bool,
 }
 
 impl Dialog {
@@ -63,7 +74,7 @@ impl Dialog {
             root,
             log,
             code: None,
-            name: None,
+            origin: None,
         };
         dialog.switch(talk, session)?;
         Ok(dialog)
@@ -96,7 +107,9 @@ impl Dialog {
 
     /// Forgets the conversation of the current mode.
     pub fn clear(&mut self) {
-        self.name = None;
+        if let Some(origin) = self.origin.as_mut() {
+            origin.same = false;
+        }
         match (self.talk, self.code.as_mut()) {
             (Talk::Code, Some(code)) => code.clear(),
             _ => self.chat.clear(),
@@ -107,7 +120,7 @@ impl Dialog {
     /// code mode cannot start on the new model (its window is too small) the chat carries on without it.
     pub fn reset(&mut self, session: &Session) -> Result<(), CliError> {
         self.chat = Chat::new(session);
-        self.name = None;
+        self.origin = None;
         if self.code.take().is_some() {
             match CodeChat::new(&self.root, session, self.log.as_deref()) {
                 Ok(code) => self.code = Some(code),
@@ -166,7 +179,7 @@ impl Dialog {
 }
 
 /// The commands every input path understands, with whether they need a model loaded in this process.
-pub const COMMAND_HELP: [(&str, &str, bool); 8] = [
+pub const COMMAND_HELP: [(&str, &str, bool); 11] = [
     (
         "/mode chat|code",
         "switch between chatting and asking about the project",
@@ -179,6 +192,16 @@ pub const COMMAND_HELP: [(&str, &str, bool); 8] = [
     ),
     ("/status", "model, hardware, window and mode", true),
     (
+        "/bench [N [M]] [runs=R]",
+        "time the loaded model: load, prefill, decode, first token, memory",
+        true,
+    ),
+    (
+        "/verify [FILE]",
+        "check the loaded model against a float32 reference",
+        true,
+    ),
+    (
         "/save [name]",
         "keep both conversations to resume later (private to you)",
         true,
@@ -186,6 +209,11 @@ pub const COMMAND_HELP: [(&str, &str, bool); 8] = [
     (
         "/resume [name]",
         "continue a saved conversation; the newest by default",
+        true,
+    ),
+    (
+        "/checkpoint [name]",
+        "also keep the model's state of a saved session, so /resume is fast (large file, Qwen3.5 GPU only)",
         true,
     ),
     ("/sessions", "list the saved conversations", true),
@@ -205,6 +233,27 @@ pub fn slash(line: &str) -> Option<(&str, &str)> {
     known.then_some((name, rest.trim()))
 }
 
+pub(crate) fn here() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_default()
+}
+
+/// Prints what `/bench` or `/verify` found; a cancelled run says so and nothing else changed.
+pub(crate) fn show_perf(done: Result<perf::Output, CliError>, style: Style) {
+    match done {
+        Ok(out) => {
+            for line in &out.lines {
+                if out.failed && (line.starts_with("result: FAIL") || line.contains(" FAIL ")) {
+                    println!("{}", style.red(line));
+                } else {
+                    println!("{line}");
+                }
+            }
+        }
+        Err(CliError::Cancelled) => println!("{}", style.dim("cancelled; nothing was changed")),
+        Err(e) => crate::report(&e, &style),
+    }
+}
+
 fn show(done: Result<Vec<String>, CliError>, style: Style) {
     match done {
         Ok(lines) => lines.iter().for_each(|l| println!("{}", style.dim(l))),
@@ -215,7 +264,8 @@ fn show(done: Result<Vec<String>, CliError>, style: Style) {
 /// Handles `line` if it is one of the commands. `Some(true)` asks to leave.
 fn command(
     dialog: &mut Dialog,
-    (session, home): (&Session, Option<&Home>),
+    (session, home): (&mut Session, Option<&Home>),
+    interrupt: &Interrupt,
     line: &str,
     style: Style,
 ) -> Option<bool> {
@@ -238,8 +288,11 @@ fn command(
             }
         }
         "model" => println!("{}", session.loaded.name),
+        "bench" => show_perf(perf::bench(session, interrupt, rest), style),
+        "verify" => show_perf(perf::verify(session, interrupt, rest, &here()), style),
         "save" => show(dialog.save(session, home, Some(rest)), style),
         "resume" => show(dialog.resume(session, home, Some(rest)), style),
+        "checkpoint" => show(dialog.checkpoint(session, home, Some(rest)), style),
         "sessions" => show(dialog.sessions(session, home), style),
         "status" => {
             for line in dialog.status(session) {
@@ -276,7 +329,7 @@ pub fn run_piped(
         if line.trim().is_empty() {
             continue;
         }
-        match command(dialog, (session, home), line.trim(), style) {
+        match command(dialog, (session, home), interrupt, line.trim(), style) {
             Some(true) => break,
             Some(false) => continue,
             None => {}

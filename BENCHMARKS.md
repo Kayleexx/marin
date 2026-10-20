@@ -238,6 +238,19 @@ Durable sessions ([archive](docs/benchmarks/archive/14-durable-sessions.log)): `
 only portable text, so no cache is written. Qwen3.5-4B-Q8 CUDA, greedy: a conversation resumed in a new process equals
 the uninterrupted one token for token; startup 5.79 → 5.72 s, peak RSS 871 MiB and peak VRAM 5216 MiB unchanged.
 
+Persistent checkpoints — GO, opt-in, Qwen3.5 GPU only ([archive](docs/benchmarks/archive/15-checkpoint-feasibility.log)).
+Qwen3.5-4B-Q8 replays history at 103–137 tok/s: 1.9 s for 256 tokens, 7.7 s for 1k, 32.8 s for 4k, 69 s for 7k (plus
+3.1 s load). Its state is 51 MiB of DeltaNet state plus 64 KiB per token (115 MiB at 1k, 563 MiB at 8k). Device→host
+125 ms and host→device 60 ms at 8k, NVMe write+fsync 0.7 s, cold read 0.26 s. Measured end to end, a resume with one
+question takes 8.8 s instead of 11.5 s at 495 tokens, 9.1 s instead of 18.4 s at 1,382 and 9.3 s instead of 25.6 s at
+2,265; answers identical, peak RSS (871 MiB) and VRAM (5,491 MiB) unchanged. About 1 s of every restore is hashing the
+weight files to prove which weights the state came from. Break-even is near 140 tokens; checkpoints under 256 are refused.
+
+`/bench` and `/verify` in `marin` run the `marin-run` code on the loaded model, with no reload ([archive](docs/benchmarks/archive/16-terminal-bench-verify.log)).
+Qwen3.5-4B-Q8 CUDA, 128 in / 64 out: first token 914 ms, prefill 140 tok/s, decode 31.2–31.4 tok/s in `marin`, against 919 ms,
+139.3 and 31.5 from `marin-run bench`; `/verify` finds `bench-results/qwen35-4b/hf-int8-128.json` and reports the same max logit
+diff (1.31e-5) as `marin-run verify`. A benchmark adds a cache of its own (87 MB here) and ~80–100 MB of peak GPU memory.
+
 ## Results that changed the runtime
 
 | Change | Matched evidence | Decision |
@@ -332,4 +345,4 @@ Section numbers and their original gates remain unchanged inside them:
 - [22–31: CPU SIMD, INT8, KV, INT4 pilots and consolidation](docs/benchmarks/archive/02-cpu-stages.log)
 - [32–40: packed loader, Qwen3.5 and V9 planner](docs/benchmarks/archive/03-loader-qwen35-planner.log)
 - [41–46: Granite MoE, numerical NO-GOs and H-Tiny pilot](docs/benchmarks/archive/04-granite-moe.log)
-- Server logs: [sessions](docs/benchmarks/archive/04-server-sessions.log), [checkpoints](docs/benchmarks/archive/05-server-checkpoints.log), [V7 scheduling](docs/benchmarks/archive/06-server-scheduling.log), [V7b batched decode](docs/benchmarks/archive/07-batched-decode.log), [V7c memory](docs/benchmarks/archive/08-batched-memory.log), [V8 prefill](docs/benchmarks/archive/09-batched-prefill.log), [V9 prefix](docs/benchmarks/archive/10-shared-prefix.log), [Coding V0](docs/benchmarks/archive/11-coding-v0.log), [unified terminal](docs/benchmarks/archive/12-unified-terminal.log), [stabilization](docs/benchmarks/archive/13-stabilization.log), [durable sessions](docs/benchmarks/archive/14-durable-sessions.log) (load generator `06-load.py`, prompt `06-long-prompt.txt`)
+- Server logs: [sessions](docs/benchmarks/archive/04-server-sessions.log), [checkpoints](docs/benchmarks/archive/05-server-checkpoints.log), [V7 scheduling](docs/benchmarks/archive/06-server-scheduling.log), [V7b batched decode](docs/benchmarks/archive/07-batched-decode.log), [V7c memory](docs/benchmarks/archive/08-batched-memory.log), [V8 prefill](docs/benchmarks/archive/09-batched-prefill.log), [V9 prefix](docs/benchmarks/archive/10-shared-prefix.log), [Coding V0](docs/benchmarks/archive/11-coding-v0.log), [unified terminal](docs/benchmarks/archive/12-unified-terminal.log), [stabilization](docs/benchmarks/archive/13-stabilization.log), [durable sessions](docs/benchmarks/archive/14-durable-sessions.log), [checkpoints](docs/benchmarks/archive/15-checkpoint-feasibility.log), [in-terminal bench and verify](docs/benchmarks/archive/16-terminal-bench-verify.log) (load generator `06-load.py`, prompt `06-long-prompt.txt`)

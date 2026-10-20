@@ -5,6 +5,8 @@
 mod check;
 mod disk;
 mod error;
+mod state_file;
+mod trust;
 
 use std::path::PathBuf;
 
@@ -14,12 +16,16 @@ use crate::code::Item;
 
 pub use disk::{Listed, Store, Summary, Written, now};
 pub use error::SavedError;
+pub use trust::Trust;
 
 /// The newest layout this Marin reads and writes. A change that old readers could misread must raise it.
 pub const VERSION: u32 = 1;
 const FORMAT: &str = "marin-session";
 /// A session file larger than this is refused, when saved and when read.
 pub const MAX_FILE: u64 = 2 << 20;
+/// A checkpoint larger than this is not written or read; all checkpoints together may take `MAX_STATES`.
+pub const MAX_STATE: u64 = 1 << 30;
+pub const MAX_STATES: u64 = 4 << 30;
 /// At most this many sessions are kept; saving a new one beyond it asks the user to remove some.
 pub const MAX_SESSIONS: usize = 100;
 
@@ -44,6 +50,9 @@ pub struct Saved {
     pub name: String,
     /// Seconds since the Unix epoch.
     pub saved_at: u64,
+    /// How many times this session has been written: what a save must have started from.
+    #[serde(default)]
+    pub revision: u64,
     pub model: ModelId,
     /// The mode to continue in: `chat` or `code`.
     pub mode: String,
@@ -64,6 +73,7 @@ impl Saved {
             version: VERSION,
             name,
             saved_at,
+            revision: 0,
             model,
             mode: mode.into(),
             chat,
@@ -111,3 +121,5 @@ pub fn ago(now: u64, then: u64) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_safety;

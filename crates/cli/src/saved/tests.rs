@@ -6,17 +6,17 @@ use std::time::{Duration, SystemTime};
 use super::*;
 use crate::code::Item;
 
-struct Temp(PathBuf);
+pub(super) struct Temp(pub(super) PathBuf);
 
 impl Temp {
-    fn new(name: &str) -> Self {
+    pub(super) fn new(name: &str) -> Self {
         let path = std::env::temp_dir().join(format!("marin-saved-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         Self(path)
     }
 
-    fn store(&self) -> Store {
+    pub(super) fn store(&self) -> Store {
         Store::new(self.0.join("sessions"))
     }
 }
@@ -27,18 +27,25 @@ impl Drop for Temp {
     }
 }
 
-fn model() -> ModelId {
+pub(super) fn model() -> ModelId {
     ModelId {
         name: "tiny".into(),
         fingerprint: "00000000000000ff".into(),
     }
 }
 
-fn pair(q: &str, a: &str) -> [Item; 2] {
+pub(super) fn pair(q: &str, a: &str) -> [Item; 2] {
     [Item::User(q.into()), Item::Assistant(a.into())]
 }
 
-fn session(name: &str) -> Saved {
+pub(super) fn first(saved: Saved) -> Saved {
+    Saved {
+        revision: 1,
+        ..saved
+    }
+}
+
+pub(super) fn session(name: &str) -> Saved {
     let code = vec![
         Item::User("where is main?".into()),
         Item::Assistant("<tool_call>x</tool_call>".into()),
@@ -64,7 +71,13 @@ fn session(name: &str) -> Saved {
     )
 }
 
-fn file(store: &Store, name: &str) -> PathBuf {
+/// Saves the way a conversation does: starting from the revision on disk, if there is one.
+pub(super) fn put(store: &Store, saved: &Saved) -> Result<Written, SavedError> {
+    let from = store.load(&saved.name).ok().map(|s| s.revision);
+    store.save(saved, from)
+}
+
+pub(super) fn file(store: &Store, name: &str) -> PathBuf {
     store.dir().join(format!("{name}.json"))
 }
 
@@ -73,12 +86,12 @@ fn a_saved_session_comes_back_exactly_and_the_files_are_private() {
     let temp = Temp::new("roundtrip");
     let store = temp.store();
     let saved = session("work");
-    assert!(matches!(store.save(&saved), Ok(Written::Created(_))));
-    assert_eq!(store.load("work").unwrap(), saved);
+    assert!(put(&store, &saved).is_ok_and(|w| !w.replaced && w.revision == 1));
+    assert_eq!(store.load("work").unwrap(), first(saved.clone()));
     let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(store.dir()), 0o700);
     assert_eq!(mode(&file(&store, "work")), 0o600);
-    assert!(matches!(store.save(&saved), Ok(Written::Replaced(_))));
+    assert!(put(&store, &saved).is_ok_and(|w| w.replaced && w.revision == 2));
     assert_eq!(store.list().unwrap().len(), 1);
 }
 
@@ -86,16 +99,16 @@ fn a_saved_session_comes_back_exactly_and_the_files_are_private() {
 fn a_write_that_died_leaves_the_committed_session_and_is_cleaned_up_later() {
     let temp = Temp::new("died");
     let store = temp.store();
-    store.save(&session("work")).unwrap();
+    put(&store, &session("work")).unwrap();
     let half = store.dir().join(".123.456.tmp");
     fs::write(&half, b"{\"format\": \"marin-session\", \"vers").unwrap();
-    assert_eq!(store.load("work").unwrap(), session("work"));
+    assert_eq!(store.load("work").unwrap(), first(session("work")));
     assert_eq!(
         store.list().unwrap().len(),
         1,
         "a temporary file is not a session"
     );
-    store.save(&session("work")).unwrap();
+    put(&store, &session("work")).unwrap();
     assert!(
         half.exists(),
         "a fresh temporary file may belong to a live run"
@@ -107,7 +120,7 @@ fn a_write_that_died_leaves_the_committed_session_and_is_cleaned_up_later() {
         .unwrap()
         .set_modified(old)
         .unwrap();
-    store.save(&session("work")).unwrap();
+    put(&store, &session("work")).unwrap();
     assert!(!half.exists());
 }
 
@@ -115,7 +128,7 @@ fn a_write_that_died_leaves_the_committed_session_and_is_cleaned_up_later() {
 fn damaged_files_are_named_and_never_returned_partly() {
     let temp = Temp::new("damaged");
     let store = temp.store();
-    store.save(&session("good")).unwrap();
+    put(&store, &session("good")).unwrap();
     let whole = fs::read(file(&store, "good")).unwrap();
     let cut = whole.get(..whole.len() / 2).unwrap();
     fs::write(file(&store, "cut"), cut).unwrap();
@@ -147,17 +160,17 @@ fn damaged_files_are_named_and_never_returned_partly() {
     let listed = store.list().unwrap();
     assert_eq!(listed.len(), 6);
     assert!(matches!(listed.first(), Some(Listed::Ok(s)) if s.name == "good"));
-    assert_eq!(store.load("good").unwrap(), session("good"));
+    assert_eq!(store.load("good").unwrap(), first(session("good")));
 }
 
 #[test]
 fn a_file_that_is_not_ours_is_never_replaced() {
     let temp = Temp::new("unrelated");
     let store = temp.store();
-    store.save(&session("keep")).unwrap();
+    put(&store, &session("keep")).unwrap();
     fs::write(file(&store, "notes"), b"my own notes").unwrap();
     assert!(matches!(
-        store.save(&session("notes")),
+        put(&store, &session("notes")),
         Err(SavedError::NotOurs { .. })
     ));
     assert_eq!(fs::read(file(&store, "notes")).unwrap(), b"my own notes");
@@ -175,9 +188,9 @@ fn a_session_larger_than_the_limit_is_refused_both_ways() {
     let store = temp.store();
     let mut big = session("big");
     big.chat = pair(&"x".repeat(usize::try_from(MAX_FILE).unwrap()), "ok").to_vec();
-    assert!(matches!(store.save(&big), Err(SavedError::TooBig { .. })));
+    assert!(matches!(put(&store, &big), Err(SavedError::TooBig { .. })));
     assert!(!file(&store, "big").exists());
-    store.save(&session("small")).unwrap();
+    put(&store, &session("small")).unwrap();
     let huge = vec![b' '; usize::try_from(MAX_FILE).unwrap() + 10];
     fs::write(file(&store, "huge"), huge).unwrap();
     assert!(matches!(store.load("huge"), Err(SavedError::TooBig { .. })));
@@ -192,16 +205,16 @@ fn only_plain_names_are_used_and_only_a_private_real_folder_is_trusted() {
             matches!(store.load(bad), Err(SavedError::BadName(_))),
             "{bad:?}"
         );
-        assert!(store.save(&session(bad)).is_err(), "{bad:?}");
+        assert!(put(&store, &session(bad)).is_err(), "{bad:?}");
     }
-    store.save(&session("fine.v1_x-2")).unwrap();
+    put(&store, &session("fine.v1_x-2")).unwrap();
     fs::set_permissions(store.dir(), fs::Permissions::from_mode(0o755)).unwrap();
     assert!(matches!(
         store.load("fine.v1_x-2"),
         Err(SavedError::UnsafeDir { .. })
     ));
     assert!(matches!(
-        store.save(&session("more")),
+        put(&store, &session("more")),
         Err(SavedError::UnsafeDir { .. })
     ));
     fs::set_permissions(store.dir(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -212,7 +225,7 @@ fn only_plain_names_are_used_and_only_a_private_real_folder_is_trusted() {
     let linked = Store::new(temp.0.join("linked"));
     symlink(&elsewhere, linked.dir()).unwrap();
     assert!(matches!(
-        linked.save(&session("x")),
+        linked.save(&session("x"), None),
         Err(SavedError::UnsafeDir { .. })
     ));
     assert!(
@@ -232,16 +245,13 @@ fn the_number_of_sessions_is_bounded_but_a_known_one_can_always_be_updated() {
     let temp = Temp::new("many");
     let store = temp.store();
     for n in 0..MAX_SESSIONS {
-        store.save(&session(&format!("s{n}"))).unwrap();
+        put(&store, &session(&format!("s{n}"))).unwrap();
     }
     assert!(matches!(
-        store.save(&session("one-more")),
+        put(&store, &session("one-more")),
         Err(SavedError::TooMany { .. })
     ));
-    assert!(matches!(
-        store.save(&session("s7")),
-        Ok(Written::Replaced(_))
-    ));
+    assert!(put(&store, &session("s7")).is_ok_and(|w| w.replaced));
 }
 
 #[test]

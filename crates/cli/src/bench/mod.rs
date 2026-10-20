@@ -8,11 +8,11 @@ mod status;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use metrics::{disk_read_bytes, per_second, process_memory};
-use model::{BackendChoice, Precision};
+use model::{BackendChoice, EngineCache, Precision};
 use runtime::SequenceCache;
 use sampler::SamplerConfig;
 
@@ -25,7 +25,7 @@ use self::resources::{CpuWatch, GpuWatch};
 use self::status::Status;
 use crate::CliError;
 use crate::json_out::JsonOut;
-use crate::load::load;
+use crate::load::{Loaded, load};
 use crate::signal::Interrupt;
 use crate::style::Style;
 
@@ -46,6 +46,24 @@ pub struct Options {
     pub precision: Precision,
 }
 
+impl Options {
+    pub(crate) fn validate(&self) -> Result<(), CliError> {
+        if self.runs == 0 || self.output_tokens < 2 || self.prompt_tokens == 0 {
+            return Err(CliError::BadOption(
+                "bench needs --prompt-tokens above 0, --tokens of at least 2 and --runs above 0"
+                    .into(),
+            ));
+        }
+        self.sampling.validate()?;
+        if !(0.0..=1000.0).contains(&self.token_pause_ms) {
+            return Err(CliError::BadOption(
+                "--token-pause-ms must be between 0 and 1000".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 fn stat(values: &[f64]) -> Result<Stat, CliError> {
     Stat::of(values).ok_or_else(|| CliError::BadOption("no runs were measured".into()))
 }
@@ -59,18 +77,7 @@ pub fn run(
     interrupt: &Interrupt,
 ) -> Result<(), CliError> {
     interrupt.generating();
-    if options.runs == 0 || options.output_tokens < 2 || options.prompt_tokens == 0 {
-        return Err(CliError::BadOption(
-            "bench needs --prompt-tokens above 0, --tokens of at least 2 and --runs above 0".into(),
-        ));
-    }
-    options.sampling.validate()?;
-    if !(0.0..=1000.0).contains(&options.token_pause_ms) {
-        return Err(CliError::BadOption(
-            "--token-pause-ms must be between 0 and 1000".into(),
-        ));
-    }
-    let token_pause = Duration::from_secs_f64(options.token_pause_ms / 1000.0);
+    options.validate()?;
     let json = options.json.as_deref().map(JsonOut::create).transpose()?;
     let needed = options
         .prompt_tokens
@@ -109,6 +116,49 @@ pub fn run(
         seconds: t.h2d_time.as_secs_f64(),
         gb_per_s: per_second(t.h2d_bytes, t.h2d_time).map(|rate| rate / 1e9),
     });
+    let load = LoadStats {
+        seconds: loaded.took.as_secs_f64(),
+        rss_growth,
+        disk_read,
+        gpu_upload,
+        gpu_growth,
+    };
+    let quantization = options
+        .precision
+        .weights
+        .map_or_else(|| "none".to_string(), |q| q.label());
+    let record = measure_loaded(&loaded, &mut cache, load, quantization, options, cancel)?;
+    std::io::stdout()
+        .lock()
+        .write_all(render::text(&record).as_bytes())?;
+    if let (Some(json), Some(path)) = (json, &options.json) {
+        json.finish(&record)?;
+        eprintln!("wrote {}", path.display());
+    }
+    Ok(())
+}
+
+/// What loading the model measured. A model that is already loaded has only the time its load took.
+pub(crate) struct LoadStats {
+    pub seconds: f64,
+    pub rss_growth: Option<u64>,
+    pub disk_read: Option<u64>,
+    pub gpu_upload: Option<Transfer>,
+    pub gpu_growth: Option<u64>,
+}
+
+/// Times `options.runs` generations on a loaded model, in `cache`, and describes them. `quantization` names how the
+/// weights are stored, for the record.
+pub(crate) fn measure_loaded(
+    loaded: &Loaded,
+    cache: &mut EngineCache,
+    load: LoadStats,
+    quantization: String,
+    options: &Options,
+    cancel: &AtomicBool,
+) -> Result<Record, CliError> {
+    let engine = &loaded.model;
+    let token_pause = Duration::from_secs_f64(options.token_pause_ms / 1000.0);
     let prompt = measure::prompt(&loaded.dir.tokenizer, options.prompt_tokens)?;
     let vocab = loaded.dir.tokenizer.vocab_size();
 
@@ -131,7 +181,7 @@ pub fn run(
             )),
             Some(n) => status.show(&format!("run {}/{}", n.saturating_add(1), options.runs)),
         }
-        let run = measure::run_once(engine, &mut cache, &prompt, &plan, cancel)?;
+        let run = measure::run_once(engine, cache, &prompt, &plan, cancel)?;
         if round >= options.warmup {
             runs.push(run);
         }
@@ -192,7 +242,7 @@ pub fn run(
         .then(|| {
             measure::profile(
                 engine,
-                &mut cache,
+                cache,
                 &prompt,
                 options.output_tokens,
                 vocab,
@@ -208,10 +258,7 @@ pub fn run(
             .map_or(0, |d| d.as_secs()),
         model: loaded.name.clone(),
         precision: model::PRECISION,
-        quantization: options
-            .precision
-            .weights
-            .map_or_else(|| "none".to_string(), |q| q.label()),
+        quantization,
         context_length: cache.capacity(),
         batch_size: model::BATCH_SIZE,
         prompt_tokens: prompt.len(),
@@ -228,30 +275,23 @@ pub fn run(
         runtime: runtime_version(),
         hardware: hardware(engine.backend_name(), engine.gpu_info()),
         load: Load {
-            seconds: loaded.took.as_secs_f64(),
+            seconds: load.seconds,
             weights_bytes: loaded.footprint.weights,
             kv_reserved_bytes: loaded.footprint.kv_window,
             kv_held_pages: cache
                 .kv_held()
                 .and_then(|(pages, _)| u64::try_from(pages).ok()),
             kv_held_bytes: u64::try_from(cache.kv_bytes_held()).ok(),
-            rss_growth_bytes: rss_growth,
-            disk_read_bytes: disk_read,
-            gpu_upload,
-            gpu_device_growth_bytes: gpu_growth,
+            rss_growth_bytes: load.rss_growth,
+            disk_read_bytes: load.disk_read,
+            gpu_upload: load.gpu_upload,
+            gpu_device_growth_bytes: load.gpu_growth,
         },
         results,
         runs: runs.iter().map(|r| run_record(&r.outcome)).collect(),
         profile,
     };
-    std::io::stdout()
-        .lock()
-        .write_all(render::text(&record).as_bytes())?;
-    if let (Some(json), Some(path)) = (json, &options.json) {
-        json.finish(&record)?;
-        eprintln!("wrote {}", path.display());
-    }
-    Ok(())
+    Ok(record)
 }
 
 fn run_record(o: &runtime::Outcome) -> RunRecord {

@@ -23,7 +23,8 @@ use super::view::{PROMPT, input_line};
 use crate::CliError;
 use crate::code::Ui;
 use crate::config;
-use crate::dialog::Talk;
+use crate::dialog::{self, Talk};
+use crate::perf;
 use crate::setup;
 
 /// Keys typed while a reply streamed were echoed by the terminal and must not become part of the next prompt.
@@ -213,7 +214,40 @@ impl App {
         ]));
     }
 
-    pub(super) fn apply_ask(&mut self, action: Action, text: &str) -> Result<(), CliError> {
+    /// `/bench` and `/verify`: they take as long as they take, so the terminal is given back to the program while they
+    /// run, and Ctrl-C cancels them without touching the conversation.
+    fn run_perf(&mut self, action: Action, text: &str, raw: &mut RawMode) -> Result<(), CliError> {
+        let Some(session) = self.session.as_ref() else {
+            return Ok(self.show_error(&CliError::ModelNotLoaded)?);
+        };
+        raw.suspend()?;
+        let doing = if action == Action::Bench {
+            "benchmarking the loaded model (Ctrl-C cancels)"
+        } else {
+            "checking the loaded model against a reference (Ctrl-C cancels)"
+        };
+        println!("{}", self.style.dim(doing));
+        let done = if action == Action::Bench {
+            perf::bench(session, &self.interrupt, text)
+        } else {
+            perf::verify(session, &self.interrupt, text, &dialog::here())
+        };
+        dialog::show_perf(done, self.style);
+        println!();
+        raw.resume()?;
+        discard_pending_input()?;
+        Ok(())
+    }
+
+    pub(super) fn apply_ask(
+        &mut self,
+        action: Action,
+        text: &str,
+        raw: &mut RawMode,
+    ) -> Result<(), CliError> {
+        if matches!(action, Action::Bench | Action::Verify) {
+            return self.run_perf(action, text, raw);
+        }
         let Some(session) = self.session.as_mut() else {
             return Ok(self.show_error(&CliError::ModelNotLoaded)?);
         };
@@ -232,6 +266,10 @@ impl App {
             Action::Resume => self
                 .dialog
                 .resume(session, self.home.as_ref(), Some(text.trim())),
+            Action::Checkpoint => {
+                self.dialog
+                    .checkpoint(session, self.home.as_ref(), Some(text.trim()))
+            }
             _ => actions::apply_setting(&mut session.settings, action, text).map(|note| {
                 self.notice = Some(note);
                 if let Some(home) = &self.home {

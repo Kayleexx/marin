@@ -1,0 +1,44 @@
+/bench and /verify inside the interactive `marin` (the same code as `marin-run bench` and `marin-run verify`).
+Qwen3.5-4B-Q8 on the RTX 5050 laptop GPU (8 GB, 40 W), release build, ctx 2048, model already loaded by `marin`.
+
+What runs
+- /bench [PROMPT [OUTPUT]] [runs=N] [profile] [quick] -> bench::measure_loaded on the session's engine, in a new cache sized
+  to the workload (the chat's cache is not touched, the weights are shared). Defaults 128 / 64, 3 runs after 1 warmup.
+  Refused if PROMPT + OUTPUT + 1 exceeds the session window. Greedy sampling, no GPU sampling child process.
+- /verify [FILE] -> verify::check_all on the session's engine with caches of their own. Without FILE it looks in the model's
+  folder, tests/reference, tests/fixtures/* and bench-results/* of the current directory, skips files that declare other
+  weights, and uses the first one that fits: same weights storage (bfloat16 / int8-dequantized), layer count (or one more,
+  for the final norm) and identical tokens for every prompt, and a window the session has. A reference that does not fit is
+  explained, never run; an empty reference is refused (it would "pass" nothing); more than 3 skipped files are summarized.
+- Not measured by /bench and said so: model load (the startup time is shown apart), and RSS growth, disk read and upload at
+  load. "Peak process memory" is the highest since startup and is labelled that way. GPU memory is device-wide.
+
+Measured (3 runs after 1 warmup, 128 prompt tokens, 64 generated)
+                         marin-run bench (fresh load)   /bench in marin (loaded, ctx 2048)
+  first token             918.9 / 919.3 ms               913.8 / 914.5 / 914.9 ms
+  prefill                 139.3 / 139.3 tok/s            140.1 / 140.0 / 139.9 tok/s
+  decode                  31.51 / 31.58 tok/s            31.33 / 31.36 / 31.16 tok/s
+  token latency p50       30.48 / 30.48 ms               (see /bench output)
+  gpu memory in use peak  5.54 GB                        5.61 - 5.64 GB (the chat's idle cache and the bench's own cache)
+  peak process memory     914 MB                         914 MB
+  the benchmark's own cache: 87 MB held for 193 tokens. A first /bench right after the GPU was freed gave 133 tok/s prefill and
+  961 ms; the three that followed did not repeat it.
+/verify on the same model: reference bench-results/qwen35-4b/hf-int8-128.json found from the repository root; 1 case, token
+choices match, max logit diff 1.31e-5, max layer diff 1.18e-5, full tensors 3.879e-6 / 3.288e-6: identical to marin-run verify.
+Whole `marin` run (load + /verify + /status): 7.1 s; /bench + /verify together: 21.8 s, of which the reference search is ~1 s.
+
+Conversation safety (Qwen3.5-4B-Q8, temperature 0)
+- "My name is Ada..." / /bench / /verify / "What is my name?": the answer ("Your name is Ada!") and "context 99 of 2,048 used" are
+  identical to the run without them.
+- Real terminal: /bench 128 400 runs=5 cancelled with Ctrl-C after 8 s -> "cancelled; nothing was changed", then
+  "What is my name?" answered "Your name is Ada!". A 1,536-token prompt pass is not interruptible: Ctrl-C was heard when it
+  finished (about 12 s).
+- A competing process holding 4.3 GB of VRAM made the 4B refuse to load ("the GPU has 2693 MB free but this needs about 5227
+  MB") before anything started; nothing else was affected.
+
+Tests: crates/cli/src/perf/tests.rs (argument parsing, window refusal, own cache, fixture reference found and passed, altered
+reference FAILs and never passes, reference for another model / weights / empty / missing / garbage / future format, window
+too small, discovery order and the "what is missing" message, Ctrl-C of both commands), crates/cli/tests/perf_cli.rs (help
+lists both, PASS through the binary, problems explained and the run goes on, a disagreeing reference FAILs, chat and code
+conversations unchanged by benchmarks between questions), crates/cli/tests/perf_pty.rs (palette -> question -> result, check,
+Ctrl-C mid-benchmark, prompt works afterwards).

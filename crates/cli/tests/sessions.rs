@@ -334,3 +334,57 @@ fn a_loose_or_linked_session_folder_is_refused_and_nothing_follows_a_link() -> i
     );
     Ok(())
 }
+
+#[test]
+fn two_runs_cannot_both_save_over_one_session_and_a_stranger_cannot_replace_it() -> io::Result<()> {
+    use std::io::{BufRead, BufReader};
+    let rig = Rig::new("conflict", &["alpha"])?;
+    rig.run("hello\n/save mine\n")?;
+    let mut slow = rig.command("alpha", &rig.project, "6").spawn()?;
+    let mut input = slow
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("no stdin"))?;
+    input.write_all(b"/resume mine\n")?;
+    let mut shown = BufReader::new(
+        slow.stdout
+            .take()
+            .ok_or_else(|| io::Error::other("no stdout"))?,
+    );
+    let mut line = String::new();
+    while !line.contains("resumed `mine`") {
+        line.clear();
+        if shown.read_line(&mut line)? == 0 {
+            return Err(io::Error::other("the first run never resumed"));
+        }
+    }
+    let quick = rig.run("/resume mine\nsecond\n/save mine\n")?;
+    assert!(
+        text(&quick.stdout).contains("updated `mine`"),
+        "{}",
+        text(&quick.stdout)
+    );
+    input.write_all(b"other\n/save mine\n")?;
+    drop(input);
+    let rest = slow.wait_with_output()?;
+    let stderr = text(&rest.stderr);
+    assert!(
+        stderr.contains("was saved by another run since this conversation was opened"),
+        "{stderr}"
+    );
+    let kept = rig.saved("mine")?.to_string();
+    assert!(
+        kept.contains("second") && !kept.contains("other"),
+        "the first save to land was kept whole: {kept}"
+    );
+    assert_eq!(rig.saved("mine")?["revision"], 2);
+
+    let stranger = rig.run("hi again\n/save mine\n")?;
+    assert!(
+        text(&stranger.stderr).contains("did not come from it"),
+        "{}",
+        text(&stranger.stderr)
+    );
+    assert!(!rig.saved("mine")?.to_string().contains("hi again"));
+    Ok(())
+}

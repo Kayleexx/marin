@@ -1,0 +1,70 @@
+Persistent inference checkpoints (V6/V11 stage B): feasibility, decision and prototype. Qwen3.5-4B-Q8 on the RTX 5050
+laptop GPU (8 GB, 40 W), Ryzen 7 260, 16 GB RAM, WD SN7100 NVMe. Release builds. Text resume stays the fallback.
+
+1. What a restore must bring back (crates/model/src/qwen35/gpu_state.rs)
+   - DeltaNet: 24 layers x (convolution 8192x4 f32 = 128 KiB + recurrent 32x128x128 f32 = 2 MiB) = 51 MiB, fixed.
+   - Attention: 8 full-attention layers x (K,V) x 4 kv heads x 256 x f32 = 64 KiB per token, in 64-token pages.
+   - The token list (4 bytes per token) and nothing else: position = number of tokens, so no counters to restore.
+   - Checks before use: format version, session name and revision, mode, model name, hash of config+tokenizer, hash of
+     the weight files, weight bits and group, the state layout, token count against the context, file size, a hash of the
+     header, of the tokens and of every block, the end mark, and that the tokens begin the conversation's history.
+   - Size in bytes: 51 MiB + 64 KiB x tokens (+ 4 x tokens). Measured files: 495 tokens 86 MB, 1,382 144 MB,
+     2,265 202 MB, 472 84 MB.
+
+2. Cold replay of history (marin-run bench ... --prompt-tokens N --tokens 4 --ctx N+64 --runs 1 --warmup 1; load 3.05-3.30 s)
+     tokens   first token (replay)   prefill     kv held    gpu peak
+        256        1.87 s            137.1 tok/s   87 MB     5.23 GB
+        512        3.82 s            134.2         121 MB    5.33
+       1024        7.68 s            133.4         154 MB    5.39
+       2048       15.77 s            129.9         221 MB    5.56
+       4096       32.80 s            124.9         355 MB    5.83
+       7168       69.33 s            103.4         557 MB    6.27
+   Tokenizing a history is milliseconds. Process memory grows by 276 MB at load and peaks at 914 MB in every row.
+
+3. Moving the state (temporary probe on the cuda crate, DeviceKv::export_page / import_page and Gpu::download / upload,
+   best of 3; the probe was deleted afterwards)
+     tokens   state      device->host   host->device
+       512     83 MiB      29.6 ms        11.6 ms
+      1024    115 MiB      24.7 ms        14.3 ms
+      2048    179 MiB      38.2 ms        20.7 ms
+      4096    307 MiB      63.6 ms        32.3 ms
+      8192    563 MiB     124.5 ms        60.2 ms
+   SipHash (the crate's content hash) runs at 7.7 GB/s in memory: 77 ms for 563 MiB. The 4.35 GB of weights hash in 0.98 s
+   (page cache; 4.4 GB/s). The config+tokenizer hash takes 3 ms.
+   NVMe (dd, 1 MiB blocks): write+fsync 117 MiB 85 ms, 307 MiB 232 ms, 563 MiB 716 ms, 2.1 GiB 1.49 s; cold read
+   (O_DIRECT) 51 ms, 130 ms, 259 ms, 869 ms; cached read 10, 21, 56, 249 ms.
+
+4. Estimated total at 8,192 tokens: save = 125 + 77 + 716 ms + 1 s weight hash = 1.9 s; restore = 259 + 77 + 60 ms + 1 s = 1.4 s,
+   against 80 s of replay. At 1,024 tokens: restore ~1.1 s against 7.7 s. Every resume of a saved session pays only the restore;
+   one save pays back on the first resume above ~150 tokens (replay 7.5 ms per token vs a fixed ~1 s).
+
+5. Measured end to end (15-checkpoint-e2e.sh; chat; /checkpoint took 1.03 s at 495 tokens; at 2,265 tokens exporting and writing 202 MB took 0.11 s, plus the ~1 s weight hash; ctx 4096, temperature 0, one question after resume, model load included)
+     history    resume from text    resume from checkpoint    restore    save (/checkpoint)
+      495 tok       11.48 s              8.81 s                 1.03 s    1.03 s
+     1382 tok       18.37 s              9.06 s                 1.05 s    -
+     2265 tok       25.53 s              9.23 s                 1.06 s    -
+   Answers identical every time. Of the 1.06 s restore, 0.98 s is hashing the weight files and ~0.09 s reading, checking and
+   uploading 202 MB. 2,265-token run repeated: 25.59 / 25.62 s vs 9.37 / 9.34 s.
+   Peak memory (process RSS, nvidia-smi VRAM at 0.1 s): resume from text 871.3 MiB / 5,491 MiB, from checkpoint 871.6 MiB /
+   5,491 MiB (idle 468 MiB). The restore streams one block at a time: no host buffer the size of the file, and the old cache is
+   released before the new one is filled.
+   Real code session: 3 tool calls, resumed from another directory; checkpoint path is the same (mode code).
+
+6. Numerical gates and what was measured (crates/model/tests/qwen35_state.rs, crates/cli/tests/checkpoint.rs, checkpoint_cli.rs)
+   - Exported and imported cache continues bit for bit like the original (tiny fixture: prefixes 31, 64, 65, 130; Qwen3.5-4B-Q8:
+     200-token prefix + 16-token tail). Versus a one-pass replay of the same tokens a logit moves by at most 3.4e-8 on the
+     fixture: that rounding comes from reading a prompt in two passes (also without a checkpoint), not from the checkpoint.
+   - Any single changed byte at 9 positions, 6 truncations, a trailing byte, 7 kinds of mismatch (revision, session, mode, model,
+     weights, precision, configuration), a context that is too small, an empty cache and a cache that must be replayed are
+     all refused; the session's cache stays empty and usable.
+   - Through the binary: a damaged, a half-length and an older-revision checkpoint give a note and the same answer as a plain
+     resume; /save removes the checkpoint it outdated; /checkpoint refuses unsaved, changed, short (<256 tokens) and non-GPU cases.
+
+7. Decision: GO for an opt-in prototype, Qwen3.5 on CUDA only. /checkpoint is separate from /save; nothing but text is kept
+   otherwise. Limits: 256 tokens minimum, 1 GiB per file, 4 GiB in all. The largest single cost left is the weight-file
+   hash (about 1 s per restore and per checkpoint); computing it while the model loads, as --snapshot does, would remove it.
+   Not done: any other model or backend, restoring a prefix of a checkpoint, sharing checkpoints between sessions.
+
+Reproduce: 15-checkpoint-e2e.sh 6 (needs MARIN_QWEN35_Q8_DIR or ~/models/Qwen3.5-4B-Q8); the replay table with
+marin-run bench as above; the opt-in tests with MARIN_REQUIRE_CUDA=1 MARIN_QWEN35_Q8_DIR=... cargo test -p model --test qwen35_state
+and cargo test -p cli --test checkpoint --test checkpoint_cli.

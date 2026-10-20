@@ -182,7 +182,8 @@ pub fn profile_section(p: &Profile) -> String {
     out
 }
 
-pub fn text(r: &Record) -> String {
+/// The model, backend, workload and machine.
+pub(crate) fn header(r: &Record) -> String {
     let precision = if r.quantization == "none" {
         r.precision.to_string()
     } else {
@@ -206,56 +207,12 @@ pub fn text(r: &Record) -> String {
     );
     out.push_str(&power_line(r));
     out.push('\n');
-    let _ = writeln!(out, "load: {:.2} s", r.load.seconds);
-    let kv = match (r.load.kv_held_pages, r.load.kv_held_bytes) {
-        (Some(pages), Some(bytes)) => format!(
-            "kv cache {} held for {pages} pages, up to {}",
-            units::bytes(bytes),
-            units::bytes(r.load.kv_reserved_bytes)
-        ),
-        (None, Some(bytes)) => format!(
-            "kv cache {} held, up to {}",
-            units::bytes(bytes),
-            units::bytes(r.load.kv_reserved_bytes)
-        ),
-        _ => format!(
-            "kv cache reserved {}",
-            units::bytes(r.load.kv_reserved_bytes)
-        ),
-    };
-    let _ = writeln!(
-        out,
-        "  weights {} · {kv}",
-        units::bytes(r.load.weights_bytes)
-    );
-    if let Some(rss) = r.load.rss_growth_bytes {
-        let _ = writeln!(out, "  process memory grew by {}", units::bytes(rss));
-    }
-    if let Some(disk) = r.load.disk_read_bytes {
-        let _ = writeln!(
-            out,
-            "  read from disk {} (files already in memory count as 0)",
-            units::bytes(disk)
-        );
-    }
-    if let Some(up) = &r.load.gpu_upload {
-        let rate = up
-            .gb_per_s
-            .map_or(String::new(), |g| format!(" ({g:.1} GB/s)"));
-        let _ = writeln!(
-            out,
-            "  copied to the gpu {} in {:.2} s{rate}",
-            units::bytes(up.bytes),
-            up.seconds
-        );
-    }
-    if let Some(gpu) = r.load.gpu_device_growth_bytes {
-        let _ = writeln!(
-            out,
-            "  gpu memory in use grew by {} (device-wide, includes other programs)",
-            units::bytes(gpu)
-        );
-    }
+    out
+}
+
+/// What the runs measured: speeds, latency, memory and, if asked for, where the time went.
+pub(crate) fn results_text(r: &Record) -> String {
+    let mut out = String::new();
     out.push_str("\nresults (median of runs):\n");
     out.push_str(&stat(
         "first token (TTFT)",
@@ -332,6 +289,62 @@ pub fn text(r: &Record) -> String {
         out.push_str(&profile_section(p));
     }
     out.push_str(&notes(r));
+    out
+}
+
+pub fn text(r: &Record) -> String {
+    let mut out = header(r);
+    let _ = writeln!(out, "load: {:.2} s", r.load.seconds);
+    let kv = match (r.load.kv_held_pages, r.load.kv_held_bytes) {
+        (Some(pages), Some(bytes)) => format!(
+            "kv cache {} held for {pages} pages, up to {}",
+            units::bytes(bytes),
+            units::bytes(r.load.kv_reserved_bytes)
+        ),
+        (None, Some(bytes)) => format!(
+            "kv cache {} held, up to {}",
+            units::bytes(bytes),
+            units::bytes(r.load.kv_reserved_bytes)
+        ),
+        _ => format!(
+            "kv cache reserved {}",
+            units::bytes(r.load.kv_reserved_bytes)
+        ),
+    };
+    let _ = writeln!(
+        out,
+        "  weights {} · {kv}",
+        units::bytes(r.load.weights_bytes)
+    );
+    if let Some(rss) = r.load.rss_growth_bytes {
+        let _ = writeln!(out, "  process memory grew by {}", units::bytes(rss));
+    }
+    if let Some(disk) = r.load.disk_read_bytes {
+        let _ = writeln!(
+            out,
+            "  read from disk {} (files already in memory count as 0)",
+            units::bytes(disk)
+        );
+    }
+    if let Some(up) = &r.load.gpu_upload {
+        let rate = up
+            .gb_per_s
+            .map_or(String::new(), |g| format!(" ({g:.1} GB/s)"));
+        let _ = writeln!(
+            out,
+            "  copied to the gpu {} in {:.2} s{rate}",
+            units::bytes(up.bytes),
+            up.seconds
+        );
+    }
+    if let Some(gpu) = r.load.gpu_device_growth_bytes {
+        let _ = writeln!(
+            out,
+            "  gpu memory in use grew by {} (device-wide, includes other programs)",
+            units::bytes(gpu)
+        );
+    }
+    out.push_str(&results_text(r));
     out
 }
 

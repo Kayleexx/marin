@@ -6,7 +6,7 @@ mod identity;
 mod restore;
 mod save;
 
-pub use format::{Identity, Reject};
+pub use format::{Identity, Reject, hash_parts, ids_hash};
 pub use identity::identity;
 pub use restore::{Restored, Timing, restore};
 pub use save::{Saved, save};

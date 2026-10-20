@@ -1,15 +1,15 @@
 //! Keeping the conversations of a `Dialog` between runs, and continuing them: the text of both modes, nothing of the
 //! cache. The next prompt after a resume is read through the same paths as any other.
 
-use super::{Dialog, Talk};
+use super::{Dialog, Origin, Talk};
 use crate::CliError;
 use crate::chat::Chat;
 use crate::code::CodeChat;
 use crate::config::Home;
-use crate::saved::{Code, Listed, ModelId, Saved, SavedError, Store, Written, ago, now};
+use crate::saved::{Code, Listed, ModelId, Saved, SavedError, Store, ago, now};
 use crate::session::Session;
 
-fn store(home: Option<&Home>) -> Result<Store, CliError> {
+pub(super) fn store(home: Option<&Home>) -> Result<Store, CliError> {
     home.map(|h| Store::new(h.sessions_dir())).ok_or_else(|| {
         CliError::BadOption("there is nowhere to keep sessions: set HOME or MARIN_HOME".into())
     })
@@ -47,7 +47,12 @@ impl Dialog {
         let name = name
             .filter(|n| !n.is_empty())
             .map(str::to_owned)
-            .or_else(|| self.name.clone())
+            .or_else(|| {
+                self.origin
+                    .as_ref()
+                    .filter(|o| o.same)
+                    .map(|o| o.name.clone())
+            })
             .unwrap_or_else(|| format!("session-{}", now()));
         let mode = if self.talk == Talk::Code && code.is_some() {
             Talk::Code
@@ -62,11 +67,22 @@ impl Dialog {
             code,
         );
         let (asked, coded) = saved.exchanges();
-        let verb = match store.save(&saved)? {
-            Written::Created(path) => format!("saved `{name}` to {}", path.display()),
-            Written::Replaced(path) => format!("updated `{name}` in {}", path.display()),
+        let from = self
+            .origin
+            .as_ref()
+            .filter(|o| o.name == name)
+            .map(|o| o.revision);
+        let written = store.save(&saved, from)?;
+        let verb = if written.replaced {
+            format!("updated `{name}` in {}", written.path.display())
+        } else {
+            format!("saved `{name}` to {}", written.path.display())
         };
-        self.name = Some(name);
+        self.origin = Some(Origin {
+            name,
+            revision: written.revision,
+            same: true,
+        });
         let mut lines = vec![format!("{verb} · {asked} chat and {coded} code questions")];
         if let Some(code) = &saved.code {
             lines.push(format!(
@@ -81,7 +97,7 @@ impl Dialog {
     /// that is loaded and its project is still there. Nothing changes unless all of that holds.
     pub fn resume(
         &mut self,
-        session: &Session,
+        session: &mut Session,
         home: Option<&Home>,
         name: Option<&str>,
     ) -> Result<Vec<String>, CliError> {
@@ -120,11 +136,17 @@ impl Dialog {
         };
         self.chat = chat;
         self.code = code;
-        self.name = Some(name.clone());
-        Ok(vec![format!(
+        self.origin = Some(Origin {
+            name: name.clone(),
+            revision: saved.revision,
+            same: true,
+        });
+        let mut lines = vec![format!(
             "resumed `{name}` · {asked} chat and {coded} code questions · {} mode",
             self.talk.name()
-        )])
+        )];
+        lines.extend(self.restore_state(session, &store, &saved));
+        Ok(lines)
     }
 
     /// The saved sessions, newest first, with what each is about.
@@ -156,7 +178,18 @@ impl Dialog {
                     } else {
                         format!(" · for {}", s.model)
                     },
-                    if s.code { "with code" } else { "chat" },
+                    s.state_bytes.map_or_else(
+                        || if s.code {
+                            "with code".to_owned()
+                        } else {
+                            "chat".to_owned()
+                        },
+                        |bytes| format!(
+                            "{} · checkpoint {}",
+                            if s.code { "with code" } else { "chat" },
+                            crate::units::bytes(bytes)
+                        )
+                    ),
                     ago(current, s.saved_at)
                 ),
                 Listed::Damaged { name, why } => format!("  {name} · damaged: {why}"),

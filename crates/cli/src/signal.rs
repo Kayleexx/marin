@@ -31,6 +31,15 @@ impl Interrupt {
         Ok(this)
     }
 
+    /// An interrupt no key press reaches, for callers that only need a cancel flag they can set themselves.
+    pub fn unhooked() -> Self {
+        Self {
+            phase: Arc::new(AtomicU8::new(LOADING)),
+            armed: Arc::new(AtomicBool::new(false)),
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     fn pressed(&self) {
         match self.phase.load(Ordering::SeqCst) {
             GENERATING if !self.cancel.swap(true, Ordering::SeqCst) => {}

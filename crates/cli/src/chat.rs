@@ -77,6 +77,18 @@ impl Chat {
         result
     }
 
+    /// The tokens a prompt after this conversation begins with: everything up to the last question, which is where
+    /// the model's state stands after the last answer was asked for.
+    pub fn history_ids(&self, session: &Session) -> Result<Vec<u32>, CliError> {
+        let mut messages = self.conversation.messages();
+        if messages.last().is_some_and(|m| m.role == Role::Assistant) {
+            messages.pop();
+        }
+        let text = chat::render_history(&messages, &self.specials)
+            .map_err(|e| CliError::BadOption(e.to_string()))?;
+        Ok(session.loaded.dir.tokenizer.encode(&text)?)
+    }
+
     /// The tokens of the prompt that asking `text` would send, without asking.
     pub fn prompt_tokens(&mut self, session: &Session, text: &str) -> Result<Vec<u32>, CliError> {
         self.conversation.push_user(text);

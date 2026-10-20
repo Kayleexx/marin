@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use super::{MAX_FILE, MAX_SESSIONS, VERSION};
+use super::{MAX_FILE, MAX_SESSIONS, MAX_STATES, VERSION};
 
 #[derive(Debug, Error)]
 pub enum SavedError {
@@ -26,6 +26,16 @@ pub enum SavedError {
     Version { path: PathBuf, found: String },
     #[error("{path} exists and is not a session Marin can read ({reason}), so it was not replaced")]
     NotOurs { path: PathBuf, reason: String },
+    #[error("{}", conflict(.name, *.found, *.seen))]
+    Conflict {
+        name: String,
+        found: u64,
+        seen: Option<u64>,
+    },
+    #[error("checkpoints in {dir} already take {used} bytes; all together may take {MAX_STATES}")]
+    StateSpace { dir: PathBuf, used: u64 },
+    #[error("another Marin is saving in {dir}")]
+    Busy { dir: PathBuf },
     #[error("{MAX_SESSIONS} sessions are already saved in {dir}")]
     TooMany { dir: PathBuf },
     #[error("`{name}` was saved with {saved} but {current} is loaded")]
@@ -38,6 +48,17 @@ pub enum SavedError {
     ChangedModel { name: String },
     #[error("the project of `{name}`, {root}, is no longer there")]
     MissingProject { name: String, root: PathBuf },
+}
+
+fn conflict(name: &str, found: u64, seen: Option<u64>) -> String {
+    match seen {
+        Some(seen) => format!(
+            "`{name}` was saved by another run since this conversation was opened (it is at revision {found}, this one started from {seen}), so it was not replaced"
+        ),
+        None => format!(
+            "`{name}` already exists and this conversation did not come from it, so it was not replaced"
+        ),
+    }
 }
 
 impl SavedError {
@@ -53,6 +74,11 @@ impl SavedError {
                 "other sessions are unaffected; remove the file to get rid of it"
             }
             Self::NotOurs { .. } => "choose another name, or remove that file yourself",
+            Self::Conflict { .. } => {
+                "save under another name, or /resume it and repeat your changes"
+            }
+            Self::Busy { .. } => "try again in a moment",
+            Self::StateSpace { .. } => "delete the .state files you no longer need",
             Self::TooMany { .. } => "delete the session files you no longer need",
             Self::OtherModel { .. } => "switch to that model with /model, then /resume",
             Self::ChangedModel { .. } => {

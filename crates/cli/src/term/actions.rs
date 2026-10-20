@@ -17,9 +17,12 @@ pub enum Action {
     SwitchBackend,
     Talk(Talk),
     Status,
+    Bench,
+    Verify,
     Settings,
     Save,
     Resume,
+    Checkpoint,
     Sessions,
     NewChat,
     Clear,
@@ -120,7 +123,22 @@ pub fn palette(current: Talk) -> Menu<Action> {
             "continue a saved conversation",
             Action::Resume,
         ),
+        item(
+            "Checkpoint session…",
+            "also keep the model's state of a saved session (large, private; Qwen3.5 GPU)",
+            Action::Checkpoint,
+        ),
         item("Sessions", "list the saved conversations", Action::Sessions),
+        item(
+            "Benchmark…",
+            "time the loaded model: load, prefill, decode, first token, memory",
+            Action::Bench,
+        ),
+        item(
+            "Verify…",
+            "check the loaded model against a float32 reference",
+            Action::Verify,
+        ),
         item(
             "Clear conversation",
             "forget the conversation of this mode",
@@ -143,8 +161,11 @@ impl Action {
             Action::TopP => "Top-p",
             Action::MaxTokens => "Max tokens",
             Action::Seed => "Seed (number or random)",
+            Action::Bench => "Workload (blank: 128 64; for example 512 128 runs=2 profile)",
+            Action::Verify => "Reference file (blank: find one made for this model)",
             Action::Save => "Save as (blank: the name it came from, or a new one)",
             Action::Resume => "Resume which (blank: the newest; Sessions lists them)",
+            Action::Checkpoint => "Keep the model's state of which saved session (blank: this one)",
             _ => return None,
         })
     }
@@ -275,12 +296,12 @@ mod tests {
     fn palette_lists_every_action_once() {
         let mut menu = palette(Talk::Chat);
         let mut seen = Vec::new();
-        for _ in 0..21 {
+        for _ in 0..24 {
             seen.push(*menu.current().unwrap());
             menu.down();
         }
         seen.dedup();
-        assert_eq!(seen.len(), 21);
+        assert_eq!(seen.len(), 24);
         for c in "tok".chars() {
             menu.push(c);
         }
@@ -299,12 +320,15 @@ mod tests {
         assert_eq!(typed("mode chat"), Some(Action::Talk(Talk::Chat)));
         assert_eq!(typed("model"), Some(Action::SwitchModel));
         assert_eq!(typed("status"), Some(Action::Status));
+        assert_eq!(typed("bench"), Some(Action::Bench));
+        assert_eq!(typed("verify"), Some(Action::Verify));
         assert_eq!(typed("settings"), Some(Action::Settings));
         assert_eq!(typed("clear"), Some(Action::NewChat));
         assert_eq!(typed("help"), Some(Action::Shortcuts));
         assert_eq!(typed("save"), Some(Action::Save));
         assert_eq!(typed("resume"), Some(Action::Resume));
         assert_eq!(typed("sessions"), Some(Action::Sessions));
+        assert_eq!(typed("checkpoint"), Some(Action::Checkpoint));
         assert_eq!(typed("exit"), Some(Action::Quit));
         assert_eq!(typed("quit"), Some(Action::Quit));
     }

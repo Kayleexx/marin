@@ -1,58 +1,22 @@
-use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use loader::Tokenizer;
 use model::{BackendChoice, Engine, EngineCache, Precision};
 use runtime::CausalLm;
-use serde::Deserialize;
 
 use crate::CliError;
-use crate::load::load;
+use crate::load::{Loaded, load};
 use crate::memory::DEFAULT_CTX;
 use crate::style::Style;
 use crate::verify_hybrid::{argmax, l2};
+pub(crate) use crate::verify_reference::{Case, Reference, read_reference, stored_weights};
 
 /// Largest accepted gap between our logits and the float32 reference.
 const LOGIT_ABS: f64 = 5e-4;
 const LOGIT_REL: f64 = 1e-4;
 /// Largest accepted relative gap in a layer's hidden-state size.
 const NORM_REL: f64 = 1e-4;
-
-#[derive(Deserialize)]
-struct Reference {
-    format: u32,
-    cases: Vec<Case>,
-}
-
-#[derive(Deserialize)]
-struct Case {
-    prompt: String,
-    prompt_ids: Vec<u32>,
-    layer_norms: Vec<f64>,
-    #[serde(default)]
-    layer_values: Vec<Vec<f32>>,
-    #[serde(default)]
-    router_values: Vec<Vec<f32>>,
-    #[serde(default)]
-    router_top: Vec<Vec<usize>>,
-    #[serde(default)]
-    expert_values: Vec<Vec<f32>>,
-    steps: Vec<Step>,
-}
-
-#[derive(Deserialize)]
-struct Step {
-    token: u32,
-    top: Vec<(u32, f64)>,
-    #[serde(default)]
-    logits: Vec<f32>,
-    #[serde(default)]
-    router_top: Vec<Vec<usize>>,
-    #[serde(default)]
-    layer_values: Vec<Vec<f32>>,
-    #[serde(default)]
-    expert_values: Vec<Vec<f32>>,
-}
 
 #[derive(Debug)]
 pub struct CaseReport {
@@ -65,20 +29,12 @@ pub struct CaseReport {
     pub failure: Option<String>,
 }
 
-fn read_reference(path: &Path) -> Result<Reference, CliError> {
-    let fail = |reason: String| CliError::Reference {
-        path: path.display().to_string(),
-        reason,
-    };
-    let text = fs::read_to_string(path).map_err(|e| fail(e.to_string()))?;
-    let reference: Reference = serde_json::from_str(&text).map_err(|e| fail(e.to_string()))?;
-    if reference.format != 1 {
-        return Err(fail(format!("unknown format {}", reference.format)));
-    }
-    Ok(reference)
-}
-
-fn check_case(model: &Engine, tokenizer: &Tokenizer, case: &Case) -> Result<CaseReport, CliError> {
+fn check_case(
+    model: &Engine,
+    tokenizer: &Tokenizer,
+    case: &Case,
+    cancel: &AtomicBool,
+) -> Result<CaseReport, CliError> {
     let mut report = CaseReport {
         prompt: case.prompt.clone(),
         steps: 0,
@@ -95,6 +51,9 @@ fn check_case(model: &Engine, tokenizer: &Tokenizer, case: &Case) -> Result<Case
             case.prompt_ids
         ));
         return Ok(report);
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return Err(CliError::Cancelled);
     }
     let capacity = ids.len().saturating_add(case.steps.len()).saturating_add(1);
     let mut kv: EngineCache = model.new_cache(capacity).map_err(CliError::Model)?;
@@ -197,6 +156,9 @@ fn check_case(model: &Engine, tokenizer: &Tokenizer, case: &Case) -> Result<Case
     for (index, step) in case.steps.iter().enumerate() {
         if report.failure.is_some() {
             break;
+        }
+        if cancel.load(Ordering::SeqCst) {
+            return Err(CliError::Cancelled);
         }
         if index > 0 {
             let previous = case
@@ -302,6 +264,31 @@ fn check_case(model: &Engine, tokenizer: &Tokenizer, case: &Case) -> Result<Case
     Ok(report)
 }
 
+/// Whether `check_all` also compares whole tensors for this model.
+pub(crate) fn compares_tensors(model: &Engine) -> bool {
+    matches!(
+        model,
+        Engine::Qwen35(_) | Engine::Qwen35Cuda(_) | Engine::Granite(_) | Engine::GraniteCuda(_)
+    )
+}
+
+/// Runs every case of `reference` on the loaded model, handing each report to `shown` as it is done. True if any
+/// case failed.
+pub(crate) fn check_all(
+    loaded: &Loaded,
+    reference: &Reference,
+    cancel: &AtomicBool,
+    mut shown: impl FnMut(usize, &CaseReport),
+) -> Result<bool, CliError> {
+    let mut failed = false;
+    for (n, case) in reference.cases.iter().enumerate() {
+        let report = check_case(&loaded.model, &loaded.dir.tokenizer, case, cancel)?;
+        failed |= report.failure.is_some();
+        shown(n, &report);
+    }
+    Ok(failed)
+}
+
 pub fn run(
     model_dir: &Path,
     reference_path: &Path,
@@ -310,17 +297,7 @@ pub fn run(
     style: &Style,
 ) -> Result<(), CliError> {
     let reference = read_reference(reference_path)?;
-    let ctx = reference
-        .cases
-        .iter()
-        .map(|c| {
-            c.prompt_ids
-                .len()
-                .saturating_add(c.steps.len())
-                .saturating_add(1)
-        })
-        .max()
-        .unwrap_or(1);
+    let ctx = reference.needed_context();
     let loaded = load(
         model_dir,
         Some(ctx),
@@ -338,15 +315,9 @@ pub fn run(
             .weights
             .map_or_else(|| "bf16 weights".into(), |q| q.label())
     );
-    let mut failed = false;
-    for (n, case) in reference.cases.iter().enumerate() {
-        let report = check_case(&loaded.model, &loaded.dir.tokenizer, case)?;
-        let label = format!(
-            "case {}/{}  {:?}",
-            n.saturating_add(1),
-            reference.cases.len(),
-            report.prompt
-        );
+    let total = reference.cases();
+    let failed = check_all(&loaded, &reference, &AtomicBool::new(false), |n, report| {
+        let label = format!("case {}/{total}  {:?}", n.saturating_add(1), report.prompt);
         match &report.failure {
             None => println!(
                 "  {} {label}\n      {} steps, token choices match, max logit diff {:.2e}, max layer diff {:.2e}",
@@ -355,21 +326,15 @@ pub fn run(
                 report.max_logit_diff,
                 report.max_norm_diff
             ),
-            Some(why) => {
-                failed = true;
-                println!("  {} {label}\n      {why}", style.red("FAIL"));
-            }
+            Some(why) => println!("  {} {label}\n      {why}", style.red("FAIL")),
         }
-        if matches!(
-            loaded.model,
-            Engine::Qwen35(_) | Engine::Qwen35Cuda(_) | Engine::Granite(_) | Engine::GraniteCuda(_)
-        ) {
+        if compares_tensors(&loaded.model) {
             println!(
                 "      full tensors: max normalized {:.3e}, relative RMS {:.3e}",
                 report.max_tensor_normalized, report.max_tensor_rms
             );
         }
-    }
+    })?;
     if failed {
         println!("\n{}", style.red("result: FAIL"));
         return Err(CliError::VerifyFailed);
