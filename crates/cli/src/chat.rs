@@ -53,10 +53,11 @@ impl Chat {
         self.conversation.push_user(text);
         let ids = self.render(session);
         self.conversation.pop();
-        ids
+        ids.map(|(ids, _)| ids)
     }
 
-    fn render(&mut self, session: &Session) -> Result<Vec<u32>, CliError> {
+    /// The prompt's tokens and how many of them end the conversation so far, before the start of the reply.
+    fn render(&mut self, session: &Session) -> Result<(Vec<u32>, usize), CliError> {
         let reserved = session.settings.max_tokens.min(session.ctx / 2);
         let budget = session.ctx.saturating_sub(reserved);
         let tokenizer = &session.loaded.dir.tokenizer;
@@ -71,7 +72,12 @@ impl Chat {
             FitError::Chat(e) => CliError::BadOption(e.to_string()),
             FitError::Count(e) => CliError::Loader(e),
         })?;
-        Ok(tokenizer.encode(&prompt)?)
+        let ids = tokenizer.encode(&prompt)?;
+        let history = chat::render_history(&self.conversation.messages(), &self.specials)
+            .map_err(|e| CliError::BadOption(e.to_string()))?;
+        let history = tokenizer.encode(&history)?;
+        let shared = history.iter().zip(&ids).take_while(|(a, b)| a == b).count();
+        Ok((ids, shared))
     }
 
     fn answer(
@@ -80,7 +86,9 @@ impl Chat {
         interrupt: &Interrupt,
         out: &mut impl Write,
     ) -> Result<Reply, CliError> {
-        let ids = self.render(session)?;
-        session.complete_tokens(ids, interrupt, out)
+        let (ids, upto) = self.render(session)?;
+        session
+            .complete_after(ids, upto, interrupt, out)?
+            .ok_or(CliError::Cancelled)
     }
 }

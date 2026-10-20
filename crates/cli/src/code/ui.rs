@@ -2,17 +2,12 @@ use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::time::Duration;
 
-use crossterm::cursor::MoveToColumn;
-use crossterm::queue;
-use crossterm::terminal::{Clear, ClearType};
-
-use crate::render::{MarkdownStream, MarkdownWriter, Theme};
+use crate::dialog;
 use crate::style::Style;
 use crate::term::caps::Caps;
+use crate::term::reply::ReplyWriter;
 use crate::term::screen::{display_width, fit, width};
 use crate::units;
-
-const MARGIN: usize = 2;
 
 pub struct Stats {
     pub tools: usize,
@@ -41,6 +36,23 @@ impl Ui {
             },
             caps: Caps::detect(no_color || !tty),
             tty,
+        }
+    }
+
+    /// For the chat's own terminal, which has already settled its colors.
+    pub fn embedded(style: Style, caps: Caps) -> Self {
+        Self {
+            style,
+            caps,
+            tty: true,
+        }
+    }
+
+    pub fn piped(style: Style) -> Self {
+        Self {
+            style,
+            caps: Caps::detect(true),
+            tty: false,
         }
     }
 
@@ -76,12 +88,15 @@ impl Ui {
     pub fn help(&self) {
         let s = &self.style;
         let row = |keys: &str, what: &str| {
-            println!("  {}  {}", s.cyan(&format!("{keys:<12}")), s.dim(what))
+            println!("  {}  {}", s.cyan(&format!("{keys:<18}")), s.dim(what))
         };
         println!();
-        row("/clear", "forget this conversation and start fresh");
+        for (command, what, local_only) in dialog::COMMAND_HELP {
+            if !local_only {
+                row(command, what);
+            }
+        }
         row("/help", "show this list");
-        row("/quit", "leave (Ctrl-D works too)");
         row("Alt+Enter", "new line in a question");
         row("↑ ↓", "earlier questions");
         row("Ctrl-C", "stop an answer in progress");
@@ -136,68 +151,34 @@ impl Ui {
         println!("\n  {}\n", self.style.dim(&line));
     }
 
-    /// Starts a model reply: a quiet marker shows until the first words arrive.
-    pub fn reply(&self) -> Reply {
-        let mut waiting = false;
-        if self.tty {
-            let mut out = io::stdout().lock();
-            let _ = write!(out, "  {}", self.style.dim("…"));
-            let _ = out.flush();
-            waiting = true;
-        }
-        let stream = MarkdownStream::new(
-            if self.tty {
-                Theme::new(&self.caps)
-            } else {
-                Theme::plain()
-            },
-            width().saturating_sub(1),
-            MARGIN,
-            false,
-        );
-        Reply {
-            waiting,
-            writer: MarkdownWriter::new(io::stdout(), stream),
+    /// Starts a model reply: on a terminal a quiet marker shows until the first words arrive.
+    pub fn reply(&self) -> io::Result<Reply> {
+        Ok(Reply {
+            writer: ReplyWriter::new(&self.style, &self.caps, self.tty)?,
             started: false,
-        }
+        })
     }
 }
 
 pub struct Reply {
-    waiting: bool,
-    writer: MarkdownWriter<io::Stdout>,
+    writer: ReplyWriter,
     started: bool,
 }
 
 impl Reply {
-    fn settle(&mut self) -> io::Result<()> {
-        if self.waiting {
-            self.waiting = false;
-            let mut out = io::stdout().lock();
-            queue!(out, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-            out.flush()?;
-        }
-        Ok(())
-    }
-
     pub fn push(&mut self, piece: &str) -> io::Result<()> {
-        if piece.is_empty() {
+        if piece.is_empty() || (!self.started && piece.trim().is_empty()) {
             return Ok(());
         }
-        if !self.started && piece.trim().is_empty() {
-            return Ok(());
-        }
-        self.settle()?;
         self.started = true;
         self.writer.write_all(piece.as_bytes())
     }
 
     /// The reply is over: whatever is held is written and the cursor rests at a line start.
     pub fn end(mut self) -> io::Result<()> {
-        self.settle()?;
         if self.started {
-            self.writer.finish()?;
+            self.writer.finish_markdown()?;
         }
-        Ok(())
+        self.writer.finish_placeholder(false)
     }
 }

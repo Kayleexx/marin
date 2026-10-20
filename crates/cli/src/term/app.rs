@@ -11,8 +11,8 @@ use super::panel::Tab;
 use super::raw::RawMode;
 use super::screen::Screen;
 use crate::CliError;
-use crate::chat::Chat;
 use crate::config::Home;
+use crate::dialog::Dialog;
 use crate::load::ChatPrecision;
 use crate::session::Session;
 use crate::signal::Interrupt;
@@ -20,7 +20,7 @@ use crate::style::Style;
 
 pub struct Launch {
     pub session: Session,
-    pub chat: Chat,
+    pub dialog: Dialog,
     pub interrupt: Interrupt,
     pub home: Option<Home>,
     pub backend: BackendChoice,
@@ -69,7 +69,7 @@ pub(super) struct App {
     pub(super) session: Option<Session>,
     /// What a model switch needs while no model is resident: the model to fall back to, its context and the settings.
     pub(super) parked: Option<Parked>,
-    pub(super) chat: Chat,
+    pub(super) dialog: Dialog,
     pub(super) splash: Option<usize>,
     pub(super) interrupt: Interrupt,
     pub(super) home: Option<Home>,
@@ -98,7 +98,7 @@ pub fn run(launch: Launch) -> Result<i32, CliError> {
         screen,
         session: Some(launch.session),
         parked: None,
-        chat: launch.chat,
+        dialog: launch.dialog,
         splash: launch.splash,
         interrupt: launch.interrupt,
         home: launch.home,

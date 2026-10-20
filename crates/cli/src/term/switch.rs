@@ -4,9 +4,9 @@ use model::BackendChoice;
 
 use super::app::{App, PanelCache, Parked};
 use super::raw::RawMode;
-use crate::chat::Chat;
-use crate::config::Config;
+use super::screen::{Kind, Line};
 use crate::session::Session;
+use crate::setup;
 use crate::{CliError, load};
 
 impl App {
@@ -37,7 +37,7 @@ impl App {
             path,
             (Some(parked.ctx), parked.ctx),
             backend,
-            self.precision,
+            setup::precision_for_pick(self.precision, path),
             &self.style,
             (true, false),
         )?;
@@ -71,8 +71,15 @@ impl App {
         self.screen.print(&[])?;
         match self.load_session(&target, backend, &parked) {
             Ok(session) => {
+                let weights = session.loaded.precision.weights;
                 if target != parked.model {
-                    self.chat = Chat::new(&session);
+                    match self.dialog.reset(&session) {
+                        Ok(()) => self.screen.print(&[Line::new(
+                            Kind::Dim,
+                            "new model: both conversations start over".to_string(),
+                        )])?,
+                        Err(e) => self.show_error(&e)?,
+                    }
                 }
                 let name = format!(
                     "{} · {}",
@@ -81,9 +88,12 @@ impl App {
                 );
                 self.install(session, backend, format!("now using {name}"));
                 if let Some(home) = &self.home {
-                    let _ = home.save_config(&Config {
-                        model: Some(target),
-                    });
+                    setup::remember(Some(home), &target, weights);
+                    // Only a backend the user chose here is remembered, not one a flag gave this run.
+                    if backend != previous_backend {
+                        let name = format!("{backend:?}").to_lowercase();
+                        let _ = home.update_config(|c| c.backend = Some(name));
+                    }
                 }
             }
             Err(failure) => {

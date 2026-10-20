@@ -196,3 +196,25 @@ cancellation and 200/404 behavior match the old server field for field; process
 VRAM +0–64 MiB (gate 128). Next: 16 tokens of real prefill remain (user text and
 9-token tail) at 7.5 ms/token; other system messages get no prefix.
 
+
+
+## Verbatim BENCHMARKS.md section before the unified-terminal consolidation (2026-10-20)
+
+## V8/V9 prompt prefill — batching NO-GO, shared prefix GO
+
+Prefill is a flat 7.1–7.7 ms/token from 8 tokens (82% matmul), so one pass over two
+prompts cost −8% to +13% against a >= 10% gate: not built ([archive](docs/benchmarks/archive/09-batched-prefill.log)).
+Every default-system request starts with the same 31 token IDs (a leading newline merges
+with the last, so matching is by ID). Restoring a stored cache costs 0.45 ms against
+239 ms to recompute, bit-identical; one immutable cache is built at start (200 ms,
+87 MiB) and matching requests start from a copy ([archive](docs/benchmarks/archive/10-shared-prefix.log)).
+
+| Interleaved A/B, 3 sessions | Before | After |
+|---|---:|---:|
+| Solo short TTFT p50 / total | 0.333 / 0.581 s | **0.112 / 0.296 s** |
+| 3 short: TTFT p50 / p95; mean completion | 0.60 / 0.99 s; 1.51 s | **0.24 / 0.30 s; 0.81 s** |
+| Custom system message (no match) TTFT p50 | 0.430 s | 0.430 s |
+
+Greedy text identical in 36 runs; sessions, cancellation and 200/404 unchanged; VRAM
++0–64 MiB (gate 128).
+

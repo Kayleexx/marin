@@ -138,7 +138,7 @@ impl App {
             KeyCode::Char('d') if ctrl && self.editor.is_empty() => return Ok(Flow::Quit(0)),
             KeyCode::Char('o') if ctrl => self.open_tab(Tab::Reply)?,
             KeyCode::Char('/') if plain && self.editor.is_empty() => {
-                self.mode = Mode::Palette(actions::palette())
+                self.mode = Mode::Palette(actions::palette(self.dialog.talk()))
             }
             KeyCode::Enter if plain => {
                 let text = self.editor.text();

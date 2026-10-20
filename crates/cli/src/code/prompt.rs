@@ -11,9 +11,7 @@ use crate::style::Style;
 use crate::term::editor::Editor;
 use crate::term::raw::RawMode;
 use crate::term::screen::width;
-use crate::term::view::input_line;
-
-const PROMPT: &str = "  ❯ ";
+use crate::term::view::{PROMPT, input_line};
 
 pub enum Input {
     Line(String),
@@ -22,7 +20,7 @@ pub enum Input {
 
 fn draw(editor: &Editor, style: &Style) -> io::Result<()> {
     let (line, column) = input_line(editor, PROMPT, width());
-    let line = line.replacen('❯', &style.periwinkle("❯"), 1);
+    let line = line.replacen("you >", &style.periwinkle("you >"), 1);
     let mut out = io::stdout().lock();
     queue!(
         out,

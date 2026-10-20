@@ -124,3 +124,30 @@ failure modes are visible in the output and the log. NOT a reliable code reader:
 Verification: fmt, check, Clippy -D warnings, line-limit, unsafe clean; workspace tests with MARIN_REQUIRE_CUDA=1 and
 with MARIN_MATMUL_SCALAR=1: 698 passed, 0 failed, 5 ignored each; pinned HF verify unchanged (max logit 1.31e-5,
 relative RMS 3.288e-6).
+
+
+## Verbatim BENCHMARKS.md section before the unified-terminal consolidation (2026-10-20)
+
+## Coding V0 (`marin code`) — GO for the tool, NO-GO as a reliable reader
+
+A read-only terminal client of `marin serve` ([archive](docs/benchmarks/archive/11-coding-v0.log)). Its
+`list_files`, `read_file` and `search` tools stay inside the project (symlinks, `..`, absolute paths), bound
+every result, report binary, huge and unreadable files and never accept a tool result written by the model;
+old output and then old questions are dropped when the window fills; Ctrl-C hangs up in under a second. Server
+changes: `context_window` in `/v1/models`, `usage` in the last stream chunk. Qwen3.5-4B Q8, `--ctx 8192`, greedy:
+
+| Five tasks on this repository | Result | Tools | Time |
+|---|---|---:|---:|
+| Find `max_active` | pass (both definitions) | 3 | 25.8 s |
+| Explain the streaming request path | **fail** (wrong crates, 3 invalid calls) | 4 | 35.4 s |
+| Trace the 404 "session not found" | pass (`completion.rs:100`, `store.take`) | 2 | 20.9 s |
+| Time limits across files | pass (four limits, right files) | 3 | 47.1 s |
+| Unanswerable (user accounts) | pass (says there are none) | 8 | 49.6 s |
+
+Over 25 tasks (17 tuned against, 8 held out with the rubric fixed first): 16 pass (64%): lookups 9/12, explain /
+multi-file 4/10, unanswerable 3/3; held-out 7/8. 20 of about 81 calls slipped on format (12 read after a repair,
+8 failed); tool results were always right (median 2 ms); latency is the model (median task 25.8 s). Failures
+were confident: a call site named as the definition, an example read as the default, "the code does not exist".
+Edge cases (injection file, `/etc/passwd`, symlink, binary, mode-000, 20,000-line log, killed server, Ctrl-C, full
+window) all behaved. Next: Qwen3.5's thinking mode on the same tasks (gate: +20 points on explain / multi-file).
+

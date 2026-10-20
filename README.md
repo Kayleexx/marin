@@ -14,8 +14,9 @@ NVIDIA driver and CUDA toolkit; CPU inference works without them.
 
 ```bash
 cargo install --path crates/cli --locked
-marin --model ~/models/Qwen3-1.7B
-marin run "Explain a mutex in one sentence."
+marin                                  # chat; the first run finds your models and asks which one
+marin code                             # ask about the project in this folder (read-only)
+marin run "Explain a mutex in one sentence."   # one answer, then exit (also reads a pipe)
 marin-run ~/models/Qwen3-1.7B-Base --backend cpu --temp 0 \
   -p "The capital of France is"
 ```
@@ -81,7 +82,7 @@ concurrent requests share one GPU pass (up to three). Every other
 backend runs one request at a time. It supports OpenAI-style `/v1/models` and
 `/v1/chat/completions` with string messages, non-streaming JSON or SSE token
 streaming. Anonymous requests use a fresh inference cache. It does not batch prompts,
-execute tools (`marin code` is a client that reads files itself), accept multimodal content or provide network authentication;
+execute tools (`marin code` reads files itself), accept multimodal content or provide network authentication;
 keep it on loopback. Snapshots are unavailable in server mode and `--snapshot`
 is rejected. Opt-in sessions retain one conversation prefix in memory; a new
 session or anonymous request evicts the previous one.
@@ -118,36 +119,48 @@ at the next model boundary. The 1 MiB body and selected context limits still
 apply. A failed or cancelled turn never publishes partial state; a session
 may be evicted and need `"new"` again.
 
-## Coding assistant (V0, read-only)
+## One terminal for chat and code
 
-`marin code` is a terminal client for a running `marin serve`: ask questions about
-a project and the model reads it with three tools, shown as quiet `›` lines.
-It cannot write files, run commands or leave the project folder.
+`marin` is the everyday entry: it loads the model in its own process, so nothing needs
+starting first. On the first run it looks in `~/models` (or `MARIN_MODELS`), shows the
+chat models with what the planner says about each on this machine (fits the GPU, CPU
+only, too big) and asks which to use; with none it asks for a folder. A single model is
+just used. The choice is saved in `~/.config/marin/config.json` (XDG, or `MARIN_HOME`)
+and the next launch asks nothing. Flags always win over saved values; the saved ones are
+the model, the backend picked in `/model`, and `temp`/`max_tokens` changed in the UI. A
+damaged or outdated config is reported once and replaced. A packed 8-bit model needs a
+`--quantize int8` opt-in as before: picking it from the list (or answering yes to the one
+question for a saved model) is that opt-in, remembered with the model.
 
-```bash
-# terminal 1: a server with room for tool output (8k context is a good start)
-marin --model ~/models/Qwen3.5-4B-Q8 --backend cuda --quantize int8 --ctx 8192 serve
-# terminal 2: from the project you want to ask about
-marin code            # or: marin code ~/dev/project --port 8000
-```
+Type `/` for actions and keep typing to search them: `/mode code`, `/mode chat`,
+`/model`, `/status`, `/settings`, `/clear`, `/help`, `/exit`. Piped input takes the same
+commands as lines (`printf '/mode code\nwhere is main?\n' | marin`); other lines are
+questions. Each mode keeps its own conversation, `/clear` forgets the current one, and a
+different model starts both over. On Qwen3.5 GPU the chat history is
+read once and checkpointed, so a long conversation does not replay itself each turn. `marin run` with no text on a terminal opens the same chat;
+with text or a pipe it answers once, as before.
 
-- Tools: `list_files` (a folder, up to 3 levels), `read_file` (numbered lines,
-  250 at a time, with the line to continue from) and `search` (literal text,
-  `a|b` for either, case-insensitive unless the pattern has capitals). Results are
-  bounded by the context size; binary, huge and unreadable files are reported, not
-  shown. Symlinks are never followed out of the project and `..` or absolute paths
-  outside it are refused. File text cannot pose as tool markup.
-- Keys: Enter sends, Alt+Enter adds a line, ↑ ↓ recall questions, Ctrl-C stops an
-  answer (or clears the line, or leaves when it is empty), Ctrl-D leaves. `/clear`
-  starts over, `/help` lists commands. Piped input is read one question per line.
-- The conversation stays in the model's window. When it grows too large, old tool
-  output is shortened first, then the oldest questions are dropped, and a note says so.
-  A failed or cancelled question leaves no trace. `--log FILE` appends every request
-  and tool call as JSON lines.
-- A 4B model is unreliable at this: it can answer single-lookup questions well, but
-  it sometimes breaks the call format, wanders on questions that span files, and can
-  state that code is missing when it simply did not look in the right place. Check
-  its `path:line` citations; the measured results are in [BENCHMARKS.md](BENCHMARKS.md).
+**Code mode** (`marin code [PATH]`, or `/mode code`) is read-only: the model uses three
+tools, shown as quiet `›` lines, and cannot write files, run commands or leave the project.
+
+- Tools: `list_files` (a folder, up to 3 levels), `read_file` (numbered lines, 250 at a
+  time, with the line to continue from) and `search` (literal text, `a|b` for either,
+  `a.*b` for in order, case-insensitive unless the pattern has capitals). Results are
+  bounded by the context size; binary, huge and unreadable files are reported, not shown.
+  Symlinks never lead out of the project and `..` or absolute paths outside it are
+  refused. File text cannot pose as tool markup. Code mode decodes greedily and wants a
+  window of at least 2048 tokens (`marin code` starts at 8192, reduced if memory is short).
+- When the window fills, old tool output is shortened first, then the oldest questions are
+  dropped, with a note. A failed or cancelled question leaves no trace. Ctrl-C stops an
+  answer within a fraction of a second; `--log FILE` records every request and tool call.
+- A 4B model is unreliable here: it answers single lookups well, but sometimes breaks the
+  call format, wanders on questions that span files, and can say code is missing when it did
+  not look in the right place. Check its `path:line` citations ([BENCHMARKS.md](BENCHMARKS.md)).
+- `marin code` still works as a client: with `--port N` it uses the `marin serve` there
+  instead of loading a model, and without `--port` it reuses a server already listening on
+  port 8000 only if it serves the same model with a large enough window (otherwise it says
+  why and loads locally; a flag the server cannot honor, such as `--backend`, loads locally). `marin serve` is unchanged; it is
+  the headless API and never reads the saved backend or sampling values.
 
 ## Useful controls
 

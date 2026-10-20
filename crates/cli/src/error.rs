@@ -60,6 +60,8 @@ pub enum CliError {
     Output { path: String, reason: String },
     #[error(transparent)]
     Code(#[from] crate::code::CodeError),
+    #[error("port {0} is already in use")]
+    PortInUse(u16),
     #[error("the model does not match the reference output")]
     VerifyFailed,
 }
@@ -90,6 +92,9 @@ impl CliError {
             Self::Loader(LoaderError::Safetensors { .. }) => {
                 Some("the file may be a partial download; fetch it again")
             }
+            Self::Model(e) if e.to_string().contains("packed artifact requires") => Some(
+                "this folder holds packed 8-bit weights: add --quantize int8 (and its --quant-group), or pick it from the model list in `marin`",
+            ),
             Self::Model(ModelError::UnsupportedModelType { .. }) => {
                 Some("supported text models are Qwen3, Qwen3.5 and Granite 3.0")
             }
@@ -124,7 +129,9 @@ impl CliError {
             Self::EmptyPrompt => Some("type some text for the model to continue"),
             Self::PromptTooLong { .. } => Some("shorten the prompt or raise --ctx"),
             Self::ContextTooLarge { .. } => Some("pick a smaller --ctx"),
-            Self::NotEnoughMemory { .. } => Some("try a smaller --ctx or close other programs"),
+            Self::NotEnoughMemory { .. } | Self::NoFit { .. } => Some(
+                "try --quantize int8 (half the memory), a smaller --ctx, or close other programs",
+            ),
             Self::Input { .. } => Some("check that the path exists and is a readable file"),
             Self::NoInput => Some("pass a file, or pipe text into `marin show`"),
             Self::Saved { .. } => Some("pass files written by `marin-run bench --json`"),
@@ -133,6 +140,9 @@ impl CliError {
                 Some("check that the folder exists and that you can write to it")
             }
             Self::Code(e) => e.hint(),
+            Self::PortInUse(_) => Some(
+                "another `marin serve` may be running there: use --port for a different one, or `marin code` to use it",
+            ),
             Self::VerifyFailed => Some("the lines above show the first step that disagrees"),
             _ => None,
         }

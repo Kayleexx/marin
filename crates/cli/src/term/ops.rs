@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use std::time::Duration;
 
-use crossterm::cursor::{MoveTo, MoveToColumn};
+use crossterm::cursor::MoveTo;
 use crossterm::event;
 use crossterm::queue;
 use crossterm::style::Print;
@@ -13,77 +13,18 @@ use runtime::StopReason;
 
 use super::actions::{self, Action, SHORTCUTS};
 use super::app::{App, Flow, Mode};
-use super::caps::Caps;
 use super::editor::Editor;
 use super::menu::{Item, Menu};
 use super::panel::Tab;
 use super::raw::RawMode;
-use super::screen::{Kind, Line, display_width, width};
-use super::view::{PROMPT, REPLY_PREFIX, input_line};
+use super::reply::ReplyWriter;
+use super::screen::{Kind, Line, width};
+use super::view::{PROMPT, input_line};
 use crate::CliError;
+use crate::code::Ui;
 use crate::config;
-use crate::render::{MarkdownStream, MarkdownWriter, Theme};
-use crate::style::Style;
-
-/// Introduces the reply with the "marin >" prefix, once: a dim placeholder after it until the first token arrives.
-/// The reply itself is rendered as markdown, wrapped to the terminal and aligned under the prefix.
-struct ReplyWriter {
-    placeholder: bool,
-    prefix: String,
-    out: io::Stdout,
-    markdown: MarkdownWriter<io::Stdout>,
-}
-
-impl ReplyWriter {
-    fn new(style: &Style, caps: &Caps) -> io::Result<Self> {
-        let prefix = format!("{} ", style.cyan(REPLY_PREFIX.trim_end()));
-        let mut out = io::stdout().lock();
-        write!(out, "{prefix}{}", style.dim("…"))?;
-        out.flush()?;
-        let stream = MarkdownStream::new(
-            Theme::new(caps),
-            width().saturating_sub(1),
-            display_width(REPLY_PREFIX),
-            true,
-        );
-        Ok(Self {
-            placeholder: true,
-            prefix,
-            out: io::stdout(),
-            markdown: MarkdownWriter::new(io::stdout(), stream),
-        })
-    }
-
-    /// The reply is complete or cut short: what is held is written and the cursor rests at a line start.
-    fn finish_markdown(&mut self) -> io::Result<()> {
-        self.markdown.finish()
-    }
-
-    /// Replaces the placeholder line by the prefix alone, or by nothing when an error follows.
-    fn finish_placeholder(&mut self, keep_prefix: bool) -> io::Result<()> {
-        if self.placeholder {
-            self.placeholder = false;
-            let mut out = self.out.lock();
-            queue!(out, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-            if keep_prefix {
-                write!(out, "{}", self.prefix)?;
-            }
-            out.flush()?;
-        }
-        Ok(())
-    }
-}
-
-impl Write for ReplyWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.finish_placeholder(true)?;
-        self.markdown.write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.markdown.flush()
-    }
-}
+use crate::dialog::Talk;
+use crate::setup;
 
 /// Keys typed while a reply streamed were echoed by the terminal and must not become part of the next prompt.
 fn discard_pending_input() -> io::Result<()> {
@@ -145,10 +86,16 @@ impl App {
             Action::SwitchBackend => self.open_backend_picker(),
             Action::Clear => self.clear_screen()?,
             Action::NewChat => {
-                self.chat.clear();
+                self.dialog.clear();
                 self.clear_screen()?;
-                self.notice = Some("started a new conversation".to_string());
+                self.notice = Some(format!(
+                    "started a new {} conversation",
+                    self.dialog.talk().name()
+                ));
             }
+            Action::Talk(talk) => self.set_talk(talk)?,
+            Action::Status => self.show_status()?,
+            Action::Settings => self.open_tab(Tab::Settings)?,
             Action::Shortcuts => {
                 let lines: Vec<Line> = SHORTCUTS.iter().map(|l| Line::new(Kind::Dim, *l)).collect();
                 self.screen.print(&lines)?;
@@ -158,6 +105,35 @@ impl App {
         }
         let _ = raw;
         Ok(Flow::Continue)
+    }
+
+    fn set_talk(&mut self, talk: Talk) -> Result<(), CliError> {
+        let Some(session) = self.session.as_ref() else {
+            return Ok(self.show_error(&CliError::ModelNotLoaded)?);
+        };
+        if talk == self.dialog.talk() {
+            self.notice = Some(format!("already in {} mode", talk.name()));
+            return Ok(());
+        }
+        match self.dialog.switch(talk, session) {
+            Ok(note) => self.screen.print(&[Line::new(Kind::Dim, note)])?,
+            Err(e) => self.show_error(&e)?,
+        }
+        Ok(())
+    }
+
+    fn show_status(&self) -> Result<(), CliError> {
+        let Some(session) = self.session.as_ref() else {
+            return Ok(self.show_error(&CliError::ModelNotLoaded)?);
+        };
+        let lines: Vec<Line> = self
+            .dialog
+            .status(session)
+            .into_iter()
+            .map(|l| Line::new(Kind::Dim, format!("  {l}")))
+            .collect();
+        self.screen.print(&lines)?;
+        Ok(())
     }
 
     fn open_model_picker(&mut self) {
@@ -178,10 +154,17 @@ impl App {
             .into_iter()
             .map(|path| Item {
                 label: config::display_name(&path),
-                detail: if path == current {
-                    "current".to_string()
-                } else {
-                    path.display().to_string()
+                detail: {
+                    let tag = if setup::packed_group(&path).is_some() {
+                        "packed 8-bit · "
+                    } else {
+                        ""
+                    };
+                    if path == current {
+                        format!("{tag}current")
+                    } else {
+                        format!("{tag}{}", path.display())
+                    }
                 },
                 value: path,
             })
@@ -225,6 +208,15 @@ impl App {
                 .and_then(|ids| session.next_token_lines(&ids)),
             _ => actions::apply_setting(&mut session.settings, action, text).map(|note| {
                 self.notice = Some(note);
+                if let Some(home) = &self.home {
+                    let (temp, max_tokens) =
+                        (session.settings.temperature, session.settings.max_tokens);
+                    let _ = home.update_config(|c| match action {
+                        Action::Temperature => c.temp = Some(temp),
+                        Action::MaxTokens => c.max_tokens = Some(max_tokens),
+                        _ => {}
+                    });
+                }
                 Vec::new()
             }),
         };
@@ -286,24 +278,45 @@ impl App {
             return Ok(());
         };
         raw.suspend()?;
-        let mut out = ReplyWriter::new(&self.style, &self.caps)?;
-        let result = self.chat.ask(session, text, &self.interrupt, &mut out);
-        out.finish_markdown()?;
-        out.finish_placeholder(result.is_ok())?;
-        match result {
-            Ok(reply) => {
-                let note = match reply.outcome.stop {
-                    StopReason::EndOfText => None,
-                    StopReason::MaxTokens => Some("stopped at max tokens (change it in / actions)"),
-                    StopReason::ContextFull => Some("context window full"),
-                    StopReason::Cancelled => Some("cancelled"),
-                };
-                if let Some(note) = note {
-                    println!("{}", self.style.dim(note));
+        match self.dialog.talk() {
+            Talk::Chat => {
+                let mut out = ReplyWriter::new(&self.style, &self.caps, true)?;
+                let result = self
+                    .dialog
+                    .chat
+                    .ask(session, text, &self.interrupt, &mut out);
+                out.finish_markdown()?;
+                out.finish_placeholder(result.is_ok())?;
+                match result {
+                    Ok(reply) => {
+                        let note = match reply.outcome.stop {
+                            StopReason::EndOfText => None,
+                            StopReason::MaxTokens => {
+                                Some("stopped at max tokens (change it in / actions)")
+                            }
+                            StopReason::ContextFull => Some("context window full"),
+                            StopReason::Cancelled => Some("cancelled"),
+                        };
+                        if let Some(note) = note {
+                            println!("{}", self.style.dim(note));
+                        }
+                    }
+                    Err(CliError::Cancelled) => println!("{}", self.style.dim("cancelled")),
+                    Err(e) if e.is_broken_pipe() => return Err(e),
+                    Err(e) => crate::report(&e, &self.style),
                 }
             }
-            Err(e) if e.is_broken_pipe() => return Err(e),
-            Err(e) => crate::report(&e, &self.style),
+            Talk::Code => {
+                let ui = Ui::embedded(self.style, self.caps);
+                match self.dialog.ask_code(session, &self.interrupt, ui, text) {
+                    Ok(true) => println!(
+                        "{}",
+                        self.style.dim("cancelled; that question was not kept")
+                    ),
+                    Ok(false) => {}
+                    Err(e) => crate::report(&e, &self.style),
+                }
+            }
         }
         println!();
         raw.resume()?;

@@ -3,6 +3,7 @@ use super::editor::Editor;
 use super::menu::Menu;
 use super::panel::{self, KvStats, PanelData, ReplyStats};
 use super::screen::{Kind, Line, display_width, height, menu_lines, width};
+use crate::dialog::Talk;
 use crate::inspect::describe;
 use crate::session::Session;
 use crate::telemetry;
@@ -25,8 +26,8 @@ fn menu_rows() -> usize {
 }
 
 /// The input prompt: what the user types follows "you >"; Marin's replies are introduced by "marin >".
-pub(super) const PROMPT: &str = "you > ";
-pub(super) const REPLY_PREFIX: &str = "marin > ";
+pub(crate) const PROMPT: &str = "you > ";
+pub(crate) const REPLY_PREFIX: &str = "marin > ";
 
 pub(super) fn stop_label(stop: StopReason) -> &'static str {
     match stop {
@@ -90,8 +91,11 @@ impl App {
 
     /// Runtime details live in the inspect panel; the prompt only hints at what is available.
     fn status_line(&self) -> String {
-        let full = "/ actions · ctrl+o inspect";
-        if display_width(full) < self.columns() {
+        let full = match self.dialog.talk() {
+            Talk::Chat => "/ actions · ctrl+o inspect".to_string(),
+            Talk::Code => "code mode · / actions · ctrl+o inspect".to_string(),
+        };
+        if display_width(&full) < self.columns() {
             full.to_string()
         } else {
             "/ actions".to_string()

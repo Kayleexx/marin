@@ -1,3 +1,5 @@
+mod prefill;
+
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -51,6 +53,9 @@ pub struct Session {
     kv: EngineCache,
     /// Dies with `loaded`: a new model, tokenizer or context size makes a new `Session`.
     retained: Retained,
+    /// A copy of the cache and its tokens at the end of the prompt of the last `prefill`, which the cache returns to
+    /// after the reply so the next prompt extends it instead of replaying the conversation.
+    boundary: Option<(EngineCache, Vec<u32>)>,
     /// Off when a tool needs full replays.
     pub reuse: bool,
     pub settings: Settings,
@@ -94,6 +99,7 @@ impl Session {
             loaded,
             kv,
             retained: Retained::default(),
+            boundary: None,
             reuse: true,
             settings,
             ctx,
@@ -176,6 +182,7 @@ impl Session {
     /// Clears the record: the next reply reads its whole prompt.
     pub fn engine_and_kv(&mut self) -> (&Engine, &mut EngineCache) {
         self.retained.forget();
+        self.boundary = None;
         (&self.loaded.model, &mut self.kv)
     }
 
@@ -312,6 +319,7 @@ impl Session {
     /// The model's logits for the token after `prompt` (the cache is rebuilt from scratch).
     pub fn next_logits(&mut self, prompt: &[u32]) -> Result<Vec<f32>, CliError> {
         self.retained.forget();
+        self.boundary = None;
         self.kv.clear();
         let logits = self
             .loaded

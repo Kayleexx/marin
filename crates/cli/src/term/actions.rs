@@ -1,5 +1,6 @@
 use super::menu::{Item, Menu};
 use crate::CliError;
+use crate::dialog::Talk;
 use crate::session::Settings;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,27 +15,57 @@ pub enum Action {
     Seed,
     SwitchModel,
     SwitchBackend,
+    Talk(Talk),
+    Status,
+    Settings,
     NewChat,
     Clear,
     Shortcuts,
     Quit,
 }
 
-pub const SHORTCUTS: [&str; 5] = [
+pub const SHORTCUTS: [&str; 7] = [
     "enter send · alt+enter or ctrl+j new line · ↑/↓ history",
-    "/ open actions · ctrl+o inspect the last reply",
+    "/ opens actions; type to search them, for example",
+    "/mode code · /model · /status · /clear · /exit",
+    "ctrl+o inspect the last reply",
     "ctrl+c cancels a reply; press it twice at an empty prompt to exit · ctrl+d exits",
     "ctrl+a / ctrl+e start / end of line · ctrl+u / ctrl+k delete to start / end · ctrl+w delete word",
     "type after / to search the actions, enter runs the highlighted one",
 ];
 
-pub fn palette() -> Menu<Action> {
+pub fn palette(current: Talk) -> Menu<Action> {
     let item = |label: &str, detail: &str, value| Item {
         label: label.to_string(),
         detail: detail.to_string(),
         value,
     };
+    let mode = |talk: Talk, label: &str, detail: &str| {
+        let detail = if talk == current {
+            format!("current · {detail}")
+        } else {
+            detail.to_string()
+        };
+        item(label, &detail, Action::Talk(talk))
+    };
     Menu::new(vec![
+        mode(Talk::Chat, "Mode: chat", "talk with the model"),
+        mode(
+            Talk::Code,
+            "Mode: code",
+            "ask about the project in this folder (read-only)",
+        ),
+        item(
+            "Switch model…",
+            "pick another model folder",
+            Action::SwitchModel,
+        ),
+        item("Status", "model, hardware, window and mode", Action::Status),
+        item(
+            "Settings",
+            "what generation uses right now",
+            Action::Settings,
+        ),
         item(
             "Inspect last reply",
             "metrics, tokens, next tokens, KV, model  (ctrl+o)",
@@ -72,23 +103,18 @@ pub fn palette() -> Menu<Action> {
             Action::Seed,
         ),
         item(
-            "Switch model…",
-            "pick another model folder",
-            Action::SwitchModel,
-        ),
-        item(
             "Switch backend…",
             "auto, cpu or cuda",
             Action::SwitchBackend,
         ),
         item(
-            "New conversation",
-            "forget the conversation so far",
+            "Clear conversation",
+            "forget the conversation of this mode",
             Action::NewChat,
         ),
         item("Clear screen", "", Action::Clear),
-        item("Keyboard shortcuts", "", Action::Shortcuts),
-        item("Quit", "ctrl+d", Action::Quit),
+        item("Help", "keys and commands", Action::Shortcuts),
+        item("Exit", "quit · ctrl+d", Action::Quit),
     ])
 }
 
@@ -231,17 +257,36 @@ mod tests {
 
     #[test]
     fn palette_lists_every_action_once() {
-        let mut menu = palette();
+        let mut menu = palette(Talk::Chat);
         let mut seen = Vec::new();
-        for _ in 0..14 {
+        for _ in 0..18 {
             seen.push(*menu.current().unwrap());
             menu.down();
         }
         seen.dedup();
-        assert_eq!(seen.len(), 14);
+        assert_eq!(seen.len(), 18);
         for c in "tok".chars() {
             menu.push(c);
         }
         assert_eq!(menu.current(), Some(&Action::Tokens));
+    }
+
+    fn typed(text: &str) -> Option<Action> {
+        let mut menu = palette(Talk::Chat);
+        text.chars().for_each(|c| menu.push(c));
+        menu.current().copied()
+    }
+
+    #[test]
+    fn the_commands_people_type_after_a_slash_find_their_action() {
+        assert_eq!(typed("mode code"), Some(Action::Talk(Talk::Code)));
+        assert_eq!(typed("mode chat"), Some(Action::Talk(Talk::Chat)));
+        assert_eq!(typed("model"), Some(Action::SwitchModel));
+        assert_eq!(typed("status"), Some(Action::Status));
+        assert_eq!(typed("settings"), Some(Action::Settings));
+        assert_eq!(typed("clear"), Some(Action::NewChat));
+        assert_eq!(typed("help"), Some(Action::Shortcuts));
+        assert_eq!(typed("exit"), Some(Action::Quit));
+        assert_eq!(typed("quit"), Some(Action::Quit));
     }
 }

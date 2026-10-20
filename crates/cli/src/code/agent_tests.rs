@@ -42,21 +42,26 @@ fn with_agent<T>(
     cancel: &AtomicBool,
     body: impl FnOnce(&mut Agent<'_>) -> T,
 ) -> T {
-    let client = fake.client();
+    let mut client = fake.client();
+    let mut convo = Conversation::new(
+        system_prompt("demo", &Repo::open(dir.path(), context).unwrap().overview()),
+        context,
+    );
+    let (mut log, mut seen) = (Log::default(), Vec::new());
     let info = ServerInfo {
         model: "fake-model".into(),
         context,
     };
     let repo = Repo::open(dir.path(), context).unwrap();
     let mut agent = Agent {
-        client: &client,
+        brain: &mut client,
         info: &info,
         repo: &repo,
         ui: Ui::new(true),
-        convo: Conversation::new(system_prompt("demo", &repo.overview()), context),
+        convo: &mut convo,
         cancel,
-        log: Log::default(),
-        seen: Vec::new(),
+        log: &mut log,
+        seen: &mut seen,
     };
     body(&mut agent)
 }

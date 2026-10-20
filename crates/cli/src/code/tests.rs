@@ -55,6 +55,8 @@ pub(super) enum Step {
     Cut(String),
     /// Accepts the request and never answers.
     Hang,
+    /// Streams data that never forms an event.
+    Flood,
 }
 
 pub(super) struct Fake {
@@ -144,6 +146,16 @@ fn serve(stream: TcpStream, step: &Step, seen: &Mutex<Vec<Value>>) -> std::io::R
         }
         Step::Hang => {
             thread::sleep(Duration::from_secs(5));
+            Ok(())
+        }
+        Step::Flood => {
+            out.write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )?;
+            let block = "x".repeat(1 << 19);
+            for _ in 0..16 {
+                chunk(&mut out, &block)?;
+            }
             Ok(())
         }
         Step::Reply(text) => stream_reply(&mut out, text, Some(body.len() / 3)),
@@ -298,4 +310,15 @@ fn nothing_listening_is_reported_as_unreachable() {
         Client::new(addr).info().err(),
         Some(ClientError::Unreachable(_))
     ));
+}
+
+#[test]
+fn an_event_that_never_ends_is_refused_instead_of_buffered_forever() {
+    let fake = Fake::start(vec![Step::Flood]);
+    let err = fake
+        .client()
+        .chat(&ask(), &never(), |_| true)
+        .err()
+        .unwrap();
+    assert!(matches!(err, ClientError::Protocol(_)), "{err}");
 }

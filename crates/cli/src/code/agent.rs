@@ -1,13 +1,16 @@
 use std::fs::File;
 use std::io::{self, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use serde_json::{Value, json};
 use thiserror::Error;
 
+use super::CodeError;
+use super::brain::Brain;
 use super::call::{self, CLOSE, INVENTED, OPEN};
-use super::client::{Ask, Client, ClientError, Reply, ServerInfo};
+use super::client::{Ask, ClientError, Reply, ServerInfo};
 use super::convo::{Conversation, Done};
 use super::repo::Repo;
 use super::ui::{Stats, Ui};
@@ -40,8 +43,20 @@ pub enum Outcome {
 pub struct Log(Option<File>);
 
 impl Log {
-    pub fn to(file: File) -> Self {
-        Self(Some(file))
+    /// Appends to `path`, or records nothing without one.
+    pub fn open(path: Option<&Path>) -> Result<Self, CodeError> {
+        let Some(path) = path else {
+            return Ok(Self(None));
+        };
+        let file = File::options()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| CodeError::Log {
+                path: path.display().to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(Self(Some(file)))
     }
 
     fn record(&mut self, value: &Value) {
@@ -52,14 +67,14 @@ impl Log {
 }
 
 pub struct Agent<'a> {
-    pub client: &'a Client,
+    pub brain: &'a mut dyn Brain,
     pub info: &'a ServerInfo,
     pub repo: &'a Repo,
     pub ui: Ui,
-    pub convo: Conversation,
+    pub convo: &'a mut Conversation,
     pub cancel: &'a AtomicBool,
-    pub log: Log,
-    pub seen: Vec<call::Call>,
+    pub log: &'a mut Log,
+    pub seen: &'a mut Vec<call::Call>,
 }
 
 /// Passes on the model's words until it starts a tool call (or a result of its own); the markup never reaches the screen.
@@ -268,6 +283,9 @@ impl Agent<'_> {
         let mut share = 1.0;
         let mut renewed = false;
         loop {
+            if self.cancel.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
             let trimmed = self
                 .convo
                 .make_room(reserve, share)
@@ -287,10 +305,10 @@ impl Agent<'_> {
                 max_tokens: self.max_tokens(),
             };
             let began = Instant::now();
-            let mut out = self.ui.reply();
+            let mut out = self.ui.reply()?;
             let mut cutter = Cutter::default();
             let mut broken = None;
-            let result = self.client.chat(&ask, self.cancel, |piece| {
+            let result = self.brain.reply(&ask, self.cancel, &mut |piece| {
                 let text = cutter.push(piece);
                 if broken.is_none()
                     && let Err(e) = out.push(&text)

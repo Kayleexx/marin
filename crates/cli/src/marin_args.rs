@@ -7,11 +7,12 @@ use crate::args::BackendArg;
 
 const EXAMPLES: &str = "\
 Examples:
-  marin                                 start a session with your default model
+  marin                                 chat with your default model; /mode code asks about the project
   marin run Explain what a mutex is    ask once and print only the reply
   echo \"Say hi in French\" | marin run    read the question from stdin
   marin --model ~/models/Qwen3.5-4B-Q8 --quantize int8 serve    serve local text requests
-  marin code                            chat about the code in this folder (needs `marin serve` running)
+  marin run                             chat in the terminal (same as `marin`); `marin run TEXT` answers once
+  marin code                            ask about the code in this folder (read-only; /mode switches inside `marin`)
   marin model ~/models/Qwen3-1.7B       choose the default chat model
   marin show notes.md                   read a file with formatting, wrapped to your terminal
 
@@ -33,7 +34,7 @@ pub struct MarinCli {
 
 #[derive(Subcommand, Debug)]
 pub enum MarinCommand {
-    /// Ask one question and print only the reply (question from the arguments or stdin)
+    /// Ask one question and print only the reply (from the arguments or stdin); with neither on a terminal, chat
     Run { prompt: Vec<String> },
     /// Serve one loaded chat model over a loopback OpenAI-compatible text API
     Serve {
@@ -41,13 +42,13 @@ pub enum MarinCommand {
         #[arg(long, default_value_t = 8000)]
         port: u16,
     },
-    /// Ask questions about a code project; the assistant reads it with search, list and read tools (needs `marin serve`)
+    /// Ask questions about a code project: the model reads it with list, read and search tools (read-only)
     Code {
         /// Project folder to look at [default: the current directory]
         path: Option<PathBuf>,
-        /// Port of the running `marin serve`
-        #[arg(long, default_value_t = 8000)]
-        port: u16,
+        /// Use the `marin serve` on this port instead of loading a model here [default: one on port 8000, if any]
+        #[arg(long)]
+        port: Option<u16>,
         /// Append every model request and tool call to this file as JSON lines
         #[arg(long, value_name = "FILE")]
         log: Option<PathBuf>,

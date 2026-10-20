@@ -17,9 +17,24 @@ pub struct Home {
     state_dir: PathBuf,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+/// What is remembered between runs. Flags always win over it, and a missing field is simply not remembered.
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct Config {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<PathBuf>,
+    /// `auto`, `cpu` or `cuda`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temp: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<usize>,
+    /// `int8`, for a packed 8-bit model the user picked: the opt-in belongs to `model` and goes with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quantize: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quant_group: Option<usize>,
 }
 
 impl Home {
@@ -56,10 +71,31 @@ impl Home {
 
     /// A missing or unreadable config just means "nothing remembered yet".
     pub fn load_config(&self) -> Config {
-        fs::read_to_string(self.config_file())
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+        self.read_config().0
+    }
+
+    /// The config and, when the file exists but cannot be used, what is wrong with it.
+    pub fn read_config(&self) -> (Config, Option<String>) {
+        let file = self.config_file();
+        let text = match fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Config::default(), None),
+            Err(e) => return (Config::default(), Some(format!("{}: {e}", file.display()))),
+        };
+        match serde_json::from_str(&text) {
+            Ok(config) => (config, None),
+            Err(e) => (
+                Config::default(),
+                Some(format!("{} is not valid ({e})", file.display())),
+            ),
+        }
+    }
+
+    /// Changes one remembered value and keeps the rest.
+    pub fn update_config(&self, change: impl FnOnce(&mut Config)) -> std::io::Result<()> {
+        let mut config = self.load_config();
+        change(&mut config);
+        self.save_config(&config)
     }
 
     pub fn save_config(&self, config: &Config) -> std::io::Result<()> {
@@ -207,12 +243,55 @@ mod tests {
         assert_eq!(home.load_config(), Config::default());
         let config = Config {
             model: Some(PathBuf::from("/models/x")),
+            backend: Some("cpu".into()),
+            temp: Some(0.2),
+            max_tokens: Some(256),
+            quantize: Some("int8".into()),
+            quant_group: Some(128),
         };
         home.save_config(&config).unwrap();
         assert_eq!(home.load_config(), config);
         let entries = vec!["one".to_string(), "two\nlines".to_string()];
         home.save_history(&entries).unwrap();
         assert_eq!(home.load_history(), entries);
+    }
+
+    #[test]
+    fn an_old_config_with_only_a_model_still_loads_and_updates_keep_the_rest() {
+        let temp = Temp::new("upgrade");
+        let home = Home::new(temp.0.clone(), temp.0.clone());
+        fs::write(
+            temp.0.join("config.json"),
+            "{\n  \"model\": \"/models/old\"\n}\n",
+        )
+        .unwrap();
+        let (config, damaged) = home.read_config();
+        assert!(damaged.is_none());
+        assert_eq!(config.model, Some(PathBuf::from("/models/old")));
+        assert_eq!((config.backend, config.temp), (None, None));
+        home.update_config(|c| c.backend = Some("cuda".into()))
+            .unwrap();
+        let after = home.load_config();
+        assert_eq!(after.model, Some(PathBuf::from("/models/old")));
+        assert_eq!(after.backend.as_deref(), Some("cuda"));
+        let text = fs::read_to_string(temp.0.join("config.json")).unwrap();
+        assert!(
+            !text.contains("temp"),
+            "unset values are not written: {text}"
+        );
+    }
+
+    #[test]
+    fn a_damaged_config_is_reported_and_replaced_on_the_next_save() {
+        let temp = Temp::new("damaged");
+        let home = Home::new(temp.0.clone(), temp.0.clone());
+        fs::write(temp.0.join("config.json"), "{not json").unwrap();
+        let (config, damaged) = home.read_config();
+        assert_eq!(config, Config::default());
+        assert!(damaged.is_some_and(|m| m.contains("not valid")));
+        home.update_config(|c| c.model = Some(PathBuf::from("/m")))
+            .unwrap();
+        assert!(home.read_config().1.is_none());
     }
 
     #[test]

@@ -1,0 +1,24 @@
+Stabilization pass after the unified terminal (no new features).
+
+Method: read every boundary (cli/tui, model choice and config, local execution, http client and server, scheduler,
+session state, engines) for duplicated paths, unbounded buffers, stale state and silent fallbacks; each finding was
+reproduced or proven by reading before it was changed.
+
+Fixed
+- Chat on Qwen3.5 GPU replayed the whole history every turn (hybrid recurrent state cannot be truncated). Chat and code
+  mode now read the history in 64-token slices, take the existing session checkpoint, generate, and return to it
+  (cli/src/session/prefill.rs). Where no checkpoint is possible (CPU, low VRAM) the previous behavior is kept.
+- Reported reuse counts tokens kept from before the turn; prefill time is included in prompt_forward and prefill
+  (caught by tests/chat_reuse.rs).
+- Automatic server reuse needs the same model name, a large enough window and no flag the server cannot honor
+  (choose::server_fits); otherwise it says why and loads locally.
+- Unbounded SSE event buffer in the code client is capped at 4 MiB (code/client.rs).
+- Ctrl-C between prefill and generation could end the process instead of cancelling.
+- One chat-model check, one config read per launch, one log opener, one slash-command table shared by the piped and
+  remote paths. Removed the dead kv_page_payload_bytes.
+
+Evidence
+- Qwen3.5-4B-Q8, CUDA, greedy, 4-turn piped chat (load included): before 10.5 s, after 8.8 s, output byte-identical.
+- 8-turn chat measured earlier in the pass: 47.4 s before, 15.4 s after, identical greedy output on three
+  model/backend combinations.
+- tests/chat_reuse.rs: kept-cache replies equal full replays at temperature 0 and 0.7.

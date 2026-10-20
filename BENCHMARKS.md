@@ -213,44 +213,26 @@ requests share one pass with caches updated in place (a failed pass marks the ba
 
 ## V8/V9 prompt prefill — batching NO-GO, shared prefix GO
 
-Prefill is a flat 7.1–7.7 ms/token from 8 tokens (82% matmul), so one pass over two
-prompts cost −8% to +13% against a >= 10% gate: not built ([archive](docs/benchmarks/archive/09-batched-prefill.log)).
-Every default-system request starts with the same 31 token IDs (a leading newline merges
-with the last, so matching is by ID). Restoring a stored cache costs 0.45 ms against
-239 ms to recompute, bit-identical; one immutable cache is built at start (200 ms,
-87 MiB) and matching requests start from a copy ([archive](docs/benchmarks/archive/10-shared-prefix.log)).
+Prefill is a flat 7.1–7.7 ms/token (82% matmul), so one pass over two prompts cost −8% to +13% against a
+>= 10% gate: not built ([archive](docs/benchmarks/archive/09-batched-prefill.log)). All default-system requests
+start with the same 31 token IDs; restoring a stored cache costs 0.45 ms against 239 ms, bit-identical. One
+immutable cache is built at start (200 ms, 87 MiB): solo short TTFT 0.333 → 0.112 s, 3 short clients p95
+0.99 → 0.30 s, no match unchanged, VRAM +0–64 MiB ([archive](docs/benchmarks/archive/10-shared-prefix.log)).
 
-| Interleaved A/B, 3 sessions | Before | After |
-|---|---:|---:|
-| Solo short TTFT p50 / total | 0.333 / 0.581 s | **0.112 / 0.296 s** |
-| 3 short: TTFT p50 / p95; mean completion | 0.60 / 0.99 s; 1.51 s | **0.24 / 0.30 s; 0.81 s** |
-| Custom system message (no match) TTFT p50 | 0.430 s | 0.430 s |
+## Coding V0 and the unified terminal — GO for the interface, NO-GO as a reliable reader
 
-Greedy text identical in 36 runs; sessions, cancellation and 200/404 unchanged; VRAM
-+0–64 MiB (gate 128).
+Read-only code mode: `list_files`, `read_file`, `search`, confined to the project, bounded, never trusting a result
+the model wrote ([archive](docs/benchmarks/archive/11-coding-v0.log)). Qwen3.5-4B Q8, 25 tasks on this repository
+(8 held out): 16 pass (64%): lookups 9/12, explain / multi-file 4/10, unanswerable 3/3; 20 of ~81 calls slipped on
+format (12 read after a repair); tool time median 2 ms, median task 25.8 s. Failures were confident (a call site
+named as the definition, "the code does not exist"). Use it to find `path:line`, then read the line.
 
-## Coding V0 (`marin code`) — GO for the tool, NO-GO as a reliable reader
-
-A read-only terminal client of `marin serve` ([archive](docs/benchmarks/archive/11-coding-v0.log)). Its
-`list_files`, `read_file` and `search` tools stay inside the project (symlinks, `..`, absolute paths), bound
-every result, report binary, huge and unreadable files and never accept a tool result written by the model;
-old output and then old questions are dropped when the window fills; Ctrl-C hangs up in under a second. Server
-changes: `context_window` in `/v1/models`, `usage` in the last stream chunk. Qwen3.5-4B Q8, `--ctx 8192`, greedy:
-
-| Five tasks on this repository | Result | Tools | Time |
-|---|---|---:|---:|
-| Find `max_active` | pass (both definitions) | 3 | 25.8 s |
-| Explain the streaming request path | **fail** (wrong crates, 3 invalid calls) | 4 | 35.4 s |
-| Trace the 404 "session not found" | pass (`completion.rs:100`, `store.take`) | 2 | 20.9 s |
-| Time limits across files | pass (four limits, right files) | 3 | 47.1 s |
-| Unanswerable (user accounts) | pass (says there are none) | 8 | 49.6 s |
-
-Over 25 tasks (17 tuned against, 8 held out with the rubric fixed first): 16 pass (64%): lookups 9/12, explain /
-multi-file 4/10, unanswerable 3/3; held-out 7/8. 20 of about 81 calls slipped on format (12 read after a repair,
-8 failed); tool results were always right (median 2 ms); latency is the model (median task 25.8 s). Failures
-were confident: a call site named as the definition, an example read as the default, "the code does not exist".
-Edge cases (injection file, `/etc/passwd`, symlink, binary, mode-000, 20,000-line log, killed server, Ctrl-C, full
-window) all behaved. Next: Qwen3.5's thinking mode on the same tasks (gate: +20 points on explain / multi-file).
+V10 puts chat and code behind one `marin` ([archive](docs/benchmarks/archive/12-unified-terminal.log)): the model
+loads in-process (no `marin serve`), the first run lists models with the planner's fit and saves the choice, flags
+beat saved values, `/mode`, `/model`, `/status`, `/settings`, `/clear`, `/help`, `/exit` work in the palette and on a
+pipe, and a running server on port 8000 is reused by `marin code`. In-process code mode first replayed the whole
+conversation every tool round (Qwen3.5 truncation); reusing the server's checkpoint idea took a two-tool question
+from 25.3 to 14.6 s (rounds 8.8/11.6/12.8 s → 5.3/4.7/2.3 s) and Ctrl-C from up to 12 s to 0.01–0.43 s.
 
 ## Results that changed the runtime
 
@@ -346,4 +328,4 @@ Section numbers and their original gates remain unchanged inside them:
 - [22–31: CPU SIMD, INT8, KV, INT4 pilots and consolidation](docs/benchmarks/archive/02-cpu-stages.log)
 - [32–40: packed loader, Qwen3.5 and V9 planner](docs/benchmarks/archive/03-loader-qwen35-planner.log)
 - [41–46: Granite MoE, numerical NO-GOs and H-Tiny pilot](docs/benchmarks/archive/04-granite-moe.log)
-- Server logs: [sessions](docs/benchmarks/archive/04-server-sessions.log), [checkpoints](docs/benchmarks/archive/05-server-checkpoints.log), [V7 scheduling](docs/benchmarks/archive/06-server-scheduling.log), [V7b batched decode](docs/benchmarks/archive/07-batched-decode.log), [V7c memory](docs/benchmarks/archive/08-batched-memory.log), [V8 prefill](docs/benchmarks/archive/09-batched-prefill.log), [V9 prefix](docs/benchmarks/archive/10-shared-prefix.log), [Coding V0](docs/benchmarks/archive/11-coding-v0.log) (load generator `06-load.py`, prompt `06-long-prompt.txt`)
+- Server logs: [sessions](docs/benchmarks/archive/04-server-sessions.log), [checkpoints](docs/benchmarks/archive/05-server-checkpoints.log), [V7 scheduling](docs/benchmarks/archive/06-server-scheduling.log), [V7b batched decode](docs/benchmarks/archive/07-batched-decode.log), [V7c memory](docs/benchmarks/archive/08-batched-memory.log), [V8 prefill](docs/benchmarks/archive/09-batched-prefill.log), [V9 prefix](docs/benchmarks/archive/10-shared-prefix.log), [Coding V0](docs/benchmarks/archive/11-coding-v0.log), [unified terminal](docs/benchmarks/archive/12-unified-terminal.log), [stabilization](docs/benchmarks/archive/13-stabilization.log) (load generator `06-load.py`, prompt `06-long-prompt.txt`)

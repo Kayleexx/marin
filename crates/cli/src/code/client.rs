@@ -13,6 +13,8 @@ const TICK: Duration = Duration::from_millis(100);
 /// A long prompt is read before the first token appears, so the server may be quiet for a while.
 const SILENCE: Duration = Duration::from_secs(240);
 const MAX_CHUNK: usize = 1 << 20;
+/// More than this without the end of an event is not a reply from Marin.
+const MAX_EVENT: usize = 4 << 20;
 
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -28,6 +30,8 @@ pub enum ClientError {
     Protocol(String),
     #[error("cancelled")]
     Cancelled,
+    #[error("{0}")]
+    Local(String),
 }
 
 impl From<io::Error> for ClientError {
@@ -124,33 +128,19 @@ impl Client {
         stream.flush()
     }
 
+    /// Whether a Marin server answers, quickly: for deciding between using one and loading a model here.
+    pub fn probe(&self) -> Option<ServerInfo> {
+        let mut stream = TcpStream::connect_timeout(&self.addr, Duration::from_millis(300)).ok()?;
+        stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
+        self.send(&mut stream, "GET", "/v1/models", b"").ok()?;
+        parse_info(stream).ok()
+    }
+
     pub fn info(&self) -> Result<ServerInfo, ClientError> {
         let mut stream = self.connect()?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         self.send(&mut stream, "GET", "/v1/models", b"")?;
-        let mut reader = BufReader::new(stream);
-        let head = read_head(&mut reader)?;
-        let body = read_body(&mut reader, head.length)?;
-        if head.status != 200 {
-            return Err(rejected(head.status, &body));
-        }
-        let json: Value = serde_json::from_slice(&body)
-            .map_err(|e| ClientError::Protocol(format!("/v1/models: {e}")))?;
-        let model = json
-            .pointer("/data/0/id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ClientError::Protocol("/v1/models lists no model".into()))?;
-        let context = json
-            .pointer("/data/0/context_window")
-            .and_then(Value::as_u64)
-            .and_then(|n| usize::try_from(n).ok())
-            .ok_or_else(|| {
-                ClientError::Protocol("the server does not report its context window".into())
-            })?;
-        Ok(ServerInfo {
-            model: model.to_owned(),
-            context,
-        })
+        parse_info(stream)
     }
 
     /// Streams one reply, passing each piece of text to `on_text` as it arrives. Setting `cancel` hangs up, and so
@@ -211,6 +201,32 @@ impl Client {
             }
         }
     }
+}
+
+fn parse_info(stream: TcpStream) -> Result<ServerInfo, ClientError> {
+    let mut reader = BufReader::new(stream);
+    let head = read_head(&mut reader)?;
+    let body = read_body(&mut reader, head.length)?;
+    if head.status != 200 {
+        return Err(rejected(head.status, &body));
+    }
+    let json: Value = serde_json::from_slice(&body)
+        .map_err(|e| ClientError::Protocol(format!("/v1/models: {e}")))?;
+    let model = json
+        .pointer("/data/0/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ClientError::Protocol("/v1/models lists no model".into()))?;
+    let context = json
+        .pointer("/data/0/context_window")
+        .and_then(Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| {
+            ClientError::Protocol("the server does not report its context window".into())
+        })?;
+    Ok(ServerInfo {
+        model: model.to_owned(),
+        context,
+    })
 }
 
 fn rejected(status: u16, body: &[u8]) -> ClientError {
@@ -291,6 +307,9 @@ fn pump(stream: TcpStream, tx: &Sender<Event>) -> Result<(), ClientError> {
     let mut pending = Vec::new();
     while let Some(chunk) = read_chunk(&mut reader)? {
         pending.extend_from_slice(&chunk);
+        if pending.len() > MAX_EVENT && !pending.windows(2).any(|w| w == b"\n\n") {
+            return Err(ClientError::Protocol("an event that never ends".into()));
+        }
         while let Some(end) = pending.windows(2).position(|w| w == b"\n\n") {
             let event: Vec<u8> = pending.drain(..end.saturating_add(2)).collect();
             if event_done(&event, &mut reply, tx)? {

@@ -93,15 +93,4 @@ impl Engine {
             | EngineCache::GraniteCuda(_) => Err(unsupported()),
         }
     }
-
-    /// Bytes `export_kv_page` returns for a page of `rows` positions.
-    pub fn kv_page_payload_bytes(&self, cache: &EngineCache, rows: usize) -> Option<usize> {
-        match cache {
-            EngineCache::Cuda(c) => Some(c.kv().page_payload_bytes(rows)),
-            EngineCache::Cpu(_)
-            | EngineCache::Qwen35(_)
-            | EngineCache::Qwen35Cuda(_)
-            | EngineCache::GraniteCuda(_) => None,
-        }
-    }
 }
