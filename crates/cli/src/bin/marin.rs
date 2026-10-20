@@ -355,7 +355,7 @@ fn session(
         &mut session,
         &mut dialog,
         &interrupt,
-        style,
+        (style, l.home.as_ref()),
         io::stdin().lock().lines(),
     )?;
     keep_snapshot(&mut session, &style);

@@ -234,6 +234,10 @@ pipe, and a running server on port 8000 is reused by `marin code`. In-process co
 conversation every tool round (Qwen3.5 truncation); reusing the server's checkpoint idea took a two-tool question
 from 25.3 to 14.6 s (rounds 8.8/11.6/12.8 s → 5.3/4.7/2.3 s) and Ctrl-C from up to 12 s to 0.01–0.43 s.
 
+Durable sessions ([archive](docs/benchmarks/archive/14-durable-sessions.log)): `/save`, `/sessions` and `/resume` keep
+only portable text, so no cache is written. Qwen3.5-4B-Q8 CUDA, greedy: a conversation resumed in a new process equals
+the uninterrupted one token for token; startup 5.79 → 5.72 s, peak RSS 871 MiB and peak VRAM 5216 MiB unchanged.
+
 ## Results that changed the runtime
 
 | Change | Matched evidence | Decision |
@@ -328,4 +332,4 @@ Section numbers and their original gates remain unchanged inside them:
 - [22–31: CPU SIMD, INT8, KV, INT4 pilots and consolidation](docs/benchmarks/archive/02-cpu-stages.log)
 - [32–40: packed loader, Qwen3.5 and V9 planner](docs/benchmarks/archive/03-loader-qwen35-planner.log)
 - [41–46: Granite MoE, numerical NO-GOs and H-Tiny pilot](docs/benchmarks/archive/04-granite-moe.log)
-- Server logs: [sessions](docs/benchmarks/archive/04-server-sessions.log), [checkpoints](docs/benchmarks/archive/05-server-checkpoints.log), [V7 scheduling](docs/benchmarks/archive/06-server-scheduling.log), [V7b batched decode](docs/benchmarks/archive/07-batched-decode.log), [V7c memory](docs/benchmarks/archive/08-batched-memory.log), [V8 prefill](docs/benchmarks/archive/09-batched-prefill.log), [V9 prefix](docs/benchmarks/archive/10-shared-prefix.log), [Coding V0](docs/benchmarks/archive/11-coding-v0.log), [unified terminal](docs/benchmarks/archive/12-unified-terminal.log), [stabilization](docs/benchmarks/archive/13-stabilization.log) (load generator `06-load.py`, prompt `06-long-prompt.txt`)
+- Server logs: [sessions](docs/benchmarks/archive/04-server-sessions.log), [checkpoints](docs/benchmarks/archive/05-server-checkpoints.log), [V7 scheduling](docs/benchmarks/archive/06-server-scheduling.log), [V7b batched decode](docs/benchmarks/archive/07-batched-decode.log), [V7c memory](docs/benchmarks/archive/08-batched-memory.log), [V8 prefill](docs/benchmarks/archive/09-batched-prefill.log), [V9 prefix](docs/benchmarks/archive/10-shared-prefix.log), [Coding V0](docs/benchmarks/archive/11-coding-v0.log), [unified terminal](docs/benchmarks/archive/12-unified-terminal.log), [stabilization](docs/benchmarks/archive/13-stabilization.log), [durable sessions](docs/benchmarks/archive/14-durable-sessions.log) (load generator `06-load.py`, prompt `06-long-prompt.txt`)

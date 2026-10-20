@@ -60,6 +60,8 @@ pub enum CliError {
     Output { path: String, reason: String },
     #[error(transparent)]
     Code(#[from] crate::code::CodeError),
+    #[error(transparent)]
+    Conversation(#[from] crate::saved::SavedError),
     #[error("port {0} is already in use")]
     PortInUse(u16),
     #[error("the model does not match the reference output")]
@@ -116,6 +118,7 @@ impl CliError {
             }))) => Some(
                 "the GPU has no room for more of this conversation: close other programs, start a new chat, or run with --backend cpu",
             ),
+            Self::Conversation(e) => e.hint(),
             Self::NoChatModel { .. } => Some(
                 "install one: huggingface-cli download Qwen/Qwen3-1.7B --local-dir ~/models/Qwen3-1.7B (or use marin-run for base models)",
             ),

@@ -1,14 +1,18 @@
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// Tokens per character before the server has told us the real ratio.
 const GUESS: f64 = 0.34;
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Done {
     pub label: String,
     pub text: String,
 }
 
-enum Item {
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Item {
     User(String),
     Assistant(String),
     Results {
@@ -80,6 +84,17 @@ impl Conversation {
             context,
             ratio: None,
         }
+    }
+
+    pub fn items(&self) -> &[Item] {
+        &self.items
+    }
+
+    /// Continues from `items` saved earlier; the server-side session is forgotten with the rest of what was cached.
+    pub fn restore(&mut self, items: Vec<Item>) {
+        self.items = items;
+        self.session = "new".into();
+        self.ratio = None;
     }
 
     pub fn mark(&self) -> usize {

@@ -27,6 +27,7 @@ use std::process::ExitCode;
 
 use thiserror::Error;
 
+pub use convo::{Done, Item};
 pub use local::CodeChat;
 pub use ui::Ui;
 

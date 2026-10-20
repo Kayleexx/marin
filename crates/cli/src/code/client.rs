@@ -12,6 +12,9 @@ const CONNECT: Duration = Duration::from_secs(3);
 const TICK: Duration = Duration::from_millis(100);
 /// A long prompt is read before the first token appears, so the server may be quiet for a while.
 const SILENCE: Duration = Duration::from_secs(240);
+/// How long the quick check for a server and the request for its model may take in all.
+const PROBE: Duration = Duration::from_secs(1);
+const INFO: Duration = Duration::from_secs(5);
 const MAX_CHUNK: usize = 1 << 20;
 /// More than this without the end of an event is not a reply from Marin.
 const MAX_EVENT: usize = 4 << 20;
@@ -82,6 +85,25 @@ struct Head {
     length: usize,
 }
 
+/// Reads from a stream for `within` in all, however slowly the other side sends, so a peer that keeps talking cannot hold
+/// a caller that wants a short answer.
+struct Deadline {
+    stream: TcpStream,
+    started: Instant,
+    within: Duration,
+}
+
+impl Read for Deadline {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.within.saturating_sub(self.started.elapsed());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        self.stream.read(buf)
+    }
+}
+
 /// Closes the connection when the request ends, whichever way, so the server stops generating for a client that left.
 struct Hangup(TcpStream);
 
@@ -131,16 +153,14 @@ impl Client {
     /// Whether a Marin server answers, quickly: for deciding between using one and loading a model here.
     pub fn probe(&self) -> Option<ServerInfo> {
         let mut stream = TcpStream::connect_timeout(&self.addr, Duration::from_millis(300)).ok()?;
-        stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
         self.send(&mut stream, "GET", "/v1/models", b"").ok()?;
-        parse_info(stream).ok()
+        parse_info(stream, PROBE).ok()
     }
 
     pub fn info(&self) -> Result<ServerInfo, ClientError> {
         let mut stream = self.connect()?;
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         self.send(&mut stream, "GET", "/v1/models", b"")?;
-        parse_info(stream)
+        parse_info(stream, INFO)
     }
 
     /// Streams one reply, passing each piece of text to `on_text` as it arrives. Setting `cancel` hangs up, and so
@@ -203,8 +223,13 @@ impl Client {
     }
 }
 
-fn parse_info(stream: TcpStream) -> Result<ServerInfo, ClientError> {
-    let mut reader = BufReader::new(stream);
+fn parse_info(stream: TcpStream, within: Duration) -> Result<ServerInfo, ClientError> {
+    let stream = Deadline {
+        stream,
+        started: Instant::now(),
+        within,
+    };
+    let mut reader = BufReader::new(stream).take(MAX_EVENT as u64);
     let head = read_head(&mut reader)?;
     let body = read_body(&mut reader, head.length)?;
     if head.status != 200 {

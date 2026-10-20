@@ -18,6 +18,9 @@ pub enum Action {
     Talk(Talk),
     Status,
     Settings,
+    Save,
+    Resume,
+    Sessions,
     NewChat,
     Clear,
     Shortcuts,
@@ -31,7 +34,7 @@ pub const SHORTCUTS: [&str; 7] = [
     "ctrl+o inspect the last reply",
     "ctrl+c cancels a reply; press it twice at an empty prompt to exit · ctrl+d exits",
     "ctrl+a / ctrl+e start / end of line · ctrl+u / ctrl+k delete to start / end · ctrl+w delete word",
-    "type after / to search the actions, enter runs the highlighted one",
+    "type after / to search the actions (also /save, /resume, /sessions), enter runs one",
 ];
 
 pub fn palette(current: Talk) -> Menu<Action> {
@@ -108,6 +111,17 @@ pub fn palette(current: Talk) -> Menu<Action> {
             Action::SwitchBackend,
         ),
         item(
+            "Save session…",
+            "keep both conversations to resume later (private to you)",
+            Action::Save,
+        ),
+        item(
+            "Resume session…",
+            "continue a saved conversation",
+            Action::Resume,
+        ),
+        item("Sessions", "list the saved conversations", Action::Sessions),
+        item(
             "Clear conversation",
             "forget the conversation of this mode",
             Action::NewChat,
@@ -129,6 +143,8 @@ impl Action {
             Action::TopP => "Top-p",
             Action::MaxTokens => "Max tokens",
             Action::Seed => "Seed (number or random)",
+            Action::Save => "Save as (blank: the name it came from, or a new one)",
+            Action::Resume => "Resume which (blank: the newest; Sessions lists them)",
             _ => return None,
         })
     }
@@ -259,12 +275,12 @@ mod tests {
     fn palette_lists_every_action_once() {
         let mut menu = palette(Talk::Chat);
         let mut seen = Vec::new();
-        for _ in 0..18 {
+        for _ in 0..21 {
             seen.push(*menu.current().unwrap());
             menu.down();
         }
         seen.dedup();
-        assert_eq!(seen.len(), 18);
+        assert_eq!(seen.len(), 21);
         for c in "tok".chars() {
             menu.push(c);
         }
@@ -286,6 +302,9 @@ mod tests {
         assert_eq!(typed("settings"), Some(Action::Settings));
         assert_eq!(typed("clear"), Some(Action::NewChat));
         assert_eq!(typed("help"), Some(Action::Shortcuts));
+        assert_eq!(typed("save"), Some(Action::Save));
+        assert_eq!(typed("resume"), Some(Action::Resume));
+        assert_eq!(typed("sessions"), Some(Action::Sessions));
         assert_eq!(typed("exit"), Some(Action::Quit));
         assert_eq!(typed("quit"), Some(Action::Quit));
     }

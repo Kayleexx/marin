@@ -1,8 +1,9 @@
 use std::io::{self, Write};
 
 use cli::chat::Chat;
-use cli::load::load;
+use cli::load::{ChatPrecision, load, load_chat};
 use cli::session::{Session, Settings};
+use cli::setup::precision_for_pick;
 use cli::signal::Interrupt;
 use cli::style::Style;
 use model::BackendChoice;
@@ -194,6 +195,123 @@ fn an_interrupted_reply_leaves_the_next_turn_exact(interrupt: &Interrupt) -> Res
     Ok(())
 }
 
+/// Asks `text` and cancels it as Ctrl-C would: all the while (so it lands while the prompt is read, wherever that
+/// is), or on the first piece of the reply.
+fn cancelled_ask(
+    side: &mut Side,
+    text: &str,
+    interrupt: &Interrupt,
+    in_prefill: bool,
+) -> Result<()> {
+    struct Stops<'a>(&'a Interrupt);
+    impl Write for Stops<'_> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .cancel_flag()
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let asked = std::thread::scope(|scope| {
+        if in_prefill {
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    interrupt
+                        .cancel_flag()
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+        }
+        let result = side
+            .chat
+            .ask(&mut side.session, text, interrupt, &mut Stops(interrupt));
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        result
+    });
+    let cancelled = match asked {
+        Err(e) if e.to_string().contains("cancelled") => true,
+        Ok(reply) => reply.outcome.stop == runtime::StopReason::Cancelled,
+        Err(_) => false,
+    };
+    assert!(cancelled, "the turn was cancelled");
+    assert_eq!(
+        side.session.retained().len(),
+        side.session.kv().used(),
+        "a cancelled turn leaves an exact record"
+    );
+    Ok(())
+}
+
+fn a_cancel_while_reading_or_replying_leaves_the_next_turn_exact(
+    interrupt: &Interrupt,
+) -> Result<()> {
+    for in_prefill in [true, false] {
+        let mut keep = Side::new(1024, 0.0, true)?;
+        let mut replay = Side::new(1024, 0.0, false)?;
+        same_reply(&mut keep, &mut replay, "hello there", interrupt)?;
+        for side in [&mut keep, &mut replay] {
+            cancelled_ask(side, "tell me about cats", interrupt, in_prefill)?;
+        }
+        let reused = same_reply(&mut keep, &mut replay, "go on", interrupt)?;
+        assert!(
+            reused > 0 || in_prefill,
+            "what was read before the cancel is kept"
+        );
+    }
+    Ok(())
+}
+
+/// A Qwen3.5 model on the GPU, from `MARIN_QWEN35_Q8_DIR`: a long question cancelled while its prompt is read leaves
+/// a cache that answers the next question as a replay does. Skipped without the model unless CUDA is required.
+fn a_qwen35_cuda_cancel_during_prefill_recovers_exactly(interrupt: &Interrupt) -> Result<()> {
+    let Some(dir) = std::env::var_os("MARIN_QWEN35_Q8_DIR").map(std::path::PathBuf::from) else {
+        assert!(
+            std::env::var_os("MARIN_REQUIRE_CUDA").is_none(),
+            "MARIN_QWEN35_Q8_DIR is not set"
+        );
+        eprintln!("skipping: set MARIN_QWEN35_Q8_DIR to a Qwen3.5 folder for the GPU cancel check");
+        return Ok(());
+    };
+    let long = "Describe the history of the Roman Empire in great detail. ".repeat(30);
+    let run = |reuse: bool| -> Result<(Vec<u32>, usize)> {
+        let asked = ChatPrecision {
+            weights: None,
+            kv: None,
+        };
+        let loaded = load_chat(
+            &dir,
+            (Some(2048), 2048),
+            BackendChoice::Cuda,
+            precision_for_pick(asked, &dir),
+            &Style::plain(),
+            (false, false),
+        )?;
+        let settings = Settings {
+            max_tokens: 24,
+            temperature: 0.0,
+            top_k: 20,
+            top_p: 0.8,
+            seed: Some(1),
+        };
+        let mut session = Session::new(loaded, settings, Style::plain())?;
+        session.reuse = reuse;
+        let chat = Chat::new(&session);
+        let mut side = Side { session, chat };
+        side.ask("My name is Ada.", interrupt)?;
+        cancelled_ask(&mut side, &long, interrupt, true)?;
+        side.ask("What is my name?", interrupt)
+    };
+    let (kept, reused) = run(true)?;
+    let (replayed, _) = run(false)?;
+    assert_eq!(kept, replayed, "the cancelled question left no trace");
+    assert!(reused > 0, "the conversation before it was kept");
+    Ok(())
+}
+
 /// The signal handler can be installed once per process, so all checks share one test.
 #[test]
 fn chat_turns_reuse_the_cache_exactly() -> Result<()> {
@@ -201,5 +319,7 @@ fn chat_turns_reuse_the_cache_exactly() -> Result<()> {
     a_conversation_reuses_its_history_and_answers_exactly_as_a_replay(&interrupt)?;
     tools_that_touch_the_cache_make_the_next_turn_read_everything(&interrupt)?;
     forgetting_old_turns_to_fit_the_window_stays_exact(&interrupt)?;
-    an_interrupted_reply_leaves_the_next_turn_exact(&interrupt)
+    an_interrupted_reply_leaves_the_next_turn_exact(&interrupt)?;
+    a_cancel_while_reading_or_replying_leaves_the_next_turn_exact(&interrupt)?;
+    a_qwen35_cuda_cancel_during_prefill_recovers_exactly(&interrupt)
 }

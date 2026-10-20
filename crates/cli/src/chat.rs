@@ -1,8 +1,10 @@
 use std::io::Write;
 
-use chat::{Conversation, FitError, fit};
+use chat::{Conversation, FitError, Role, fit};
+use runtime::StopReason;
 
 use crate::CliError;
+use crate::code::Item;
 use crate::session::{Reply, Session};
 use crate::signal::Interrupt;
 
@@ -25,8 +27,33 @@ impl Chat {
         self.conversation.clear();
     }
 
-    /// Streams the answer to `text` into `out`. A reply that started is remembered, even if cut short;
-    /// a question that got no answer is forgotten.
+    /// The finished exchanges, oldest first.
+    pub fn items(&self) -> Vec<Item> {
+        self.conversation
+            .messages()
+            .into_iter()
+            .filter_map(|m| match m.role {
+                Role::User => Some(Item::User(m.content)),
+                Role::Assistant => Some(Item::Assistant(m.content)),
+                Role::System => None,
+            })
+            .collect()
+    }
+
+    /// Continues from exchanges saved earlier, instead of the current ones.
+    pub fn restore(&mut self, items: &[Item]) {
+        self.conversation.clear();
+        for item in items {
+            match item {
+                Item::User(text) => self.conversation.push_user(text),
+                Item::Assistant(text) => self.conversation.push_assistant(text),
+                Item::Results { .. } => {}
+            }
+        }
+    }
+
+    /// Streams the answer to `text` into `out`. A reply that ran to its end (or its token limit) is remembered; a
+    /// question that was cancelled, failed or got no answer is forgotten, as in code mode.
     pub fn ask(
         &mut self,
         session: &mut Session,
@@ -40,7 +67,9 @@ impl Chat {
         self.conversation.push_user(text);
         let result = self.answer(session, interrupt, out);
         match &result {
-            Ok(reply) if !reply.text.trim().is_empty() => {
+            Ok(reply)
+                if !reply.text.trim().is_empty() && reply.outcome.stop != StopReason::Cancelled =>
+            {
                 self.conversation.push_assistant(&reply.text)
             }
             _ => self.conversation.pop(),

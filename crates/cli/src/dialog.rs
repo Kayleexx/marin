@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::CliError;
 use crate::chat::Chat;
 use crate::code::{CodeChat, Ui};
+use crate::config::Home;
 use crate::session::Session;
 use crate::signal::Interrupt;
 use crate::style::Style;
@@ -36,12 +37,16 @@ impl Talk {
     }
 }
 
+mod persist;
+
 pub struct Dialog {
     pub chat: Chat,
     talk: Talk,
     root: PathBuf,
     log: Option<PathBuf>,
     code: Option<CodeChat>,
+    /// The saved session this conversation came from or was last saved as; `/save` updates it.
+    name: Option<String>,
 }
 
 impl Dialog {
@@ -58,6 +63,7 @@ impl Dialog {
             root,
             log,
             code: None,
+            name: None,
         };
         dialog.switch(talk, session)?;
         Ok(dialog)
@@ -90,6 +96,7 @@ impl Dialog {
 
     /// Forgets the conversation of the current mode.
     pub fn clear(&mut self) {
+        self.name = None;
         match (self.talk, self.code.as_mut()) {
             (Talk::Code, Some(code)) => code.clear(),
             _ => self.chat.clear(),
@@ -100,6 +107,7 @@ impl Dialog {
     /// code mode cannot start on the new model (its window is too small) the chat carries on without it.
     pub fn reset(&mut self, session: &Session) -> Result<(), CliError> {
         self.chat = Chat::new(session);
+        self.name = None;
         if self.code.take().is_some() {
             match CodeChat::new(&self.root, session, self.log.as_deref()) {
                 Ok(code) => self.code = Some(code),
@@ -158,7 +166,7 @@ impl Dialog {
 }
 
 /// The commands every input path understands, with whether they need a model loaded in this process.
-pub const COMMAND_HELP: [(&str, &str, bool); 5] = [
+pub const COMMAND_HELP: [(&str, &str, bool); 8] = [
     (
         "/mode chat|code",
         "switch between chatting and asking about the project",
@@ -170,6 +178,17 @@ pub const COMMAND_HELP: [(&str, &str, bool); 5] = [
         false,
     ),
     ("/status", "model, hardware, window and mode", true),
+    (
+        "/save [name]",
+        "keep both conversations to resume later (private to you)",
+        true,
+    ),
+    (
+        "/resume [name]",
+        "continue a saved conversation; the newest by default",
+        true,
+    ),
+    ("/sessions", "list the saved conversations", true),
     ("/model", "which model is loaded", true),
     ("/exit", "leave (also /quit)", false),
 ];
@@ -186,8 +205,20 @@ pub fn slash(line: &str) -> Option<(&str, &str)> {
     known.then_some((name, rest.trim()))
 }
 
+fn show(done: Result<Vec<String>, CliError>, style: Style) {
+    match done {
+        Ok(lines) => lines.iter().for_each(|l| println!("{}", style.dim(l))),
+        Err(e) => crate::report(&e, &style),
+    }
+}
+
 /// Handles `line` if it is one of the commands. `Some(true)` asks to leave.
-fn command(dialog: &mut Dialog, session: &Session, line: &str, style: Style) -> Option<bool> {
+fn command(
+    dialog: &mut Dialog,
+    (session, home): (&Session, Option<&Home>),
+    line: &str,
+    style: Style,
+) -> Option<bool> {
     let (name, rest) = slash(line)?;
     match name {
         "exit" | "quit" => return Some(true),
@@ -207,6 +238,9 @@ fn command(dialog: &mut Dialog, session: &Session, line: &str, style: Style) -> 
             }
         }
         "model" => println!("{}", session.loaded.name),
+        "save" => show(dialog.save(session, home, Some(rest)), style),
+        "resume" => show(dialog.resume(session, home, Some(rest)), style),
+        "sessions" => show(dialog.sessions(session, home), style),
         "status" => {
             for line in dialog.status(session) {
                 println!("{line}");
@@ -233,7 +267,7 @@ pub fn run_piped(
     session: &mut Session,
     dialog: &mut Dialog,
     interrupt: &Interrupt,
-    style: Style,
+    (style, home): (Style, Option<&Home>),
     lines: impl Iterator<Item = io::Result<String>>,
 ) -> Result<(), CliError> {
     for line in lines {
@@ -242,7 +276,7 @@ pub fn run_piped(
         if line.trim().is_empty() {
             continue;
         }
-        match command(dialog, session, line.trim(), style) {
+        match command(dialog, (session, home), line.trim(), style) {
             Some(true) => break,
             Some(false) => continue,
             None => {}

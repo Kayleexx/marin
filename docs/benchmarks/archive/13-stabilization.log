@@ -22,3 +22,18 @@ Evidence
 - 8-turn chat measured earlier in the pass: 47.4 s before, 15.4 s after, identical greedy output on three
   model/backend combinations.
 - tests/chat_reuse.rs: kept-cache replies equal full replays at temperature 0 and 0.7.
+
+Follow-up: closing test gaps before V6/V11
+- Found: asking a server for its model (`marin code`, auto reuse on port 8000) had a per-read timeout only, so a
+  peer that kept sending bytes, or one long header line, held the launch indefinitely and grew a buffer. The reply is
+  now read for at most 1 s (probe) or 5 s (request) in total and at most 4 MiB (code/client.rs `Deadline`).
+- tests/server_reuse.rs: a real `marin serve` of another model, and of the same model with a 1024-token window, are
+  refused with the reason and the model loads here; a silent, dripping or non-JSON impostor on port 8000 ends in under
+  10 s and is never used. tests/launch.rs: the same for `--port`.
+- tests/chat_reuse.rs: a cancel that lands while the prompt is read, and one on the first piece of the reply, each
+  leave an exact cache record and a next turn identical to a full replay.
+- tests/modes_pty.rs: switching model in the real terminal starts the window over and saves the new model; Ctrl-C on a
+  long answer prints "cancelled" and the prompt, /status and Ctrl-D still work (this one needs
+  MARIN_QWEN3_CHAT_DIR and a release build: `cargo test --release`).
+- Live, Qwen3-0.6B CPU server with a 2048 window: `marin code --model Qwen3-0.6B` used it ("using the Marin server on
+  port 8000"); `--model Qwen3-1.7B` printed "it runs Qwen3-0.6B, not Qwen3-1.7B" and loaded locally.

@@ -13,7 +13,7 @@ use super::agent::{Agent, Log, Outcome};
 use super::brain::Brain;
 use super::call::Call;
 use super::client::{Ask, ClientError, Reply, ServerInfo, Usage};
-use super::convo::Conversation;
+use super::convo::{Conversation, Item};
 use super::guide;
 use super::repo::Repo;
 use super::ui::Ui;
@@ -166,6 +166,15 @@ impl CodeChat {
 
     pub fn root(&self) -> &Path {
         self.repo.root()
+    }
+
+    pub fn items(&self) -> &[Item] {
+        self.convo.items()
+    }
+
+    /// Continues from questions and answers saved earlier.
+    pub fn restore(&mut self, items: Vec<Item>) {
+        self.convo.restore(items);
     }
 
     pub fn clear(&mut self) {

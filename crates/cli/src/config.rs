@@ -65,6 +65,11 @@ impl Home {
         self.config_dir.join("config.json")
     }
 
+    /// Where saved conversations live; nothing is written there unless the user saves one.
+    pub fn sessions_dir(&self) -> PathBuf {
+        self.state_dir.join("sessions")
+    }
+
     fn history_file(&self) -> PathBuf {
         self.state_dir.join("history")
     }

@@ -133,12 +133,31 @@ damaged or outdated config is reported once and replaced. A packed 8-bit model n
 question for a saved model) is that opt-in, remembered with the model.
 
 Type `/` for actions and keep typing to search them: `/mode code`, `/mode chat`,
-`/model`, `/status`, `/settings`, `/clear`, `/help`, `/exit`. Piped input takes the same
+`/model`, `/status`, `/settings`, `/save`, `/resume`, `/sessions`, `/clear`, `/help`, `/exit`. Piped input takes the same
 commands as lines (`printf '/mode code\nwhere is main?\n' | marin`); other lines are
-questions. Each mode keeps its own conversation, `/clear` forgets the current one, and a
+questions. Each mode keeps its own conversation, `/clear` forgets the current one, a reply stopped
+with Ctrl-C is not kept (in either mode), and a
 different model starts both over. On Qwen3.5 GPU the chat history is
 read once and checkpointed, so a long conversation does not replay itself each turn. `marin run` with no text on a terminal opens the same chat;
 with text or a pipe it answers once, as before.
+
+**Saving a conversation** is opt-in: nothing is written until you ask.
+
+- `/save [name]` keeps both conversations as they stand, finished questions only (a cancelled or
+  failed one is never kept). Without a name it updates the session this one came from, or makes
+  `session-<time>`. `/sessions` lists what is saved, `/resume [name]` replaces the current
+  conversations with a saved one (the newest without a name) and continues in the mode it was left in.
+- Sessions are JSON files in `$XDG_STATE_HOME/marin/sessions` (default `~/.local/state/marin/sessions`,
+  or `$MARIN_HOME/sessions`): the folder is mode 700, the files 600, each is written whole and renamed
+  into place, carries a format version, and is limited to 2 MiB; at most 100 are kept. A damaged, newer
+  or oversized file is named and skipped; a file that is not a Marin session is never overwritten.
+- **A saved code session contains the source code and tool output the model read from the project.**
+  Treat the file as private as the project; delete it when you no longer need it.
+- Only the text is saved, never the cache. Resuming reads the history again through the normal path
+  (on Qwen3.5 GPU the next turns are cheap again after one read). It works only with the model it was
+  saved with (name, configuration and tokenizer) and, for code mode, while the project folder exists;
+  otherwise it says why and changes nothing. Sessions need a model loaded by `marin` itself, so they are
+  not available in `marin code --port`.
 
 **Code mode** (`marin code [PATH]`, or `/mode code`) is read-only: the model uses three
 tools, shown as quiet `›` lines, and cannot write files, run commands or leave the project.

@@ -2,28 +2,15 @@
 //! and a terminal that comes back usable. The tiny chat model has a window too small for code mode, which is also
 //! how a too-small `--ctx` shows up to a user.
 
+#[path = "pty/keys.rs"]
+mod keys;
 mod pty;
 
 use std::path::Path;
 use std::process::ExitStatus;
 
-use pty::{Res, Sandbox, Step, have, on_terminal};
-
-/// What to type and what must then be drawn (empty: nothing in particular, the keys only edit). `REPLY` waits for
-/// an answer to end and the prompt to be back, since keys typed before that are dropped on purpose.
-type Keys<'a> = &'a [(&'a str, &'a str)];
-
-const REPLY: &str = "\u{0}reply";
-
-fn drawn(shown: &str, text: &str) -> bool {
-    if shown == REPLY {
-        return text
-            .find("stopped at")
-            .and_then(|at| text.get(at..))
-            .is_some_and(|rest| rest.contains("you >"));
-    }
-    text.contains(shown)
-}
+use keys::{Keys, PROMPT, REPLY, STREAMING, run_in};
+use pty::{Res, Sandbox};
 
 fn run(name: &str, tail: &str, keys: Keys<'_>) -> Res<Option<(String, ExitStatus)>> {
     run_in(name, keys, |_| {
@@ -36,51 +23,6 @@ fn run(name: &str, tail: &str, keys: Keys<'_>) -> Res<Option<(String, ExitStatus
     })
     .map(|ran| ran.map(|(screen, status, _)| (screen, status)))
 }
-
-/// Runs the command line `command` builds in a fresh sandbox, which is also the config folder; returns what was
-/// drawn, how the program ended and the sandbox so a test can look at what was saved.
-fn run_in(
-    name: &str,
-    keys: Keys<'_>,
-    command: impl FnOnce(&Sandbox) -> Res<String>,
-) -> Res<Option<(String, ExitStatus, Sandbox)>> {
-    if !have("script") {
-        eprintln!("skipping: `script` is not installed");
-        return Ok(None);
-    }
-    let sandbox = Sandbox::new(name)?;
-    let command_line = command(&sandbox)?;
-    let checks: Vec<_> = keys
-        .iter()
-        .map(|(_, shown)| {
-            let shown = (*shown).to_string();
-            (shown.clone(), move |_: &[u8], new: &[u8]| {
-                let text = String::from_utf8_lossy(new);
-                if drawn(&shown, &text) {
-                    Ok(())
-                } else {
-                    Err(text.escape_debug().to_string())
-                }
-            })
-        })
-        .collect();
-    let steps: Vec<Step> = keys
-        .iter()
-        .zip(&checks)
-        .map(|((typed, shown), (what, check))| Step {
-            keys: typed,
-            until: (!shown.is_empty()).then_some((what.as_str(), check)),
-        })
-        .collect();
-    let (drawn, _, status) = on_terminal(&command_line, (110, 36), &sandbox, false, &steps)?;
-    Ok(Some((
-        String::from_utf8_lossy(&drawn).into_owned(),
-        status,
-        sandbox,
-    )))
-}
-
-const PROMPT: (&str, &str) = ("", "you >");
 
 #[test]
 fn slash_commands_switch_modes_show_status_and_explain_a_window_that_is_too_small() -> Res<()> {
@@ -231,6 +173,101 @@ fn an_upgrading_user_with_a_saved_packed_model_is_asked_once_and_not_again() -> 
     assert!(
         !screen.contains("Load it?") && status.success(),
         "{screen:?}"
+    );
+    Ok(())
+}
+
+fn two_models(sandbox: &Sandbox) -> Res<String> {
+    let models = sandbox.0.join("models");
+    for name in ["alpha", "beta"] {
+        let to = models.join(name);
+        std::fs::create_dir_all(&to)?;
+        let from = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-chat");
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            std::fs::copy(entry.path(), to.join(entry.file_name()))?;
+        }
+    }
+    Ok(format!(
+        "MARIN_MODELS={} {} --model {} --backend cpu --temp 0 --max-tokens 3",
+        models.display(),
+        env!("CARGO_BIN_EXE_marin"),
+        models.join("alpha").display()
+    ))
+}
+
+#[test]
+fn switching_model_starts_both_conversations_over_and_remembers_the_new_one() -> Res<()> {
+    let keys = [
+        PROMPT,
+        ("hello world\r", REPLY),
+        ("/", "Mode: chat"),
+        ("status", ""),
+        ("\r", "mode  chat"),
+        ("/", "Mode: chat"),
+        ("model", ""),
+        ("\r", "beta"),
+        ("beta", ""),
+        ("\r", "new model: both conversations start over"),
+        ("/", "Mode: chat"),
+        ("status", ""),
+        ("\r", "mode  chat"),
+    ];
+    let Some((screen, status, sandbox)) = run_in("switch", &keys, two_models)? else {
+        return Ok(());
+    };
+    assert!(status.success(), "{screen:?}");
+    let (before, after) = screen
+        .split_once("new model: both conversations start over")
+        .ok_or("no switch notice")?;
+    assert!(
+        !before.contains("context 0 of")
+            && after.contains("beta")
+            && after.contains("context 0 of"),
+        "the window is empty again on the new model: {after:?}"
+    );
+    let saved = std::fs::read_to_string(sandbox.0.join("config.json"))?;
+    assert!(
+        saved.contains("beta") && !saved.contains("alpha"),
+        "{saved}"
+    );
+    Ok(())
+}
+
+#[test]
+fn ctrl_c_stops_an_answer_and_leaves_the_prompt_and_the_conversation_usable() -> Res<()> {
+    let keys = [
+        PROMPT,
+        (
+            "Write a detailed 1000 word essay on the history of Rome.\r",
+            STREAMING,
+        ),
+        ("\x03", "cancelled"),
+        ("/", "Mode: chat"),
+        ("status", ""),
+        ("\r", "mode  chat"),
+    ];
+    let Some(model) = std::env::var_os("MARIN_QWEN3_CHAT_DIR") else {
+        eprintln!("skipping: the tiny model answers too fast to stop; set MARIN_QWEN3_CHAT_DIR");
+        return Ok(());
+    };
+    let Some((screen, status, _)) = run_in("cancel", &keys, |_| {
+        Ok(format!(
+            "{} --model {} --backend cpu --temp 0 --max-tokens 400",
+            env!("CARGO_BIN_EXE_marin"),
+            Path::new(&model).display()
+        ))
+    })?
+    else {
+        return Ok(());
+    };
+    assert!(
+        status.success(),
+        "the terminal is back and Ctrl-D leaves: {screen:?}"
+    );
+    assert!(
+        !screen.contains("stopped at max tokens"),
+        "it was stopped, not run to the end: {screen:?}"
     );
     Ok(())
 }

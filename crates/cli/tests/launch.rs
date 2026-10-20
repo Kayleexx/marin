@@ -356,3 +356,56 @@ fn serve_on_a_busy_port_says_so_before_loading_anything() -> io::Result<()> {
     drop(listener);
     Ok(())
 }
+
+/// Answers one connection with `reply`, then goes on writing `drip` every 50 ms (or just listens, if it is empty) until the client hangs up.
+fn dripping_server(
+    reply: &'static [u8],
+    drip: &'static [u8],
+) -> io::Result<(u16, std::thread::JoinHandle<()>)> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    let handle = std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut buffer = [0_u8; 512];
+        let _ = stream.read(&mut buffer);
+        if stream.write_all(reply).is_err() {
+            return;
+        }
+        while if drip.is_empty() {
+            stream.read(&mut buffer).is_ok_and(|n| n > 0)
+        } else {
+            stream.write_all(drip).is_ok()
+        } {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    });
+    Ok((port, handle))
+}
+
+#[test]
+fn a_port_that_never_stops_talking_or_never_answers_ends_in_bounded_time() -> io::Result<()> {
+    let setup = Setup::new("drip", &["alpha"])?;
+    for (reply, drip) in [
+        (&b"HTTP/1.1 200 OK\r\nX-Pad: "[..], &b"x"[..]),
+        (&b""[..], &b""[..]),
+    ] {
+        let (port, server) = dripping_server(reply, drip)?;
+        let began = std::time::Instant::now();
+        let out = go(
+            setup.marin().args(["code", "--port", &port.to_string()]),
+            "",
+        )?;
+        let stderr = text(&out.stderr);
+        assert!(!out.status.success(), "{stderr}");
+        assert!(stderr.contains("error:"), "{stderr}");
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(15),
+            "took {:?}",
+            began.elapsed()
+        );
+        let _ = server.join();
+    }
+    Ok(())
+}

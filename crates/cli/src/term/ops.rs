@@ -95,6 +95,7 @@ impl App {
             }
             Action::Talk(talk) => self.set_talk(talk)?,
             Action::Status => self.show_status()?,
+            Action::Sessions => self.show_sessions()?,
             Action::Settings => self.open_tab(Tab::Settings)?,
             Action::Shortcuts => {
                 let lines: Vec<Line> = SHORTCUTS.iter().map(|l| Line::new(Kind::Dim, *l)).collect();
@@ -120,6 +121,25 @@ impl App {
             Err(e) => self.show_error(&e)?,
         }
         Ok(())
+    }
+
+    fn show_sessions(&self) -> Result<(), CliError> {
+        let Some(session) = self.session.as_ref() else {
+            return Ok(self.show_error(&CliError::ModelNotLoaded)?);
+        };
+        match self.dialog.sessions(session, self.home.as_ref()) {
+            Ok(lines) => self.print_dim(lines)?,
+            Err(e) => self.show_error(&e)?,
+        }
+        Ok(())
+    }
+
+    fn print_dim(&self, lines: Vec<String>) -> io::Result<()> {
+        let lines: Vec<Line> = lines
+            .into_iter()
+            .map(|l| Line::new(Kind::Dim, format!("  {l}")))
+            .collect();
+        self.screen.print(&lines)
     }
 
     fn show_status(&self) -> Result<(), CliError> {
@@ -206,6 +226,12 @@ impl App {
             Action::NextTokens => session
                 .encode(text)
                 .and_then(|ids| session.next_token_lines(&ids)),
+            Action::Save => self
+                .dialog
+                .save(session, self.home.as_ref(), Some(text.trim())),
+            Action::Resume => self
+                .dialog
+                .resume(session, self.home.as_ref(), Some(text.trim())),
             _ => actions::apply_setting(&mut session.settings, action, text).map(|note| {
                 self.notice = Some(note);
                 if let Some(home) = &self.home {
@@ -295,13 +321,16 @@ impl App {
                                 Some("stopped at max tokens (change it in / actions)")
                             }
                             StopReason::ContextFull => Some("context window full"),
-                            StopReason::Cancelled => Some("cancelled"),
+                            StopReason::Cancelled => Some("cancelled; that question was not kept"),
                         };
                         if let Some(note) = note {
                             println!("{}", self.style.dim(note));
                         }
                     }
-                    Err(CliError::Cancelled) => println!("{}", self.style.dim("cancelled")),
+                    Err(CliError::Cancelled) => println!(
+                        "{}",
+                        self.style.dim("cancelled; that question was not kept")
+                    ),
                     Err(e) if e.is_broken_pipe() => return Err(e),
                     Err(e) => crate::report(&e, &self.style),
                 }
