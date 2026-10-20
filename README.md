@@ -191,5 +191,4 @@ scripts/check-unsafe.sh
 ```
 
 CUDA-required checks need a CUDA-capable machine. Real-checkpoint Hugging
-Face tests also need the named local model and reference files. The full
-source and detailed architecture goals are in [marin_spec_v0.4.md](marin_spec_v0.4.md).
+Face tests also need the named local model and reference files.
