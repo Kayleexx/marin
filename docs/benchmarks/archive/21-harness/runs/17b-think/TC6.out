@@ -1,0 +1,13 @@
+<think>
+</think>
+
+<tool_call>
+<function=list_files>
+<parameter=path>
+.
+</parameter>
+<parameter depth>
+1
+</parameter>
+</function>
+</tool_call>

@@ -1,0 +1,59 @@
+Thinking Process:
+
+1.  **Analyze the Request:**
+    *   Question: Is 391 a prime number?
+    *   Constraint 1: Start with "yes" or "no".
+    *   Constraint 2: If it is not prime, provide the factorization.
+
+2.  **Determine if 391 is prime:**
+    *   I need to check for divisors up to $\sqrt{391}$.
+    *   $\sqrt{391} \approx 19.77$.
+    *   So, I need to check prime numbers up to 19: 2, 3, 5, 7, 11, 13, 17, 19.
+    *   Divisibility by 2: 391 is odd, so no.
+    *   Divisibility by 3: Sum of digits = $3 + 9 + 1 = 13$. 13 is not divisible by 3, so no.
+    *   Divisibility by 5: Ends in 1, so no.
+    *   Divisibility by 7: $391 = 350 + 41$. 41 is not divisible by 7 ($7 \times 5 = 35$, $7 \times 6 = 42$). So no.
+    *   Divisibility by 11: Alternating sum = $1 - 9 + 3 = -5$. Not divisible by 11. Or $391 = 330 + 61$. 61 is not divisible by 11. So no.
+    *   Divisibility by 13: $391 = 390 + 1$. $390 = 13 \times 30$. So $391 = 13 \times 30 + 1$. Remainder 1. So no.
+    *   Divisibility by 17: $17 \times 20 = 340$. $391 - 340 = 51$. $51 = 17 \times 3$. So $391 = 17 \times 20 + 17 \times 3 = 17 \times 23$.
+    *   Found a factor! $391 = 17 \times 23$.
+    *   Since it has factors other than 1 and itself, it is not prime.
+
+3.  **Formulate the Output:**
+    *   Start with "no".
+    *   Provide the factorization: $17 \times 23$.
+
+4.  **Final Review:**
+    *   Does "no" satisfy the first constraint? Yes.
+    *   Does "17 x 23" satisfy the second constraint? Yes.
+    *   Is the math correct? $17 \times 23 = 17(20 + 3) = 340 + 51 = 391$. Yes.
+
+5.  **Construct Final Response:**
+    *   no
+    *   391 = 17 × 23
+
+    Wait, check the prompt again: "Start with yes or no, then give the factorization if it is not."
+    So: "no, 391 = 17 × 23" or similar.
+
+    Let's write it clearly.
+    "no"
+    "391 = 17 × 23"
+
+    Or combined: "no, 391 = 17 × 23"
+
+    I will write "no" followed by the factorization.
+
+    Double check: Is 391 prime?
+    $17 \times 23 = 391$.
+    Both 17 and 23 are prime.
+    So the factorization is complete.
+
+    Final check of constraints:
+    1. Start with yes or no. -> "no"
+    2. Give factorization if not. -> "17 × 23"
+
+    Ready.cw
+</think>
+
+no
+391 = 17 × 23

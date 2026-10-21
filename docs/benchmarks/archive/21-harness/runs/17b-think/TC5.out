@@ -1,0 +1,29 @@
+<think>
+Okay, the user is asking where the function parse_header is defined. Let me start by checking the project structure. The project has src, tests, Cargo.toml, and README.md. The main source file is probably in src/main.rs. I should use the list_files tool to see if parse_header is defined there.
+
+Wait, the user mentioned the function parse_header, so I need to look in the src directory. Let me call list_files with the path "src" and depth 1 to see the files inside. That should show me the main.rs and maybe other files. If main.rs doesn't have parse_header, I'll need to check other files. But first, let's check main.rs.
+
+If the list_files shows main.rs, then I can use read_file on main.rs to see its contents. If parse_header is not there, I'll have to check other files. But the user might have a different file. Alternatively, maybe the function is in a different module. But without seeing the code, I can only check the files listed. Let me proceed step by step.
+</think>
+
+<tool_call>
+<function=list_files>
+<parameter=path>
+src
+</parameter>
+<parameter=depth>
+1
+</parameter>
+</function>
+</tool_call>
+
+<tool_call>
+<function=read_file>
+<parameter=path>
+src/main.rs
+</parameter>
+<parameter=start>
+1
+</parameter>
+</function>
+</tool_call>

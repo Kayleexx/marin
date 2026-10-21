@@ -7,8 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use model::{Engine, EngineCache};
 use runtime::{
-    CausalLm, GenerateParams, Kept, Outcome, Retained, SequenceCache, Speculation, StopReason,
-    generate_reusing,
+    CausalLm, GenerateParams, Kept, Outcome, Retained, SequenceCache, StopReason, generate_reusing,
 };
 use sampler::{Sampler, SamplerConfig};
 
@@ -232,7 +231,7 @@ impl Session {
             max_tokens: self.settings.max_tokens,
             stop_tokens: self.loaded.stop_tokens(),
             usable_vocab: tokenizer.vocab_size(),
-            speculation: self.speculate.then_some(Speculation::MEASURED),
+            speculation: self.speculate.then(|| self.loaded.model.speculation()),
         };
         let sanitize = self.sanitize;
         let mut stream = tokenizer.stream();

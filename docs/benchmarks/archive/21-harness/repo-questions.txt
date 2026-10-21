@@ -1,0 +1,25 @@
+Where is the function max_active defined, and what does it decide?
+Explain how a streamed chat completion request travels through the server: from the HTTP connection to the tokens being sent back. Name the main functions and files.
+Clients sometimes get a 404 "session not found, evicted or in use". Which code produces that error, and under what conditions does it happen?
+What time limits does the server enforce on requests, and where are they defined?
+Where does Marin store user accounts and passwords for the server login?
+Where is the constant SLICE defined and what is its value?
+Which function checks that a session id is valid, and in which file?
+What does the Interrupt type do when Ctrl-C is pressed while a reply is being generated?
+What is the default port of marin serve?
+What does Store::evict do and where is it called?
+Which crates make up the workspace?
+What context size does the interactive chat use by default?
+Where is the shared prompt prefix built and what does it contain?
+Which tools does the coding assistant give the model?
+Where is the Kubernetes deployment configuration for the server?
+Why might a request whose user message starts with a newline not use the shared prompt prefix?
+Which file decides how many requests run at the same time, and what limits does it apply?
+Where is the function that renders chat messages into the model prompt text?
+What does the /clear command do in marin code?
+How many rounds of tool use does marin code allow for one question?
+How many entries does list_files show at most, and where is that limit set?
+How does marin code decide that a tool call is malformed?
+What is GPU_SLACK_BYTES and where is it used?
+Which file implements export_int8?
+Where is the Windows installer script?

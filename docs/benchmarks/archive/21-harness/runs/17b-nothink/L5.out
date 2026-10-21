@@ -1,0 +1,41 @@
+To answer your question, we need to **identify the `match_len` and `max_draft` values** for the two `Speculation` variants:
+
+- `Speculation::MEASURED`
+- `Speculation::SHORT_PASS`
+
+### ✅ Answer:
+
+#### For `Speculation::MEASURED`:
+```rust
+match_len = 8
+max_draft = 7
+```
+
+#### For `Speculation::SHORT_PASS`:
+```rust
+match_len = 4
+max_draft = 3
+```
+
+---
+
+### 🔍 Explanation:
+
+- **`Speculation::MEASURED`**:
+  - This is the default and most commonly used specification.
+  - It uses a **match length of 8** and a **max draft of 7**.
+  - This is a balanced choice that allows for some flexibility while keeping the guessing process manageable.
+
+- **`Speculation::SHORT_PASS`**:
+  - This is used when the cost of a longer pass (e.g., more than 4 tokens) is high.
+  - It uses a **match length of 4** and a **max draft of 3**.
+  - This allows for shorter matches to be checked quickly, which is useful in scenarios where the model's decoding cost is high.
+
+---
+
+### ✅ Summary:
+
+| Specification | match_len | max_draft |
+|---------------|-----------|-----------|
+| MEASURED      | 8         | 7         |
+| SHORT_PASS    | 4         | 3         |

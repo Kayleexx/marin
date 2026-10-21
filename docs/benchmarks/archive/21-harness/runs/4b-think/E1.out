@@ -1,0 +1,149 @@
+Here's a thinking process that leads to the explanation:
+
+1.  **Analyze the Request:**
+    *   **Input:** Two Rust source files (`sched.rs` and `engine_session.rs`).
+    *   **Task:** Explain the behavior of the `forward` method when a request calls it with a single token (`tokens.len() == 1`) while batching is enabled (`self.gate.batching()` is true).
+    *   **Specific Condition:** Explain what happens if the batched pass fails.
+
+2.  **Analyze `sched.rs` (The `Scheduled` struct and `forward` implementation):**
+    *   Locate the `forward` implementation for `Scheduled<'_>`.
+    *   Code snippet:
+        ```rust
+        impl CausalLm for Scheduled<'_> {
+            type Error = ScheduleError;
+            type Cache = EngineCache;
+
+            fn forward(&self, tokens: &[u32], cache: &mut EngineCache) -> Result<Vec<f32>, ScheduleError> {
+                if tokens.len() == 1 && self.gate.batching() {
+                    return self.retrying(|| self.decode(tokens, cache));
+                }
+                // ... rest of the code
+            }
+        }
+        ```
+    *   **Condition:** `tokens.len() == 1` AND `self.gate.batching()` is true.
+    *   **Action:** It calls `self.retrying(|| self.decode(tokens, cache))`.
+    *   **`decode` method:**
+        ```rust
+        fn decode(&self, tokens: &[u32], cache: &mut EngineCache) -> Result<Vec<f32>, ScheduleError> {
+            if self.cancelled() {
+                return Err(ScheduleError::Cancelled);
+            }
+            let (Some(spare), Some(token)) = (EngineCache::vacant(), tokens.first().copied()) else {
+                return Err(ScheduleError::Model(ModelError::NoTokens));
+            };
+            let lent = std::mem::replace(cache, spare);
+            let (back, logits) = self
+                .gate
+                .decode(self.lane, token, lent, |steps| {
+                    self.loaded.model.decode_batch(steps)
+                })
+                .ok_or(ScheduleError::Lost)?;
+            *cache = back;
+            Ok(logits?)
+        }
+        ```
+    *   **`retrying` method:**
+        ```rust
+        fn retrying<T>(
+            &self,
+            mut pass: impl FnMut() -> Result<T, ScheduleError>,
+        ) -> Result<T, ScheduleError> {
+            loop {
+                match pass() {
+                    Err(e)
+                        if e.is_out_of_memory()
+                            && self.gate.wait_for_memory(self.lane, || self.cancelled()) => {}
+                    other => return other,
+                }
+            }
+        }
+        ```
+    *   **`ScheduleError` variants:**
+        *   `Cancelled`
+        *   `Lost` (from `gate.decode` returning `Ok(None)`)
+        *   `Model(#[from] ModelError)` (includes `is_out_of_memory`)
+
+3.  **Analyze `engine_session.rs` (The `Engine` implementation):**
+    *   Locate `decode_batch`.
+    *   Code snippet:
+        ```rust
+        pub fn decode_batch(
+            &self,
+            steps: Vec<(u32, EngineCache)>,
+        ) -> Vec<(EngineCache, Result<Vec<f32>, ModelError>)> {
+            let Self::Qwen35Cuda(model) = self else {
+                return alone(self, steps);
+            };
+            // ... checks for Qwen35Cuda cache ...
+            let batched = model.forward_batch(&tokens, &mut refs);
+            // ...
+            match batched {
+                Ok(rows) => ...
+                Err(_) => alone(...),
+            }
+        }
+        ```
+    *   **Failure Path:** If `model.forward_batch` returns `Err(_)`, it falls back to `alone`.
+    *   **`alone` function:**
+        ```rust
+        fn alone(
+            engine: &Engine,
+            steps: Vec<(u32, EngineCache)>,
+        ) -> Vec<(EngineCache, Result<Vec<f32>, ModelError>)> {
+            steps
+                .into_iter()
+                .map(|(token, mut cache)| {
+                    let logits = engine.forward(&[token], &mut cache);
+                    (cache, logits)
+                })
+                .collect()
+        }
+        ```
+    *   **Note:** `alone` calls `engine.forward`. This is a recursive call to the underlying model's forward method, not the `Scheduled` wrapper's `forward`. However, in the context of `decode_batch` failing, it means the batched operation failed, so it falls back to running the single token individually.
+
+4.  **Synthesize the Flow:**
+
+    *   **Scenario:** `forward` called with 1 token, batching is on.
+    *   **Step 1:** `Scheduled::forward` checks `tokens.len() == 1 && self.gate.batching()`.
+    *   **Step 2:** It enters the `retrying` loop.
+    *   **Step 3:** It calls `self.decode(tokens, cache)`.
+    *   **Step 4:** Inside `decode`:
+        *   It swaps the cache (`lent`).
+        *   It calls `self.gate.decode(...)` which eventually calls `self.loaded.model.decode_batch(steps)`.
+        *   `decode_batch` (in `engine_session.rs`) tries to run `model.forward_batch`.
+    *   **Step 5 (Success):** If `forward_batch` succeeds, `decode` returns logits. `forward` returns logits.
+    *   **Step 6 (Failure - Out of Memory):**
+        *   `decode` returns `Err(ScheduleError::Lost)` (from `gate.decode` returning `Ok(None)` or similar, actually looking at `gate.decode` logic isn't fully provided but `ScheduleError::Lost` is defined in `sched.rs` as "a batched decode step returned no result").
+        *   Wait, let's look closer at `retrying`.
+        *   `retrying` checks `Err(e) if e.is_out_of_memory()`.
+        *   `ScheduleError::Lost` is defined as `#[error("a batched decode step returned no result")]`. Does `Lost` have `is_out_of_memory`?
+        *   `ScheduleError` enum: `Model(#[from] ModelError)`, `Cancelled`, `Lost`.
+        *   `impl ScheduleError { pub fn is_out_of_memory(&self) -> bool { matches!(self, Self::Model(e) if e.is_out_of_memory()) } }`.
+        *   So `Lost` is *not* treated as Out of Memory.
+        *   However, `decode` calls `gate.decode`. If `gate.decode` returns `Ok(None)`, `decode` returns `Err(ScheduleError::Lost)`.
+        *   If `gate.decode` returns `Err(ModelError::OutOfMemory)`, `decode` returns `Err(ScheduleError::Model(ModelError::OutOfMemory))`.
+        *   **Crucial distinction:** The prompt asks "what happens if the batched pass fails".
+        *   If the failure is `OutOfMemory`: `retrying` catches it. It calls `self.gate.wait_for_memory`. If memory is freed, it retries. If not, it returns the error.
+        *   If the failure is `Lost` (e.g., `forward_batch` returned `Err` but not OOM, or `gate.decode` returned `Ok(None)`): `retrying` does *not* catch it (because `Lost` is not `Model` with `is_out_of_memory`). It returns immediately.
+        *   **Wait, look at `engine_session.rs` `decode_batch`:**
+            ```rust
+            match batched {
+                Ok(rows) => ...
+                Err(_) => alone(...),
+            }
+            ```
+            If `forward_batch` returns `Err`, `decode_batch` returns `alone(...)`.
+            `alone` calls `engine.forward(&[token], &mut cache)`.
+            This `engine.forward` is the `Scheduled::forward` method again? No, `engine` in `decode_batch` is `&Engine`.
+            Wait, `decode_batch` is a method on `Engine` (specifically `Qwen35Cuda`).
+            `Scheduled::forward` calls `self.loaded.model.decode_batch`.
+            `self.loaded.model` is `Engine`.
+            So `decode_batch` is called on the `Engine`.
+            If `decode_batch` returns `Err` (via `gate.decode`), `retrying` handles it.
+            If `decode_batch` returns `Ok` but `forward_batch` inside it fails?
+            Let's trace `decode_batch` in `engine_session.rs` again.
+            It calls `model.forward_batch`. If that returns `Err`, it calls `alone`.
+            `alone` calls `engine.forward`.
+            `engine` is `Qwen35Cuda`. `Qwen35Cuda.forward` is likely the underlying CUDA forward.
+            So, if the batch fails, it falls

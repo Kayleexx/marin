@@ -1,0 +1,16 @@
+The user wants to see lines 10 to 20 of src/lib.rs. I need to use the read_file tool with the appropriate parameters.
+</think>
+
+<tool_call>
+<function=read_file>
+<parameter=path>
+src/lib.rs
+</parameter>
+<parameter=start>
+10
+</parameter>
+<parameter=end>
+20
+</parameter>
+</function>
+</tool_call>

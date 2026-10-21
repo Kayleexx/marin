@@ -1,0 +1,18 @@
+  › search "rounds" in crates  39 matches in 10 files
+  › read crates/cli/src/code/agent.rs:15-25  11 lines
+Marin allows for 8 rounds of tool use per question.
+
+This is defined in `crates/cli/src/code/agent.rs` at line 19:
+
++- rust
+| const MAX_ROUNDS: usize = 8;
++-
+
+The system will stop tool use if either:
+- The round count reaches 8 (`last = round.saturating_add(1) >= MAX_ROUNDS`),
+  or
+- Two consecutive bad rounds occur (`bad_rounds >= BAD_ROUNDS` where
+  `BAD_ROUNDS = 2`)
+
+  2 tools · 209 tokens written · context 1,912/8,192 · 19.8 s
+

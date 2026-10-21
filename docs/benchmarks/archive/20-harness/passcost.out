@@ -1,0 +1,30 @@
+loading Qwen3.5-4B-Q8 (4.35 GB)
+round 1/6round 2/6round 3/6round 4/6round 5/6round 6/6
+
+passes after 128 tokens of context (median of runs, min..max):
+  tokens in the pass      time         vs first     per token
+       1               24.42 ms     1.00x        24.42 ms   (23.35..28.59)
+       2               25.98 ms     1.06x        12.99 ms   (23.02..30.04)
+       3               27.84 ms     1.14x         9.28 ms   (25.98..29.96)
+       4               30.27 ms     1.24x         7.57 ms   (28.38..31.99)
+       6               63.58 ms     2.60x        10.60 ms   (60.68..66.32)
+       8               78.85 ms     3.23x         9.86 ms   (73.60..80.81)
+
+passes after 1024 tokens of context (median of runs, min..max):
+  tokens in the pass      time         vs first     per token
+       1               24.77 ms     1.00x        24.77 ms   (22.12..32.01)
+       2               27.23 ms     1.10x        13.61 ms   (24.55..32.10)
+       3               29.95 ms     1.21x         9.98 ms   (27.80..33.96)
+       4               33.15 ms     1.34x         8.29 ms   (30.34..37.82)
+       6               65.44 ms     2.64x        10.91 ms   (62.11..70.39)
+       8               80.44 ms     3.25x        10.06 ms   (75.70..89.19)
+
+passes after 4096 tokens of context (median of runs, min..max):
+  tokens in the pass      time         vs first     per token
+       1               26.04 ms     1.00x        26.04 ms   (23.61..32.07)
+       2               31.66 ms     1.22x        15.83 ms   (26.13..35.64)
+       3               34.65 ms     1.33x        11.55 ms   (31.03..41.29)
+       4               38.41 ms     1.48x         9.60 ms   (33.34..42.41)
+       6               72.86 ms     2.80x        12.14 ms   (67.94..75.74)
+       8               89.60 ms     3.44x        11.20 ms   (83.31..97.10)
+wrote /tmp/claude-1000/-home-mitali-miracles-marin/82b2e41c-9d75-476b-8807-5a245de984ac/scratchpad/v8/passcost.json

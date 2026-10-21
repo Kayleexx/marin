@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use metrics::Sampler as GpuSampler;
 use model::{BackendChoice, Precision};
-use runtime::{GenerateParams, Outcome, Speculation, generate};
+use runtime::{CausalLm, GenerateParams, Outcome, generate};
 use sampler::{Sampler, SamplerConfig};
 
 use super::generate::read_prompts;
@@ -146,7 +146,7 @@ pub fn run(
                     max_tokens: options.max_tokens,
                     stop_tokens: stop.clone(),
                     usable_vocab,
-                    speculation: mode.speculate.then_some(Speculation::MEASURED),
+                    speculation: mode.speculate.then(|| engine.speculation()),
                 };
                 let mut watch = None;
                 let mut tokens = Vec::new();

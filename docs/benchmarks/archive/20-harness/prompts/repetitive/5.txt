@@ -1,0 +1,1 @@
+Produce 25 lines of the form 'item N: status ok, latency low, retries 0'.

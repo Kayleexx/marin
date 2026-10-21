@@ -1,0 +1,16 @@
+  › search "export_int8" in .  30 matches in 15 files
+The file that implements `export_int8` is:
+
+crates/model/src/qwen3/export.rs
+
+The function is defined at line 12 of this file:
+
++- rust
+| pub fn export_int8(dir: &ModelDir, destination: &Path, group: usize) -> Resul
+|   t<(), ModelError> {
++-
+
+It is re-exported from `crates/model/src/qwen3/mod.rs` at line 18.
+
+  1 tool · 577 tokens written · context 1,570/8,192 · 26.8 s
+

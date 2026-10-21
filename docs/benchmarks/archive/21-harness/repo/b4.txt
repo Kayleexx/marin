@@ -1,0 +1,15 @@
+  › read list_files  `list_files` does not exist
+  › repeated call  already answered above
+  › repeated call  already answered above
+The `list_files` tool is defined in the project's tool specification, not as a
+file in the repository. Based on the project description you provided, the
+limit is set in the tool definition itself:
+
+Limit: 3 levels deep
+Location: The tool definition in your system prompt: `list_files(path, depth):
+list a directory, depth levels deep (default 1, at most 3).`
+
+This means the tool will show at most 3 levels of directory depth.
+
+  1 tool · 188 tokens written · context 785/8,192 · 10.0 s
+

@@ -1,0 +1,67 @@
+guessing report: Qwen3.5-4B-Q8 · int8 weights, groups of 128 · cuda (NVIDIA GeForce RTX 5050 Laptop GPU)
+
+greedy: guess after 2+ matching tokens, up to 4 tokens at a time
+class           prompts   tokens    guess  right@1  right@2  right@4  tokens/pass    theory  projected       per prompt
+chat                  6     1298      10%      48%      28%       7%        1.09     1.00x      1.00x       0.96-1.05x
+code_edit             6     1662      91%      89%      85%      76%        3.98     2.11x      2.07x       1.74-2.25x
+long_context          6      499       9%      14%       0%       0%        1.01     0.93x      0.92x       0.90-0.96x
+repetitive            6     1466      47%      70%      59%      51%        2.08     1.48x      1.46x       0.85-1.88x
+all                  24     4925      31%      73%      63%      54%        1.76     1.36x      1.35x       0.85-2.25x
+
+greedy: the same guesses, every pass priced at one context length
+class              ctx 128    ctx 1024    ctx 4096
+chat                 1.00x       0.99x       0.98x
+code_edit            2.13x       2.07x       1.93x
+long_context         0.94x       0.93x       0.92x
+repetitive           1.46x       1.43x       1.37x
+all                  1.36x       1.34x       1.30x
+
+chat: guess after 2+ matching tokens, up to 4 tokens at a time
+class           prompts   tokens    guess  right@1  right@2  right@4  tokens/pass    theory  projected       per prompt
+chat                  6     1383       8%      35%      27%       8%        1.07     1.00x      0.99x       0.95-1.03x
+code_edit             6     1662      91%      90%      86%      79%        4.04     2.14x      2.10x       1.83-2.22x
+long_context          6      515       9%       7%       0%       0%        1.01     0.92x      0.92x       0.90-0.94x
+repetitive            6     1458      48%      70%      60%      51%        2.09     1.48x      1.47x       0.85-1.88x
+all                  24     5018      29%      71%      64%      56%        1.72     1.35x      1.34x       0.85-2.22x
+
+chat: the same guesses, every pass priced at one context length
+class              ctx 128    ctx 1024    ctx 4096
+chat                 0.99x       0.99x       0.98x
+code_edit            2.17x       2.10x       1.97x
+long_context         0.93x       0.93x       0.92x
+repetitive           1.47x       1.43x       1.37x
+all                  1.36x       1.33x       1.29x
+
+greedy: tokens settled per model pass (n = matching tokens needed, d = tokens guessed at most)
+class             n1/d2    n1/d4    n1/d7    n2/d2    n2/d4    n2/d7    n3/d2    n3/d4    n3/d7    n4/d2    n4/d4    n4/d7    n6/d2    n6/d4    n6/d7
+chat               1.13     1.15     1.16     1.08     1.09     1.10     1.05     1.06     1.06     1.03     1.03     1.03     1.01     1.01     1.01
+code_edit          2.72     4.12     5.89     2.64     3.98     5.54     2.59     3.78     5.16     2.50     3.54     4.71     2.25     3.01     3.69
+long_context       1.02     1.02     1.02     1.01     1.01     1.01     1.00     1.00     1.00     1.00     1.00     1.00     1.00     1.00     1.00
+repetitive         2.00     2.40     2.75     1.78     2.08     2.27     1.60     1.82     1.97     1.51     1.68     1.78     1.34     1.45     1.50
+all                1.65     1.87     2.03     1.57     1.76     1.88     1.50     1.66     1.76     1.45     1.59     1.68     1.36     1.47     1.54
+
+greedy: projected speed-up over one token per pass
+class             n1/d2    n1/d4    n1/d7    n2/d2    n2/d4    n2/d7    n3/d2    n3/d4    n3/d7    n4/d2    n4/d4    n4/d7    n6/d2    n6/d4    n6/d7
+chat               1.06     0.83     0.62     1.07     1.00     0.91     1.04     1.01     0.96     1.02     1.01     0.97     1.01     1.00     0.99
+code_edit          2.22     2.07     1.85     2.18     2.07     1.86     2.16     2.06     1.89     2.10     2.02     1.89     1.94     1.89     1.76
+long_context       0.86     0.64     0.45     0.98     0.92     0.84     0.99     0.99     0.97     1.00     1.00     1.00     1.00     1.00     1.00
+repetitive         1.78     1.47     1.20     1.63     1.46     1.23     1.51     1.40     1.27     1.44     1.38     1.25     1.30     1.25     1.16
+all                1.45     1.18     0.92     1.45     1.35     1.20     1.41     1.35     1.26     1.37     1.34     1.26     1.31     1.28     1.22
+
+chat: tokens settled per model pass (n = matching tokens needed, d = tokens guessed at most)
+class             n1/d2    n1/d4    n1/d7    n2/d2    n2/d4    n2/d7    n3/d2    n3/d4    n3/d7    n4/d2    n4/d4    n4/d7    n6/d2    n6/d4    n6/d7
+chat               1.10     1.11     1.12     1.06     1.07     1.08     1.04     1.05     1.05     1.02     1.03     1.03     1.01     1.01     1.01
+code_edit          2.72     4.23     5.98     2.64     4.04     5.58     2.58     3.80     5.16     2.48     3.57     4.71     2.30     3.14     3.88
+long_context       1.02     1.02     1.02     1.01     1.01     1.01     1.00     1.00     1.00     1.00     1.00     1.00     1.00     1.00     1.00
+repetitive         2.00     2.41     2.76     1.78     2.09     2.28     1.61     1.82     1.98     1.51     1.69     1.79     1.35     1.45     1.51
+all                1.62     1.83     1.97     1.54     1.72     1.83     1.48     1.63     1.74     1.43     1.58     1.66     1.36     1.47     1.53
+
+chat: projected speed-up over one token per pass
+class             n1/d2    n1/d4    n1/d7    n2/d2    n2/d4    n2/d7    n3/d2    n3/d4    n3/d7    n4/d2    n4/d4    n4/d7    n6/d2    n6/d4    n6/d7
+chat               1.03     0.82     0.61     1.05     0.99     0.93     1.04     1.02     0.99     1.02     1.01     0.98     1.01     1.00     0.99
+code_edit          2.22     2.12     1.87     2.18     2.10     1.88     2.15     2.08     1.91     2.10     2.04     1.89     1.98     1.95     1.82
+long_context       0.85     0.62     0.43     0.98     0.92     0.83     1.00     0.99     0.98     1.00     1.00     1.00     1.00     1.00     1.00
+repetitive         1.78     1.47     1.20     1.64     1.47     1.23     1.51     1.41     1.28     1.44     1.38     1.25     1.30     1.25     1.16
+all                1.42     1.16     0.90     1.43     1.34     1.20     1.40     1.35     1.28     1.36     1.34     1.26     1.30     1.28     1.23
+
+guesser cost (greedy mode, all prompts): 1.3 µs per generated token, up to 380 KB of memory

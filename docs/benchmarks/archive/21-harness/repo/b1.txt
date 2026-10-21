@@ -1,0 +1,19 @@
+  › search "render.*message|message.*render|build.*p …  24 matches in 10 files
+  › read crates/chat/src/qwen3.rs:80-130  51 lines
+The function that renders chat messages into the model prompt text is:
+
+`render_history` in `crates/chat/src/qwen3.rs:88-106`
+
+This function:
+- Takes a slice of messages and special tokens
+- Iterates through each message, extracting the role and content
+- Formats them with the chat template markers
+  (`{START}{role}\n{content}{END}\n`)
+- Neutralizes special tokens inside the message content
+- Returns the formatted prompt string
+
+The main `render` function (line 109-113) calls `render_history` and appends
+the assistant-generation marker.
+
+  2 tools · 243 tokens written · context 2,143/8,192 · 22.0 s
+

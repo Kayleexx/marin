@@ -1,0 +1,7 @@
+  › search "SLICE" in .  15 matches in 7 files
+  › read crates/cli/src/server/gate.rs:1-15  15 lines
+The constant `SLICE` is defined in `crates/cli/src/server/gate.rs` at line 9,
+and its value is 64.
+
+  2 tools · 111 tokens written · context 1,412/8,192 · 14.4 s
+

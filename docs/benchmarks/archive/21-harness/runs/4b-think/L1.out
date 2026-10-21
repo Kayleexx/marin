@@ -1,0 +1,25 @@
+The user is asking about the value of `MAX_ACTIVE` in the provided Rust code.
+
+I need to look at the code snippet to find where `MAX_ACTIVE` is defined.
+
+Looking at the beginning of the code:
+```rust
+const MAX_ACTIVE: usize = 3;
+```
+
+So `MAX_ACTIVE` is defined as `3`.
+
+Let me verify this is the only definition and it's not overridden anywhere else in the visible code.
+
+Yes, it's defined at the top of the file as `const MAX_ACTIVE: usize = 3;`.
+
+The question is straightforward - just asking for the value.
+</think>
+
+The value of `MAX_ACTIVE` is **3**.
+
+It is defined at the top of the file:
+
+```rust
+const MAX_ACTIVE: usize = 3;
+```

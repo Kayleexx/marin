@@ -1,0 +1,15 @@
+  › search "check.*session.*id|validate.*session.*id …" in crates  no matches
+  › search "session.*id|SessionId" in crates  49 matches in 17 files
+  › read crates/cli/src/server/completion.rs:90-186  97 lines
+The function that checks if a session ID is valid is `session::valid_id`, and
+it's located in `crates/cli/src/server/completion.rs` at line 97.
+
+This function is called when processing a request with a provided
+`marin_session_id`:
+- If the ID is `"new"`, a new ID is generated
+- If the ID is provided and `session::valid_id(id)` returns true, it's accepted
+- Otherwise, an error is returned with status 400 and message "invalid
+  marin_session_id"
+
+  3 tools · 254 tokens written · context 3,303/8,192 · 34.1 s
+

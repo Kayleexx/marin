@@ -1,0 +1,19 @@
+<think>
+Okay, the user wants to find every line that mentions "retry_limit" in the "crates" folder. Let me break this down.
+
+First, I need to locate the "crates" folder in the project. The project structure has src, tests, Cargo.toml, and README.md. The "crates" folder is likely a subdirectory under src. So the path would be src/crates.
+
+Next, the search pattern is "retry_limit" and the path is src/crates. The user mentioned the "crates" folder, so I should search within that directory. The tool 'search' can be used here. The function call would be search("retry_limit", "src/crates"). 
+
+Wait, the search tool's default path is ".", so if I specify "src/crates", that should narrow it down. The result will show lines in the crates folder that contain "retry_limit". Once I get the results, I can list those lines with their respective paths and lines. 
+
+I should check if there are any other folders or files that might have "retry_limit" but the user specifically mentioned the crates folder. So focusing on src/crates is correct. If the search returns nothing, I'll inform the user. Otherwise, present the findings.
+</think>
+
+<tool_call>
+<function=search>
+<parameter=retry_limit>
+<src/crates>
+</parameter>
+</function>
+</tool_call>

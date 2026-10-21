@@ -61,15 +61,20 @@ impl CausalLm for Engine {
         self.forward_observed(tokens, cache, None)
     }
 
-    /// The GPU checks up to 8 tokens in one pass; the CPU has no such pass, so it never guesses ahead.
+    /// The Qwen3 GPU checks up to 8 tokens in one pass and the Qwen3.5 GPU up to 4; the CPU has no such pass, so it
+    /// never guesses ahead.
     fn max_rows(&self) -> usize {
         match self {
-            Self::Cpu(_)
-            | Self::Qwen35(_)
-            | Self::Qwen35Cuda(_)
-            | Self::Granite(_)
-            | Self::GraniteCuda(_) => 0,
+            Self::Cpu(_) | Self::Qwen35(_) | Self::Granite(_) | Self::GraniteCuda(_) => 0,
             Self::Cuda(m) => m.max_rows(),
+            Self::Qwen35Cuda(_) => crate::qwen35::MAX_ROWS,
+        }
+    }
+
+    fn speculation(&self) -> runtime::Speculation {
+        match self {
+            Self::Qwen35Cuda(_) => runtime::Speculation::SHORT_PASS,
+            _ => runtime::Speculation::MEASURED,
         }
     }
 

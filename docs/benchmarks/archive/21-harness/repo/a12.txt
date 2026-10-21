@@ -1,0 +1,40 @@
+  › search "concurrent|worker|thread|pool|limit|max…  526 matches in 104 files
+  › search "tokio|async|spawn|runtime|concurrent" i…  176 matches in 114 files
+  › list crates/runtime  2 entries
+  › list crates/runtime/src  9 entries
+  › read crates/runtime/src/lib.rs:1-100  100 lines
+  › invalid tool call  parameter `start` is not closed with </parameter>
+  › read crates/runtime/src/generate.rs:1-96  96 lines
+  › search "tokio::spawn|async|thread::spawn|concurr …" in crates…  no matches
+Based on my search of the codebase, I cannot find a file that explicitly
+decides how many requests run at the same time or what concurrency limits it
+applies.
+
+The project appears to be a single-user, single-model inference tool (marin)
+focused on benchmarking and local LLM generation. Key observations:
+
+1. No concurrent request handling: The codebase doesn't contain typical web
+   server patterns (like `tokio::spawn` for concurrent requests, connection
+   pools, or rate limiters for multiple clients).
+
+2. Single-threaded generation: The `generate` function in
+   `crates/runtime/src/generate.rs` processes tokens sequentially, with
+   optional speculation (guessing ahead) but no parallel request handling.
+
+3. Configuration is per-run: The `threads` parameter in
+   `crates/cli/src/args.rs` controls CPU threads for prompt passes (default:
+   physical cores), not concurrent request handling.
+
+4. No concurrency limits found: There's no evidence of:
+  * Maximum concurrent requests
+  * Rate limiting
+  * Connection pooling
+  * Worker pools for requests
+
+The project seems designed for local, single-user interaction rather than
+serving multiple concurrent requests. If you're looking for concurrency
+control, it may not exist in this codebase, or it might be implemented in a
+different part of the system not visible through read-only tools.
+
+  7 tools · 618 tokens written · context 6,164/8,192 · 68.6 s
+

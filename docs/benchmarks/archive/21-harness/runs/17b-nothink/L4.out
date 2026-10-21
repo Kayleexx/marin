@@ -1,0 +1,22 @@
+The `max_active` function in the provided code is responsible for determining the maximum number of concurrent requests that can run at once, based on the available GPU memory and the model's configuration.
+
+### Key Points:
+
+- The function returns a value that is clamped between `1` and `MAX_ACTIVE` (which is set to `3` in the code).
+- The actual value returned is computed as:
+
+  ```rust
+  usize::try_from(copies)
+      .unwrap_or(usize::MAX)
+      .saturating_sub(1)
+      .clamp(1, MAX_ACTIVE)
+  ```
+
+### So, the `max_active` function clamps its result between:
+
+- **Lower bound:** `1`
+- **Upper bound:** `MAX_ACTIVE` (which is `3` in this case)
+
+### Final Answer:
+
+The `max_active` function clamps its result between **1** and **3**.

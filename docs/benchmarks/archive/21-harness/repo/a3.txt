@@ -1,0 +1,19 @@
+  › search "Interrupt" in crates  95 matches in 29 files
+  › read crates/cli/src/signal.rs:1-73  73 lines
+When Ctrl-C is pressed while a reply is being generated (phase = `GENERATING`),
+the `Interrupt` type:
+
+1. Does nothing on the first press - it silently ignores it (line 45)
+2. Exits on the second press - exits with code 130 (line 51)
+
+This is documented in the comment on lines 20-22: "While generating: stop the
+reply (a second press exits, since the first one only takes effect between
+tokens)."
+
+The mechanism works by:
+- Setting the `cancel` flag to true on the first interrupt (line 45)
+- On the second interrupt, the `cancel` flag is already true, so it falls
+  through to the `_` case which exits (lines 49-52)
+
+  2 tools · 249 tokens written · context 2,764/8,192 · 27.0 s
+

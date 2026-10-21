@@ -1,0 +1,25 @@
+To find the average speed over the whole trip, we use the formula:
+
+$$
+\text{Average speed} = \frac{\text{Total distance}}{\text{Total time}}
+$$
+
+### Step 1: Calculate total distance
+$$
+\text{Total distance} = 150 \, \text{km} + 90 \, \text{km} = 240 \, \text{km}
+$$
+
+### Step 2: Calculate total time
+$$
+\text{Total time} = 2.5 \, \text{hours} + 1.5 \, \text{hours} = 4 \, \text{hours}
+$$
+
+### Step 3: Calculate average speed
+$$
+\text{Average speed} = \frac{240 \, \text{km}}{4 \, \text{hours}} = 60 \, \text{km/h}
+$$
+
+### Final Answer:
+$$
+\boxed{60}
+$$

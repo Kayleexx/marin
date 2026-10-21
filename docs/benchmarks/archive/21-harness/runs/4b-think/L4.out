@@ -1,0 +1,98 @@
+The user is asking about the `max_active` function in the provided Rust code.
+I need to find the specific line where the result is clamped.
+
+Looking at the `max_active` function:
+```rust
+pub(super) fn max_active(loaded: &Loaded) -> usize {
+    let Engine::Qwen35Cuda(_) = &loaded.model else {
+        return 1;
+    };
+    let Some((free, _)) = loaded.model.gpu_memory() else {
+        return 1;
+    };
+    let state = model::qwen35::TextConfig::parse(
+        &loaded.dir.config_json,
+        loaded.dir.generation_config_json.as_deref(),
+    )
+    .and_then(|config| config.state_bytes(loaded.ctx))
+    .map_or(u64::MAX, |bytes| u64::try_from(bytes).unwrap_or(u64::MAX));
+    let copies = free
+        .saturating_sub(model::GPU_SLACK_BYTES)
+        .checked_div(state)
+        .unwrap_or(0);
+    usize::try_from(copies)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(1)
+        .clamp(1, MAX_ACTIVE)
+}
+```
+
+The line `.clamp(1, MAX_ACTIVE)` is the key.
+`MAX_ACTIVE` is defined at the top of the file as `const MAX_ACTIVE: usize = 3;`.
+
+So the result is clamped between `1` and `MAX_ACTIVE` (which is 3).
+
+The question asks "Between which two values does max_active clamp its result?".
+The answer should be `1` and `MAX_ACTIVE` (or 3).
+
+Let's verify the context.
+`usize::try_from(copies).unwrap_or(usize::MAX).saturating_sub(1).clamp(1, MAX_ACTIVE)`
+The `clamp` method takes `(min, max)`.
+So it clamps between `1` and `MAX_ACTIVE`.
+
+The question asks for the two values.
+Value 1: `1`
+Value 2: `MAX_ACTIVE` (which is defined as `3`)
+
+I will state the values explicitly.
+
+One detail: `MAX_ACTIVE` is defined as `3`.
+So the range is `[1, 3]`.
+
+The question asks "Between which two values".
+I should mention `1` and `MAX_ACTIVE` (or `3`).
+
+Let's check the code again.
+`const MAX_ACTIVE: usize = 3;`
+`.clamp(1, MAX_ACTIVE)`
+
+So the values are `1` and `MAX_ACTIVE` (which is `3`).
+
+I will formulate the answer clearly.
+The function clamps the result between `1` and `MAX_ACTIVE` (which is `3`).
+
+Wait, is there any other clamping?
+`usize::try_from(copies).unwrap_or(usize::MAX)` -> handles overflow.
+`.saturating_sub(1)` -> handles 0 becoming 0 (since saturating_sub on 0 is 0).
+`.clamp(1, MAX_ACTIVE)` -> handles the final range.
+
+So the final clamping is indeed `1` and `MAX_ACTIVE`.
+
+I will write the answer based on this.
+The values are `1` and `MAX_ACTIVE` (which is `3`).
+I should probably mention `MAX_ACTIVE` is `3`.
+
+The question asks "Between which two values".
+Answer: `1` and `MAX_ACTIVE` (or `3`).
+
+I will provide the specific values found in the code.
+`1` and `MAX_ACTIVE`.
+Since `MAX_ACTIVE` is defined as `3`, I can say `1` and `3`.
+However, referring to the variable name is more precise regarding the code structure.
+I will mention both.
+
+Final check:
+Line: `.clamp(1, MAX_ACTIVE)`
+`MAX_ACTIVE` is `const MAX_ACTIVE: usize = 3;`
+So the range is 1 to 3.
+
+The question asks "Between which two values".
+I will answer `1` and `MAX_ACTIVE` (which is `3`).
+</think>
+
+The `max_active` function clamps its result between **`1`** and **`MAX_ACTIVE`** (which is defined as **`3`**).
+
+This is found in the final line of the function:
+```rust
+.clamp(1, MAX_ACTIVE)
+```

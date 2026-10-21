@@ -46,9 +46,11 @@ pub(super) fn pass_chunk(
     tokens: &[u32],
     probe: &mut GpuProbe<'_>,
     mut observe: crate::Observer<'_>,
+    each: bool,
 ) -> Result<Vec<f32>, ModelError> {
     let (gpu, c, count) = (&model.gpu, &model.config.block, tokens.len());
     let logit_rows = match rows {
+        Rows::One(_) if each => count,
         Rows::One(_) => 1,
         Rows::Batch { caches, .. } => caches.len(),
     };
@@ -114,7 +116,7 @@ pub(super) fn pass_chunk(
     }
     probe.layer(None);
     match rows {
-        Rows::One(_) => {
+        Rows::One(_) if !each => {
             probe.stage(Stage::Norm, || {
                 gpu.copy_range_into(
                     &ws.hidden,
@@ -129,7 +131,7 @@ pub(super) fn pass_chunk(
                     .matmul_precise(gpu, &ws.last, 1, &mut ws.logits)?)
             })?;
         }
-        Rows::Batch { .. } => {
+        Rows::One(_) | Rows::Batch { .. } => {
             probe.stage(Stage::Norm, || {
                 Ok(gpu.rms_norm(&mut ws.hidden, &model.norm, c.rms_norm_eps)?)
             })?;

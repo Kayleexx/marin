@@ -20,7 +20,7 @@ mod read;
 mod state;
 mod weights;
 pub use cache::Cache;
-pub use gpu::Qwen35Gpu;
+pub use gpu::{MAX_ROWS, Qwen35Gpu};
 pub use gpu_batch::MAX_BATCH;
 pub use gpu_budget::bytes as gpu_budget_bytes;
 pub use gpu_cache::GpuCache;
@@ -247,6 +247,8 @@ fn allocation_bytes(floats: usize) -> Result<usize, ModelError> {
 
 #[cfg(test)]
 mod gpu_mark_tests;
+#[cfg(test)]
+mod gpu_rows_tests;
 #[cfg(test)]
 mod gpu_tests;
 #[cfg(test)]

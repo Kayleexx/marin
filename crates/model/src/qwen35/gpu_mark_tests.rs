@@ -11,7 +11,7 @@ use runtime::{CausalLm, SequenceCache};
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-fn model() -> Result<Option<Qwen35Gpu>> {
+pub(super) fn model() -> Result<Option<Qwen35Gpu>> {
     let gpu = match Gpu::new() {
         Ok(gpu) => gpu,
         Err(e) if std::env::var_os("MARIN_REQUIRE_CUDA").is_none() => {
@@ -30,7 +30,7 @@ fn model() -> Result<Option<Qwen35Gpu>> {
     )?))
 }
 
-fn ids(from: u32, count: usize) -> Vec<u32> {
+pub(super) fn ids(from: u32, count: usize) -> Vec<u32> {
     (0..count)
         .map(|i| from.wrapping_add(i as u32) % 300)
         .collect()

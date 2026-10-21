@@ -1,0 +1,10 @@
+<tool_call>
+<function=search>
+<parameter=pattern>
+retry_limit
+</parameter>
+<parameter=path>
+crates
+</parameter>
+</function>
+</tool_call>

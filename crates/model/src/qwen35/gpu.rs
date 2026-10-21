@@ -1,6 +1,7 @@
 use super::TextConfig;
 use super::gpu_cache::GpuCache;
 use super::gpu_mark::Mark;
+use super::gpu_transaction::{self as transaction, Pass};
 use super::gpu_weights::{Layer, load_layers};
 use super::math::{invalid, size};
 use crate::qwen3::weight::Weight;
@@ -155,7 +156,7 @@ impl Qwen35Gpu {
         cache: &mut GpuCache,
         observe: Observer<'_>,
     ) -> Result<Vec<f32>, ModelError> {
-        super::gpu_transaction::forward(self, tokens, cache, observe, None)
+        transaction::forward(self, tokens, cache, observe, None, Pass::Last)
     }
 
     pub fn forward_profiled(
@@ -164,13 +165,36 @@ impl Qwen35Gpu {
         cache: &mut GpuCache,
         times: &mut metrics::StageTimes,
     ) -> Result<Vec<f32>, ModelError> {
-        super::gpu_transaction::forward(self, tokens, cache, None, Some(times))
+        transaction::forward(self, tokens, cache, None, Some(times), Pass::Last)
+    }
+
+    /// Like `forward`, with the logits after every token fed, from one pass over up to `MAX_ROWS` tokens. The cache
+    /// can then be cut back inside the pass (`truncate`): the next pass starts from where this one did.
+    pub fn forward_rows(
+        &self,
+        tokens: &[u32],
+        cache: &mut GpuCache,
+    ) -> Result<Vec<f32>, ModelError> {
+        if cache.replay && cache.resume.is_some() {
+            transaction::forward(self, &[], cache, None, None, Pass::Repair)?;
+        }
+        if cache.replay || tokens.len() > MAX_ROWS {
+            let mut rows = Vec::new();
+            for token in tokens {
+                rows.extend(self.forward(&[*token], cache)?);
+            }
+            return Ok(rows);
+        }
+        transaction::forward(self, tokens, cache, None, None, Pass::Rows)
     }
 
     pub(super) fn owner(&self) -> u64 {
         self.owner
     }
 }
+
+/// Most tokens `forward_rows` checks in one pass: from 6 rows on, a pass costs about 2.6 times a single token's.
+pub const MAX_ROWS: usize = 4;
 
 impl CausalLm for Qwen35Gpu {
     type Error = ModelError;

@@ -1,0 +1,41 @@
+Thinking Process:
+
+1.  **Analyze the Request:** The user is asking for the error message associated with a specific variant of the `ScheduleError` enum defined in the provided Rust code snippet. Specifically, they want the error message for the variant used when a request is cancelled.
+
+2.  **Scan the Code:** I need to look at the `ScheduleError` enum definition within the provided code.
+
+    ```rust
+    #[derive(Debug, Error)]
+    pub(super) enum ScheduleError {
+        #[error(transparent)]
+        Model(#[from] ModelError),
+        #[error("the request was cancelled")]
+        Cancelled,
+        #[error("a batched decode step returned no result")]
+        Lost,
+    }
+    ```
+
+3.  **Identify the Target Variant:** The user is asking about the "cancelled" variant.
+    Looking at the enum definition:
+    - `Model(...)`
+    - `Cancelled`
+    - `Lost`
+
+    The `Cancelled` variant has the attribute `#[error("the request was cancelled")]`.
+
+4.  **Extract the Error Message:** The string inside the `#[error(...)]` attribute for the `Cancelled` variant is `"the request was cancelled"`.
+
+5.  **Formulate the Answer:** State the error message clearly based on the code found.
+
+6.  **Verify:** Does the code match the question?
+    - Question: "What is the error message of the ScheduleError variant used when a request is cancelled?"
+    - Code: `#[error("the request was cancelled")] Cancelled,`
+    - Match: Yes.
+
+7.  **Final Output Construction:** "the request was cancelled".
+</think>
+
+The error message for the `ScheduleError` variant used when a request is cancelled is:
+
+**"the request was cancelled"**

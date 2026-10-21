@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use chat::{DEFAULT_SYSTEM, Message, Role, render};
 use metrics::{Sampler as GpuSampler, spread};
 use model::{BackendChoice, Engine, EngineCache, Precision};
-use runtime::{GenerateParams, Kept, Outcome, Retained, Speculation, generate_reusing};
+use runtime::{CausalLm, GenerateParams, Kept, Outcome, Retained, generate_reusing};
 
 use crate::CliError;
 use crate::bench::measure::{greedy, prompt};
@@ -265,7 +265,7 @@ pub fn run_turns(
         max_tokens: options.reply_tokens,
         stop_tokens: loaded.stop_tokens(),
         usable_vocab: loaded.dir.tokenizer.vocab_size(),
-        speculation: options.speculate.then_some(Speculation::MEASURED),
+        speculation: options.speculate.then(|| loaded.model.speculation()),
     };
     let mut all = Vec::new();
     for target in &options.history {

@@ -1,0 +1,36 @@
+  › list crates  10 entries
+  › invalid tool call  parameter `start` is not closed with </parameter>
+  › read crates/cli/src/main.rs  `crates/cli/src/main.rs` does not exist
+  › list crates/cli  5 entries
+  › list crates/cli/src  48 entries
+  › read crates/cli/src/lib.rs:1-55  55 lines
+Based on the project structure, the coding assistant (Marin) provides the
+following tools:
+
+Core Functionality:
+- Chat (`crates/cli/src/chat.rs`) - Interactive conversation with the model
+- Code generation (`crates/cli/src/code/`) - Code creation and manipulation
+- Model management (`crates/model/`) - Model loading and configuration
+- Runtime (`crates/runtime/`) - Execution environment
+- Sampling (`crates/sampler/`) - Text generation control
+- Tensor operations (`crates/tensor/`) - Numerical computations
+
+CLI Commands:
+- Checkpoint (`crates/cli/src/checkpoint.rs`) - Save/load model checkpoints
+- Session management (`crates/cli/src/session/`) - Conversation history
+- Quality assessment (`crates/cli/src/quality.rs`) - Evaluate outputs
+- Performance metrics (`crates/cli/src/perf/`) - Benchmarking tools
+- Telemetry (`crates/cli/src/telemetry.rs`) - Usage tracking
+- Server (`crates/cli/src/server/`) - API server functionality
+
+Utilities:
+- Memory management (`crates/cli/src/memory.rs`)
+- Progress tracking (`crates/cli/src/progress.rs`)
+- Trace/verification (`crates/cli/src/trace.rs`)
+- Repl (`crates/cli/src/repl.rs`) - Interactive shell
+
+The tools are organized across multiple crates in `crates/` with the CLI
+interface in `crates/cli/`.
+
+  5 tools · 563 tokens written · context 2,012/8,192 · 28.4 s
+

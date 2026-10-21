@@ -1,0 +1,25 @@
+  › search "session not found, evicted or in use" in .  7 matches in 2 files
+  › read crates/cli/src/server/completion.rs:95-115  21 lines
+The error message "session not found, evicted or in use" is produced at:
+
+`crates/cli/src/server/completion.rs:105`
+
+Conditions:
+
+This error occurs when:
+1. The `persistent` flag is `true` (line 101)
+2. The `marin_session_id` is not `"new"` (line 101)
+3. The session ID is valid (line 97)
+4. The `store.take(&session_id)` returns `None` (line 103-105)
+
+The `store.take()` operation returns `None` when:
+- The session doesn't exist in the store
+- The session has been evicted
+- The session is currently in use by another client (conflict)
+
+This typically happens during session migration or transfer operations where
+the client tries to take ownership of a session that either doesn't exist, has
+been removed, or is locked by another client.
+
+  2 tools · 297 tokens written · context 1,443/8,192 · 17.8 s
+

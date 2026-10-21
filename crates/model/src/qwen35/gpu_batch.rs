@@ -84,7 +84,7 @@ impl Qwen35Gpu {
             caches: caches.iter_mut().map(|cache| &mut **cache).collect(),
             scratch: Box::new(Workspace::new(&self.gpu, &self.config, (1, 1))?),
         };
-        let flat = pass_chunk(self, &mut rows, tokens, &mut probe, None)?;
+        let flat = pass_chunk(self, &mut rows, tokens, &mut probe, None, false)?;
         probe.finish()?;
         Ok(flat)
     }

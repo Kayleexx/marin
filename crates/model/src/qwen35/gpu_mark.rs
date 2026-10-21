@@ -32,7 +32,23 @@ fn reserve<T>(len: usize) -> Result<Vec<T>, ModelError> {
     Ok(out)
 }
 
+impl Mark {
+    /// Whether this mark is still the place to start reading again after the cache is cut back to `len` tokens: no cut
+    /// went below it and it is the cache's own.
+    pub(super) fn resumable(self, cache: u64, len: usize, epoch: u64) -> Option<Self> {
+        (self.cache == cache && self.epoch == epoch && self.tokens <= len).then_some(self)
+    }
+}
+
 impl GpuCache {
+    /// A cache that is to be read again holds state a mark must not copy.
+    fn fresh(&self) -> Result<(), ModelError> {
+        if self.replay {
+            return Err(invalid("a cache that is to be read again cannot be marked"));
+        }
+        Ok(())
+    }
+
     fn marked(&self, saved: Saved) -> Mark {
         Mark {
             saved,
@@ -45,6 +61,7 @@ impl GpuCache {
 
     /// A mark of the committed state kept on the GPU: a copy of the DeltaNet state and the lengths of the history.
     pub(super) fn mark(&self, gpu: &Gpu) -> Result<Mark, ModelError> {
+        self.fresh()?;
         let mut delta = reserve(self.delta.len())?;
         for state in &self.delta {
             delta.push(match state {
@@ -60,6 +77,7 @@ impl GpuCache {
 
     /// The same mark with the DeltaNet state in host memory, which needs no free GPU memory now or when it is put back.
     pub(super) fn mark_in_host(&self, gpu: &Gpu) -> Result<Mark, ModelError> {
+        self.fresh()?;
         let mut host = reserve(self.delta.len())?;
         for state in &self.delta {
             host.push(match state {
@@ -79,24 +97,49 @@ impl GpuCache {
     pub(super) fn rewind(&mut self, gpu: &Gpu, mark: Mark) -> Result<(), ModelError> {
         let holds = mark.cache == self.id
             && mark.epoch == self.epoch
-            && !self.replay
+            && (!self.replay || self.resume.is_some())
             && self.kv.len() >= mark.positions
             && self.tokens.len() >= mark.tokens;
         if !holds {
             return Err(invalid("the cache no longer extends the marked history"));
         }
-        self.kv.truncate(mark.positions)?;
+        self.pending = None;
+        self.resume = None;
+        if let Err(error) = self.kv.truncate(mark.positions) {
+            self.clear();
+            return Err(error.into());
+        }
         self.tokens.truncate(mark.tokens);
+        let restored = match mark.saved {
+            Saved::Device(delta) => {
+                self.delta = delta;
+                Ok(())
+            }
+            Saved::Host(host) => self.restore(gpu, &host),
+        };
+        if let Err(error) = restored {
+            self.clear();
+            return Err(error);
+        }
+        self.replay = false;
+        Ok(())
+    }
+
+    /// Puts the state back to the mark a cut back inside the last `forward_rows` left, and says how many of the kept
+    /// tokens it already covers, so the next pass reads only the rest. `None` if there is nothing to start from.
+    pub(super) fn resume(&mut self, gpu: &Gpu) -> Result<Option<usize>, ModelError> {
+        let Some(mark) = self.resume.take() else {
+            return Ok(None);
+        };
+        if mark.cache != self.id || mark.epoch != self.epoch || self.tokens.len() < mark.tokens {
+            return Ok(None);
+        }
+        self.kv.truncate(mark.positions)?;
         match mark.saved {
             Saved::Device(delta) => self.delta = delta,
-            Saved::Host(host) => {
-                if let Err(error) = self.restore(gpu, &host) {
-                    self.clear();
-                    return Err(error);
-                }
-            }
+            Saved::Host(host) => self.restore(gpu, &host)?,
         }
-        Ok(())
+        Ok(Some(mark.tokens))
     }
 
     fn restore(&mut self, gpu: &Gpu, host: &[Option<HostState>]) -> Result<(), ModelError> {

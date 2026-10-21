@@ -1,4 +1,5 @@
 use super::TextConfig;
+use super::gpu_mark::Mark;
 use super::gpu_weights::{Layer, Mixer};
 use super::math::{invalid, size};
 use crate::ModelError;
@@ -24,6 +25,10 @@ pub struct GpuCache {
     pub(super) epoch: u64,
     /// Tells this cache from every other, so a `Mark` is only ever put back into the cache it came from.
     pub(super) id: u64,
+    /// The mark taken before the last `forward_rows`, which a cut back inside that pass turns into `resume`.
+    pub(super) pending: Option<Mark>,
+    /// Where a pass after a cut back inside the last `forward_rows` starts reading instead of at the very beginning.
+    pub(super) resume: Option<Mark>,
 }
 
 impl GpuCache {
@@ -57,6 +62,8 @@ impl GpuCache {
             owner,
             epoch: 0,
             id: NEXT_CACHE.fetch_add(1, Ordering::Relaxed),
+            pending: None,
+            resume: None,
         })
     }
 
@@ -94,6 +101,8 @@ impl GpuCache {
         layers: &[Layer],
     ) -> Result<(), ModelError> {
         self.delta = Self::fresh_state(gpu, config, layers)?;
+        self.pending = None;
+        self.resume = None;
         self.kv.clear();
         self.epoch = self.epoch.wrapping_add(1);
         Ok(())
@@ -136,6 +145,8 @@ impl GpuCache {
             owner: self.owner,
             epoch: 0,
             id: NEXT_CACHE.fetch_add(1, Ordering::Relaxed),
+            pending: None,
+            resume: None,
         })
     }
 
@@ -171,11 +182,13 @@ impl SequenceCache for GpuCache {
     }
     fn clear(&mut self) {
         self.tokens.clear();
+        self.pending = None;
+        self.resume = None;
         self.replay = true;
         self.epoch = self.epoch.wrapping_add(1);
     }
     fn replays(&self) -> bool {
-        self.replay
+        self.replay && self.resume.is_none()
     }
     fn truncate(&mut self, len: usize) -> Result<(), RollbackError> {
         if len > self.tokens.len() {
@@ -185,9 +198,18 @@ impl SequenceCache for GpuCache {
             });
         }
         if len != self.tokens.len() {
+            let resumable = self
+                .pending
+                .take()
+                .or_else(|| self.resume.take())
+                .and_then(|mark| mark.resumable(self.id, len, self.epoch));
             self.tokens.truncate(len);
             self.replay = true;
-            self.epoch = self.epoch.wrapping_add(1);
+            // A cut inside the last pass of rows leaves every older mark's history as it was.
+            if resumable.is_none() {
+                self.epoch = self.epoch.wrapping_add(1);
+            }
+            self.resume = resumable;
         }
         Ok(())
     }

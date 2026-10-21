@@ -1,0 +1,31 @@
+  › search "fn max_active" in .  4 matches in 3 files
+  › read crates/cli/src/server/gate.rs:100-120  21 lines
+  › read crates/cli/src/server/sched.rs:20-50  31 lines
+The function `max_active` is defined in two places:
+
+1. `crates/cli/src/server/gate.rs:107` - A simple getter that returns the
+   `max_active` field from the `Gate` struct.
+
+2. `crates/cli/src/server/sched.rs:28` - The actual computation logic that
+   determines how many requests can run concurrently.
+
+What it decides:
+
+The `max_active` function in `sched.rs` calculates the maximum number of
+requests that can run simultaneously based on GPU memory constraints.
+Specifically:
+
+- It allows 1 request for all models except Qwen3.5 on CUDA
+- For Qwen3.5 on CUDA, it computes:
+  * The free GPU memory after loading the model
+  * The memory required for recurrent state (KV cache)
+  * The safety slack (`GPU_SLACK_BYTES`)
+  * Divides the remaining free memory by the state bytes per request
+  * Returns the number of copies that fit, minus 1 (for the idle session),
+    clamped between 1 and `MAX_ACTIVE`
+
+In essence, it decides how many concurrent requests the GPU can support while
+keeping enough memory for activations and recurrent state.
+
+  3 tools · 396 tokens written · context 1,808/8,192 · 23.5 s
+

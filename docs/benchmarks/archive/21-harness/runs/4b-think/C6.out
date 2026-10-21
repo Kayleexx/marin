@@ -1,0 +1,23 @@
+Thinking Process:
+
+1.  **Analyze the Request:**
+    *   Question: "What is the capital of Australia?"
+    *   Constraint: "Reply with one word."
+
+2.  **Identify the Fact:**
+    *   The capital city of Australia is Canberra.
+
+3.  **Check Constraints:**
+    *   The user wants exactly one word.
+
+4.  **Formulate the Output:**
+    *   "Canberra"
+
+5.  **Final Verification:**
+    *   Is it one word? Yes.
+    *   Is it the correct answer? Yes.
+
+6.  **Construct Final Response:** Canberra.cw
+</think>
+
+Canberra

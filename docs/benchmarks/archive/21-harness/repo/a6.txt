@@ -1,0 +1,19 @@
+  › read Cargo.toml:1-25  25 lines
+  › list crates  10 entries
+The workspace consists of 10 crates in the `crates/` directory:
+
+1. chat
+2. cli
+3. cuda
+4. kv
+5. loader
+6. metrics
+7. model
+8. runtime
+9. sampler
+10. tensor
+
+This is defined in `Cargo.toml:3` as `members = ["crates/*"]`.
+
+  2 tools · 141 tokens written · context 982/8,192 · 10.8 s
+

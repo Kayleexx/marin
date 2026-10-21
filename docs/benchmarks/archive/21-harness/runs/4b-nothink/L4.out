@@ -1,0 +1,15 @@
+Based on the `max_active` function in the provided code, the result is clamped between **1** and **`MAX_ACTIVE`**.
+
+Here is the specific line from the code that performs this operation:
+
+```rust
+usize::try_from(copies)
+    .unwrap_or(usize::MAX)
+    .saturating_sub(1)
+    .clamp(1, MAX_ACTIVE)
+```
+
+*   **Lower bound:** `1`
+*   **Upper bound:** `MAX_ACTIVE` (which is defined as `3` at the top of the file)
+
+This ensures that even if the calculation suggests running more requests than the constant allows, or fewer than one, the final value will always be within the range `[1, 3]`.

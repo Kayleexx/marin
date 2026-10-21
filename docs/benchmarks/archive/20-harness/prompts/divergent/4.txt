@@ -1,0 +1,1 @@
+Write 20 lines of dialogue. Each line begins with 'He said that the' and ends differently every time.

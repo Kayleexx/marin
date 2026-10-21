@@ -19,6 +19,15 @@ impl Speculation {
     };
 }
 
+impl Speculation {
+    /// For a model whose pass over more than four tokens costs more than twice a single token's: the check is kept to
+    /// four tokens (at most three guesses), which costs 1.1-1.5x one token, so a shorter match is worth trying.
+    pub const SHORT_PASS: Self = Self {
+        match_len: 4,
+        max_draft: 3,
+    };
+}
+
 impl Default for Speculation {
     fn default() -> Self {
         Self::MEASURED

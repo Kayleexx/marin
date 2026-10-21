@@ -14,14 +14,25 @@ use runtime::SequenceCache;
 /// Tokens one pass over a prompt takes at a time.
 const CHUNK: usize = 512;
 
+/// What a pass is for: the logits after the last token, after every token (to check guesses, which marks the cache
+/// for `truncate` to resume from), or only to read again what a cut back left unread.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Pass {
+    Last,
+    Rows,
+    Repair,
+}
+
 pub(super) fn forward(
     model: &Qwen35Gpu,
     tokens: &[u32],
     cache: &mut GpuCache,
     observe: crate::Observer<'_>,
     times: Option<&mut StageTimes>,
+    pass: Pass,
 ) -> Result<Vec<f32>, ModelError> {
-    if tokens.is_empty() {
+    let each = pass == Pass::Rows;
+    if tokens.is_empty() && !(pass == Pass::Repair && cache.replay) {
         return Err(ModelError::NoTokens);
     }
     if cache.owner != model.owner() {
@@ -52,28 +63,39 @@ pub(super) fn forward(
         .map_err(|e| invalid(format!("GPU token ledger: {e}")))?;
     let mut probe = GpuProbe::new(&model.gpu, times);
     let replay = cache.replay;
+    cache.pending = None;
     // The pass runs in the cache itself. Keys and values are only appended past the committed length, so a failed
     // pass is undone by cutting them back; the DeltaNet state changes in place, so a mark of it is kept meanwhile.
-    let mark = probe.stage(Stage::StateCopy, || {
-        if replay {
-            cache.reset(&model.gpu, &model.config, &model.layers)?;
-            Ok(None)
-        } else {
-            cache.mark(&model.gpu).map(Some)
+    // A cache cut back inside the last `forward_rows` starts from that pass's mark and reads only what follows it.
+    let (mark, skip) = probe.stage(Stage::StateCopy, || {
+        if !replay {
+            return cache.mark(&model.gpu).map(|mark| (Some(mark), 0));
+        }
+        match cache.resume(&model.gpu)? {
+            Some(covered) => Ok((None, covered)),
+            None => {
+                cache.reset(&model.gpu, &model.config, &model.layers)?;
+                Ok((None, 0))
+            }
         }
     })?;
     let mut input = Vec::new();
     input
-        .try_reserve_exact(if replay { end } else { tokens.len() })
+        .try_reserve_exact(if replay {
+            end.saturating_sub(skip)
+        } else {
+            tokens.len()
+        })
         .map_err(|e| invalid(format!("GPU input allocation: {e}")))?;
     if replay {
-        input.extend_from_slice(&cache.tokens);
+        input.extend_from_slice(cache.tokens.get(skip..).unwrap_or(&[]));
     }
     input.extend_from_slice(tokens);
-    match run_chunks(model, cache, &input, probe, observe) {
+    match run_chunks(model, cache, &input, probe, observe, each) {
         Ok(logits) => {
             cache.tokens.extend_from_slice(tokens);
             cache.replay = false;
+            cache.pending = mark.filter(|_| each);
             Ok(logits)
         }
         Err(error) => {
@@ -94,6 +116,7 @@ fn run_chunks(
     input: &[u32],
     mut probe: GpuProbe<'_>,
     mut observe: crate::Observer<'_>,
+    each: bool,
 ) -> Result<Vec<f32>, ModelError> {
     let mut logits = Vec::new();
     let chunk_count = input.len().div_ceil(CHUNK);
@@ -108,6 +131,7 @@ fn run_chunks(
             } else {
                 None
             },
+            each,
         )?;
     }
     probe.finish()?;

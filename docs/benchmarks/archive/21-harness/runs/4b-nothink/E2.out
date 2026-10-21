@@ -1,0 +1,32 @@
+Based on the provided code, here is the breakdown of what happens in both scenarios:
+
+### 1. When `Engine::mark` is asked for a mark and GPU memory is short
+
+When `Engine::mark` is called on a `Qwen35Cuda` engine, it checks if there is enough free GPU memory to store the full KV cache history required for the mark.
+
+*   **The Check:** It calculates `free` bytes and compares them against `bytes` (the size of the mark) plus `GPU_SLACK_BYTES`.
+    ```rust
+    if free < bytes.saturating_add(GPU_SLACK_BYTES) {
+        return Ok(m.mark_cache_in_host(kv).ok());
+    }
+    ```
+*   **The Outcome (Memory Short):** If the condition is true (memory is short), the function **does not** return a `Mark` object. Instead, it calls `m.mark_cache_in_host(kv)`.
+    *   This implies the mark state is stored in **host memory (CPU RAM)** rather than on the GPU.
+    *   The function returns `Ok(None)` (or `Ok(Some(...))` only if the host operation succeeds and returns a valid handle, but the key takeaway is that the heavy KV history is **not** copied to the GPU).
+*   **The Outcome (Memory Sufficient):** If there is enough memory, it returns `Ok(Some(m.mark_cache(kv)?))`, creating a full GPU copy of the mark.
+
+**Summary:** If GPU memory is short, the mark is stored in **host memory**, allowing the system to proceed without failing, but the mark cannot be immediately used for a GPU-based rewind until memory frees up.
+
+---
+
+### 2. When a pass runs out of memory in the scheduler
+
+When the scheduler (`Scheduled`) attempts a decode step or forward pass and encounters an out-of-memory error, it enters a retry loop.
+
+*   **Detection:** The `forward` or `decode` methods call `self.retrying(...)`. Inside `retrying`, if the error is `ScheduleError::Model(e)` where `e.is_out_of_memory()` is true, the loop continues.
+*   **The Wait Mechanism:** The scheduler calls `self.gate.wait_for_memory(self.lane, || self.cancelled())`.
+    *   This function blocks the current thread (or yields control) until the `Gate` determines that another request has finished and freed enough GPU memory.
+*   **The Retry:** Once `wait_for_memory` returns `true` (indicating memory is likely free), the loop calls the pass function again (`pass()`).
+*   **Safety:** The code ensures that if a pass fails due to memory, the `EngineCache` is left unchanged (`let lent = std::mem::replace(cache, spare); ... *cache = back;` logic in `decode`, and `retrying` logic in `forward`), so repeating the pass is an exact operation.
+
+**Summary:** The scheduler **waits** at the `Gate` for other requests to finish and free up memory. Once memory is available, it **retries** the failed pass immediately. It does not fail the request permanently; it simply pauses execution until resources are available.

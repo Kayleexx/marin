@@ -1,0 +1,21 @@
+  › search "/clear" in .  40 matches in 24 files
+  › read crates/cli/src/dialog.rs:50-110  61 lines
+  › read crates/cli/src/dialog.rs:108-130  23 lines
+The `/clear` command in marin forgets the conversation history of the current
+mode:
+
+- In code mode: it clears the code chat history (line 114)
+- In chat mode: it clears the chat history (line 115)
+
+The command also resets the `origin.same` flag to `false` (line 111), which
+affects how saved sessions are handled.
+
+From the documentation:
+- `/clear forgets code history` (line 99)
+- `/clear forgets chat history` (line 103)
+
+So `/clear` is mode-specific and only clears the active mode's conversation,
+not the other mode's history.
+
+  3 tools · 742 tokens written · context 3,136/8,192 · 43.2 s
+

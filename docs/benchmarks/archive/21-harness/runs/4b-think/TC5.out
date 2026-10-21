@@ -1,0 +1,10 @@
+The user is asking about where the function `parse_header` is defined in this project. I need to search for this function in the codebase. Let me search for it first.
+</think>
+
+<tool_call>
+<function=search>
+<parameter=pattern>
+parse_header
+</parameter>
+</function>
+</tool_call>

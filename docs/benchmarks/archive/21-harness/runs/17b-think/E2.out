@@ -1,0 +1,69 @@
+<think>
+Okay, let's try to figure out what happens when GPU memory is short when calling Engine::mark, and how the scheduler handles when a pass runs out of memory.
+
+First, I need to look at the code provided. The question is about the behavior of the scheduler and the engine when memory is low. Let me start by understanding the relevant parts.
+
+In the engine_session.rs file, the Engine::mark method is discussed. The code for Engine::mark is in the match block. Let's look at the relevant part:
+
+For the Qwen35Cuda case, when the engine is Qwen35Cuda(m), and the cache is EngineCache::Qwen35Cuda(kv), the code checks the free memory. The free is the free bytes from the GPU info, and the copy is the checkpoint bytes from the kv. If free is less than copy plus GPU_SLACK_BYTES, it returns None. Otherwise, it returns Some(m.mark_cache_in_host(kv)).
+
+So, when the GPU memory is short, the code returns None. But what about when the scheduler is involved?
+
+Looking at the scheduler code, the Scheduled struct has a gate, which is an instance of Gate. The Gate has a method called wait_for_memory, which is used to check if there's enough memory. The scheduler's retrying function uses this method to wait for another request to finish.
+
+In the Scheduled::retrying function, if the pass (decode step) fails due to out of memory, and the gate's wait_for_memory returns true (meaning another request is finishing), then the retrying function continues. So, the scheduler will retry the pass until there's enough memory or until it's canceled.
+
+Now, the question is about what happens when Engine::mark is called with insufficient GPU memory. The Engine::mark method returns None in that case. But the scheduler might handle this by waiting for another request to finish, which would free up memory. So, the scheduler would retry the mark operation once the memory is available.
+
+Another part is the Scheduled::retrying function. When a pass fails due to out of memory, and the gate's wait_for_memory returns true, the retrying function will retry the pass. So, if the memory is short, the scheduler will keep trying until another request finishes, freeing up memory.
+
+So, when Engine::mark is called and there's not enough GPU memory, the engine returns None. But the scheduler will check if there's enough memory via the gate's wait_for_memory. If there is, the scheduler will retry the mark operation. If not, the mark will fail, but the scheduler might not retry if the memory is not available.
+
+Wait, but the retrying function is called in the Scheduled::retrying method. So, when the pass fails (like out of memory), and the gate's wait_for_memory returns true, the retrying function will retry. So, the scheduler will keep trying until the memory is available or the request is canceled.
+
+So, in the case of Engine::mark being called with insufficient memory, the engine returns None, but the scheduler will check if there's enough memory. If there is, it will retry the mark. If not, the mark will fail, but the scheduler might not retry again unless the memory is freed by another request.
+
+But the question is about what happens when the GPU memory is short when Engine::mark is asked for a mark. So, the engine returns None, but the scheduler will wait for another request to finish, which would free up memory, allowing the mark to proceed.
+
+So, the answer would be that when Engine::mark is called with insufficient GPU memory, the engine returns None. However, the scheduler will check if there's enough memory via the gate's wait_for_memory. If there is, the scheduler will retry the mark operation. If not, the mark will fail, but the scheduler might not retry again unless another request finishes.
+
+Another point: the scheduler's retrying function is called in the Scheduled::retrying method. So, when the pass (mark) fails due to out of memory, and the gate's wait_for_memory returns true, the retrying function will retry. So, the scheduler will keep trying until the memory is available or the request is canceled.
+
+Therefore, when the GPU memory is short during Engine::mark, the engine returns None, but the scheduler will wait for another request to finish, freeing up memory, and then retry the mark operation.
+</think>
+
+When GPU memory is short during the call to `Engine::mark`, the behavior is as follows:
+
+---
+
+### **1. Engine::mark Behavior**
+- **Return Value**: The method returns `None` if the GPU memory is insufficient.
+- **Reason**: The `Engine::mark` method checks if the GPU has enough memory to store the mark. If the free memory is less than the required size (plus the GPU slack), it returns `None`.
+
+---
+
+### **2. Scheduler's Response**
+The scheduler (via the `Scheduled` struct) handles this by checking for memory availability using `Gate::wait_for_memory`. Here's how it works:
+
+#### **Retry Logic**
+- **Retry Function**: The `retrying` method is used to repeatedly attempt the decode step (or mark operation) until:
+  - The memory is available (via `Gate::wait_for_memory`).
+  - The request is canceled.
+
+#### **Key Points**
+- **Retry on Memory**: If the `Gate::wait_for_memory` returns `true` (indicating that another request has finished and freed memory), the scheduler will retry the operation.
+- **No Automatic Retry**: If the memory is not available and the request is not canceled, the scheduler will **not retry** the operation. The mark will fail, and the operation will return `None`.
+
+---
+
+### **3. Summary of Behavior**
+| Scenario | Outcome |
+|---------|----------|
+| **GPU memory is sufficient** | `Engine::mark` returns a valid `Mark` (possibly from the GPU or host memory). |
+| **GPU memory is insufficient** | `Engine::mark` returns `None`. The scheduler checks `Gate::wait_for_memory` and retries the operation if another request finishes. |
+| **No memory available** | The scheduler will **not retry** the mark operation. The mark fails, and the operation returns `None`. |
+
+---
+
+### **Final Answer**
+When GPU memory is short during `Engine::mark`, the engine returns `None`. The scheduler checks for memory availability via `Gate::wait_for_memory`. If memory is freed by another request, the scheduler retries the mark operation. If memory remains insufficient, the mark fails and the operation returns `None`.

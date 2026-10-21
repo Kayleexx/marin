@@ -1,0 +1,12 @@
+  › search "context.*size|context_size|default.*con…  267 matches in 116 files
+  › read README.md:30-50  21 lines
+The interactive chat uses a default context size of 2048 tokens.
+
+This is shown in the README.md at line 33, where the example command `marin
+--model ... --ctx 2048 plan` demonstrates the default context size for the
+interactive `marin` command. The documentation notes that `marin` and
+`marin-run` have different default context sizes, so you need to pass `--ctx`
+when comparing them.
+
+  2 tools · 187 tokens written · context 2,367/8,192 · 23.0 s
+

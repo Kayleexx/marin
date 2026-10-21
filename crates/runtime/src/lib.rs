@@ -72,6 +72,11 @@ pub trait CausalLm {
     /// and returns the logits that predict the token following the last one.
     fn forward(&self, tokens: &[u32], cache: &mut Self::Cache) -> Result<Vec<f32>, Self::Error>;
 
+    /// The rule for guessing ahead that suits this model's `forward_rows`.
+    fn speculation(&self) -> Speculation {
+        Speculation::MEASURED
+    }
+
     /// Most tokens `forward_rows` takes in one pass. 0 (the default) means the model has no fast way to check
     /// several tokens at once, and generation never guesses ahead.
     fn max_rows(&self) -> usize {

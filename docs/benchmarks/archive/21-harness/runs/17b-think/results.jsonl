@@ -1,0 +1,17 @@
+{"prompt": 1456, "gen": 659, "ttft_ms": 1370.0, "total_ms": 13870.0, "load_s": 2.65, "rss_peak_mb": 857.0, "gpu_gb": 4.97, "task": "L3", "split": "held", "cat": "lookup", "rc": 0, "prompt_sha": "60988556db0d"}
+{"prompt": 1449, "gen": 501, "ttft_ms": 1380.0, "total_ms": 10870.0, "load_s": 2.48, "rss_peak_mb": 857.0, "gpu_gb": 4.84, "task": "L4", "split": "held", "cat": "lookup", "rc": 0, "prompt_sha": "8de496ff1dd9"}
+{"prompt": 696, "gen": 334, "ttft_ms": 445.1, "total_ms": 6370.0, "load_s": 2.37, "rss_peak_mb": 856.0, "gpu_gb": 4.74, "task": "L5", "split": "held", "cat": "lookup", "rc": 0, "prompt_sha": "47ad7db69f69"}
+{"prompt": 1406, "gen": 427, "ttft_ms": 1310.0, "total_ms": 9330.0, "load_s": 2.48, "rss_peak_mb": 857.0, "gpu_gb": 4.84, "task": "L6", "split": "held", "cat": "lookup", "rc": 0, "prompt_sha": "00c8643ce246"}
+{"prompt": 2858, "gen": 1366, "ttft_ms": 4030.0000000000005, "total_ms": 34330.0, "load_s": 2.22, "rss_peak_mb": 857.0, "gpu_gb": 5.44, "task": "E2", "split": "held", "cat": "explain", "rc": 0, "prompt_sha": "83ad391df42b"}
+{"prompt": 1458, "gen": 1297, "ttft_ms": 1380.0, "total_ms": 26620.0, "load_s": 2.53, "rss_peak_mb": 856.0, "gpu_gb": 5.07, "task": "E3", "split": "held", "cat": "explain", "rc": 0, "prompt_sha": "ae76b4244b19"}
+{"prompt": 6331, "gen": 2048, "ttft_ms": 21020.0, "total_ms": 81180.0, "load_s": 2.56, "rss_peak_mb": 856.0, "gpu_gb": 6.38, "task": "LC2", "split": "held", "cat": "long", "rc": 0, "prompt_sha": "4525e8baf961"}
+{"prompt": 5355, "gen": 519, "ttft_ms": 13800.0, "total_ms": 27400.0, "load_s": 2.43, "rss_peak_mb": 856.0, "gpu_gb": 5.82, "task": "LC3", "split": "held", "cat": "long", "rc": 0, "prompt_sha": "6dacaec2e23d"}
+{"prompt": 499, "gen": 810, "ttft_ms": 295.4, "total_ms": 14760.0, "load_s": 2.54, "rss_peak_mb": 856.0, "gpu_gb": 4.75, "task": "LC4", "split": "held", "cat": "long", "rc": 0, "prompt_sha": "1df21389cfcd"}
+{"prompt": 399, "gen": 286, "ttft_ms": 220.7, "total_ms": 5130.0, "load_s": 2.39, "rss_peak_mb": 856.0, "gpu_gb": 4.62, "task": "TC3", "split": "held", "cat": "tool", "rc": 0, "prompt_sha": "67c35a3d01b1"}
+{"prompt": 399, "gen": 419, "ttft_ms": 230.6, "total_ms": 7370.0, "load_s": 2.34, "rss_peak_mb": 857.0, "gpu_gb": 4.6, "task": "TC4", "split": "held", "cat": "tool", "rc": 0, "prompt_sha": "530dddffaa8e"}
+{"prompt": 395, "gen": 288, "ttft_ms": 220.1, "total_ms": 5180.0, "load_s": 2.06, "rss_peak_mb": 857.0, "gpu_gb": 4.62, "task": "TC5", "split": "held", "cat": "tool", "rc": 0, "prompt_sha": "ab76880aff7c"}
+{"prompt": 395, "gen": 32, "ttft_ms": 225.2, "total_ms": 662.8, "load_s": 2.13, "rss_peak_mb": 857.0, "gpu_gb": 4.51, "task": "TC6", "split": "held", "cat": "tool", "rc": 0, "prompt_sha": "36939fcbecbc"}
+{"prompt": 54, "gen": 918, "ttft_ms": 44.6, "total_ms": 15910.0, "load_s": 2.01, "rss_peak_mb": 857.0, "gpu_gb": 4.62, "task": "C3", "split": "held", "cat": "chat", "rc": 0, "prompt_sha": "368d1c5c9f3f"}
+{"prompt": 38, "gen": 246, "ttft_ms": 43.1, "total_ms": 4180.0, "load_s": 2.13, "rss_peak_mb": 857.0, "gpu_gb": 4.49, "task": "C4", "split": "held", "cat": "chat", "rc": 0, "prompt_sha": "6685a29bc1d1"}
+{"prompt": 33, "gen": 1549, "ttft_ms": 42.4, "total_ms": 27450.0, "load_s": 2.35, "rss_peak_mb": 857.0, "gpu_gb": 4.82, "task": "C5", "split": "held", "cat": "chat", "rc": 0, "prompt_sha": "fecfb698afc1"}
+{"prompt": 20, "gen": 127, "ttft_ms": 43.2, "total_ms": 2170.0, "load_s": 1.97, "rss_peak_mb": 857.0, "gpu_gb": 4.45, "task": "C6", "split": "held", "cat": "chat", "rc": 0, "prompt_sha": "db284cd61877"}

@@ -1,0 +1,13 @@
+  prompt          1410 tokens
+  generated       271 tokens
+  first token     1.40 s   (prompt pass 1.40 s + first sample)
+  prefill         1008.2 tok/s
+  decode          45.43 tok/s   (5.94 s for 270 tokens)
+  token latency   p50 21.0 ms · p95 30.1 ms · max 39.2 ms
+  sampling        38.8 ms in total (0.5% of the reply)
+  total           7.34 s
+  weights         3.44 GB · bf16 weights
+  kv cache        470 MB held for 27 pages, up to 2.35 GB · 386 MB in use (1,681 of 10,240 positions)
+  model load      2.78 s
+  process memory  261 MB now · 857 MB peak
+  gpu memory      4.89 GB of 8.11 GB in use (all programs)

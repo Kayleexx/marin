@@ -1,0 +1,9 @@
+The user wants to see the files in the tests directory, two levels deep. I need to use the list_files tool with path "tests" and depth 2.
+</think>
+
+<tool_call>
+<function=list_files>
+<path>tests</path>
+<depth>2</depth>
+</function>
+</tool_call>

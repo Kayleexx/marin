@@ -1,0 +1,88 @@
+Based on the provided code in `sched.rs` and `engine_session.rs`, here is the step-by-step breakdown of what happens when a request calls `forward` with a single token while batching is enabled, and how failures are handled.
+
+### 1. Entry Point: `forward` in `Scheduled`
+
+When `forward` is called on a `Scheduled` instance with a single token (`tokens.len() == 1`) and the gate has batching enabled (`self.gate.batching()` is true), the logic enters the first branch of the `if` statement:
+
+```rust
+if tokens.len() == 1 && self.gate.batching() {
+    return self.retrying(|| self.decode(tokens, cache));
+}
+```
+
+**Action:** It immediately delegates to the `retrying` helper function, passing a closure that calls `decode`. It skips the loop that handles chunking.
+
+### 2. Execution: `decode`
+
+Inside `decode`, the following checks and operations occur:
+
+1.  **Cancellation Check:**
+    ```rust
+    if self.cancelled() { return Err(ScheduleError::Cancelled); }
+    ```
+    If the request was cancelled, it returns immediately.
+
+2.  **Resource Allocation (The "Lend" Phase):**
+    ```rust
+    let (Some(spare), Some(token)) = (EngineCache::vacant(), tokens.first().copied()) else {
+        return Err(ScheduleError::Model(ModelError::NoTokens));
+    };
+    let lent = std::mem::replace(cache, spare);
+    ```
+    *   It creates a temporary empty cache (`vacant`) to act as a placeholder.
+    *   It swaps the current `cache` with this empty placeholder. The original `cache` (containing the history) is now stored in `lent`.
+    *   This allows the GPU to reuse the memory currently held by `cache` for other requests.
+
+3.  **Batched Forward Pass:**
+    ```rust
+    let (back, logits) = self
+        .gate
+        .decode(self.lane, token, lent, |steps| {
+            self.loaded.model.decode_batch(steps)
+        })
+        .ok_or(ScheduleError::Lost)?;
+    ```
+    *   It calls `gate.decode`, which executes `model.decode_batch`.
+    *   `decode_batch` (defined in `engine_session.rs`) checks if the engine supports batching (Qwen3.5Cuda does).
+    *   It runs the forward pass for the token using the `lent` cache.
+    *   It returns `back` (the updated cache with the new token added) and `logits` (the output).
+
+4.  **Cache Restoration:**
+    ```rust
+    *cache = back;
+    ```
+    The updated cache is written back to the caller's `cache` variable.
+
+5.  **Return:**
+    ```rust
+    Ok(logits?)
+    ```
+    If successful, it returns the logits.
+
+### 3. Failure Handling: The `retrying` Loop
+
+If the `decode` call fails, control returns to the `retrying` closure inside `forward`. The `retrying` function implements a specific retry strategy for Out-Of-Memory (OOM) errors:
+
+```rust
+fn retrying<T>(&self, mut pass: impl FnMut() -> Result<T, ScheduleError>) -> Result<T, ScheduleError> {
+    loop {
+        match pass() {
+            Err(e)
+                if e.is_out_of_memory()
+                    && self.gate.wait_for_memory(self.lane, || self.cancelled()) => {}
+            other => return other,
+        }
+    }
+}
+```
+
+**Scenario A: Non-OOM Failure**
+If `decode` returns an error that is **not** `ScheduleError::Model(ModelError::OutOfMemory)` (e.g., `Cancelled`, `Lost`, or `NoTokens`), the `match` arm `other` executes, and the error is returned immediately. No retry happens.
+
+**Scenario B: OOM Failure**
+If `decode` returns `ScheduleError::Model(ModelError::OutOfMemory)`:
+1.  The code checks `self.gate.wait_for_memory(self.lane, || self.cancelled())`.
+2.  **Logic:** This function waits until another request finishes (freeing GPU memory) or until the current request is cancelled.
+3.  **If Memory is Freed:** The loop continues, calling `pass()` (which calls `decode`) again.
+    *   **Crucial Detail:** Because `decode` uses `std::mem::replace(cache, spare)`, the `cache` passed to the retry is the **original** cache (before the swap).
+    *   Since

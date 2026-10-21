@@ -1,0 +1,21 @@
+  › search "shared.*prompt" in crates  6 matches in 6 files
+  › read crates/cli/src/server/prefix.rs:1-56  56 lines
+  › read crates/cli/src/server/request.rs:1-100  100 lines
+The shared prompt prefix is built in `crates/cli/src/server/request.rs` in the
+`default_prefix` function (lines 50-70).
+
+It contains the longest common prefix of two tokenized prompts:
+- First prompt: `"Hello"` with the default system message
+- Second prompt: `"The quick brown fox"` with the default system message
+
+The function:
+1. Encodes both prompts into token sequences
+2. Finds how many tokens are identical at the start (the shared prefix)
+3. Returns only those shared tokens as a `Vec<u32>`
+
+This prefix is then used in `crates/cli/src/server/prefix.rs` to enable prompt
+reuse across sessions when the same prefix appears at the start of a new
+conversation.
+
+  3 tools · 275 tokens written · context 2,836/8,192 · 28.6 s
+

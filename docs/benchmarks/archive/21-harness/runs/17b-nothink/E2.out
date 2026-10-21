@@ -1,0 +1,72 @@
+When **GPU memory is short** and `Engine::mark` is called for a `Mark`, the behavior depends on the **engine type** and the **scheduler**'s handling of memory constraints.
+
+---
+
+### 🔍 **What happens when GPU memory is short and `Engine::mark` is called?**
+
+#### 1. **For Qwen3.5 Cuda Engine (Qwen35Cuda):**
+- The `Engine::mark` method tries to **snapshot the GPU state** (i.e., save the current state of the model's GPU memory).
+- If the **GPU memory is short**, the `mark` operation will **fail** with an error.
+- The `Engine::mark` will **return `None`** or **throw an error** depending on the engine and the memory state.
+
+#### 2. **For Other Engines (e.g., Cpu, Granite, etc.):**
+- The `Engine::mark` method will **return `None`** because it doesn't support GPU memory snapshots.
+- The `Engine::mark` will **not** fail in this case.
+
+---
+
+### 🔄 **What does the scheduler do when a pass runs out of memory?**
+
+The **scheduler** (in the `Scheduled` struct) is responsible for managing multiple requests and ensuring that the GPU memory is not exceeded.
+
+#### 1. **When a pass runs out of memory:**
+- The `retrying` function is used to **retry the pass** until it succeeds or memory is freed.
+- The `retrying` function checks if the `Gate::wait_for_memory` returns `true`, which means another request has finished and memory is freed.
+- If memory is freed, the `retrying` function will **retry the pass** again.
+
+#### 2. **How the scheduler handles this:**
+- The `retrying` function is a **loop** that keeps trying the pass until it succeeds or memory is freed.
+- It uses `Gate::wait_for_memory` to check if memory is available.
+- If memory is available, the pass is retried.
+- If memory is not available, the pass will **block** until another request finishes.
+
+#### 3. **Example:**
+```rust
+fn retrying<T>(
+    &self,
+    mut pass: impl FnMut() -> Result<T, ScheduleError>,
+) -> Result<T, ScheduleError> {
+    loop {
+        match pass() {
+            Err(e)
+                if e.is_out_of_memory()
+                    && self.gate.wait_for_memory(self.lane, || self.cancelled()) => {}
+            other => return other,
+        }
+    }
+}
+```
+
+- The `retrying` function will **keep trying** the `pass` until:
+  - The `pass` returns a result (success).
+  - The `Gate::wait_for_memory` returns `true` (memory is freed).
+  - The `cancel` flag is set (request is cancelled).
+
+---
+
+### 📌 **Summary**
+
+| Scenario | What Happens | What the Scheduler Does |
+|---------|---------------|--------------------------|
+| **GPU memory is short** and `Engine::mark` is called | Fails with `ModelError::OutOfMemory` for Qwen3.5 Cuda | Returns `None` or throws an error |
+| **Pass runs out of memory** | The `retrying` function tries again until memory is freed or the request is cancelled | Retries the pass using `Gate::wait_for_memory` |
+
+---
+
+### ✅ **Key Takeaways**
+
+- **Qwen3.5 Cuda** requires GPU memory for `mark`, and it fails if memory is short.
+- **Scheduler** handles memory by retrying passes until memory is freed or the request is cancelled.
+- **Engine::mark** returns `None` or throws an error for Qwen3.5 Cuda when memory is short.
+
+Let me know if you'd like a diagram or code snippet showing the flow!

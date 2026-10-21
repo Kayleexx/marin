@@ -1,0 +1,69 @@
+# V10-A model capability and quality evaluation (2026-10-21)
+
+Machine: Ryzen 7 260, 16 GB RAM, RTX 5050 Laptop 8 GB at 40 W. Greedy decoding (temp 0), --ctx 8192.
+
+## Gates (written before any evaluation run)
+
+Baseline B = Qwen3.5-4B Q8 CUDA, non-thinking (what Marin runs today).
+Split: development tasks may be used to fix the HARNESS (parsing, timing). Prompts and references are frozen
+before the held-out run; the held-out set runs once per configuration and nothing is changed after it.
+Grading: numbers, JSON and tool calls are checked by exact rules; explanations are read against a written reference.
+A keyword hit never passes an answer. A reply cut off by the token limit fails. No parser repair is applied
+(tool calls must match the form the prompt teaches, character for character).
+
+Q1 a configuration X is worth routing TO for hard work if held-out passes >= B + 3 (of 17 single-shot) AND median
+   completion time <= 3x B's AND no more malformed tool calls than B.
+Q2 a configuration X is worth routing TO for light work (chat, lookup) if held-out passes >= 0.8 x B's on those
+   categories AND median completion time <= 0.6 x B's.
+R1 peak GPU memory (all programs) <= 6.5 GB and model load <= 10 s, or the configuration is not routable here.
+T1 any model used for tool tasks must write 0 malformed calls in the held-out tool-format tasks.
+V10 GO (automatic routing) only if some configuration passes Q1 or Q2 and R1 against B; otherwise NO-GO and
+the product keeps one model and exposes thinking as an explicit option.
+Small n (17 held-out single-shot, 8 repository tasks): a difference under 3 tasks is noise and is reported as such.
+
+## V8 boundary check (done first)
+Speculation is reachable only through `--speculate` (marin-run, marin chat, `turns`); `Session.speculate` defaults to
+false; the server (`server/completion.rs:195`), `bench/measure.rs:81` and every test default pass `speculation: None`;
+the rule comes from `CausalLm::speculation()` and only Qwen3.5 CUDA reports `max_rows` > 0, so other models run plain.
+No exposure found, no source change except a wrong comment on `Speculation::SHORT_PASS` (it said "a longer match"; 4 is
+shorter than 8). fmt, check, clippy -D warnings, line-limit, unsafe clean; suites not re-run (comment only).
+
+## Inventory (what the tree really supports as chat models; no downloads)
+| Folder | Chat? | Backend, memory here |
+|---|---|---|
+| Qwen3.5-4B-Q8 (packed int8 of Qwen3.5-4B) | yes, template has enable_thinking | CUDA 4.35 GB weights, 5.5-6.0 GB all programs; CPU INT8 also GO |
+| Qwen3-1.7B | yes, template has enable_thinking | CUDA BF16 3.8 GB; CPU default |
+| Qwen3-0.6B | yes (not run) | CPU/CUDA |
+| Qwen3.5-2B-Base, Qwen3-*-Base | no, base models | completion only |
+| Granite 3.0 1B-A400M | pilot only (CUDA/INT8 NO-GO) | not run |
+| Granite 4.0 H-Tiny | blocked, no implementation | - |
+
+## Thinking
+Both Qwen templates support it (default open `<think>`; `enable_thinking=false` appends an empty think block).
+Marin's chat layer (`crates/chat/src/qwen3.rs`, `NO_THINKING`) always renders non-thinking, matching HF for that mode.
+Thinking is therefore not reachable through chat, serve or code; it was run by rendering the official template here and
+passing it to `marin-run -p` (Qwen3.5: `<think>\n` after the assistant marker; Qwen3: nothing after it).
+
+## Results
+Held-out (17 single-shot tasks, frozen before the run; per-task rows in 21-harness/runs/grades.txt):
+4b-nothink 13/17, 4b-think 12/17, 17b-nothink 8/17, 17b-think 9/17 (see BENCHMARKS.md for the breakdown).
+Manual grades (21-harness/runs/manual.json): all 16 lookup answers correct (17b says `None` for `Ok(None)`: accepted);
+E2 4B-non-thinking fail (host mark right, then claims the mark is unusable), 4B-thinking pass, both 1.7B fail;
+E3 4B-non-thinking pass, 4B-thinking cut at 2,048 tokens, both 1.7B fail (invent parallel chunks).
+LC2 failed everywhere (truth order 257; 4B non-thinking said 076, the second highest bolt price).
+Tool format, strict, no repair: 4B non-thinking 2/4 right (TC4 and TC6 wrote `<path>`/rambled), 4B thinking 1/4, 1.7B 0/4
+(wrote `<parameter=retry_limit>`, missing closing tags). Dev set (8 tasks, used to fix the harness only): 4B non-thinking 4/8, thinking 5/8.
+Repository navigation, 25 tasks via `marin code` (4B, non-thinking, current tree, graded against the code): 15 pass;
+dev 9/17, held-out 6/8 (earlier run: 16/25, 9/17 and 7/8). Fails: t2, b5 (ran out of rounds), a2 (call site), a3 (said the
+first Ctrl-C is ignored), a5 (wrong condition), a7 (README example, truth 4096), a9, a11, a12, b4. 76 tool calls, 10 invalid,
+17 repaired, 3 failed; median 26.8 s, 216,923 prompt tokens, 9,329 written. Thinking was not run here: it is not exposed.
+Cost: load 2.4-3.7 s per process; peak process RSS 857-937 MB; GPU 5.97-6.38 GB (all programs, incl. about 0.8 GB desktop).
+Cold-process prefill is 134 tok/s for the 4B (12 s for 1.6k tokens) and about 1,100 tok/s for the 1.7B.
+
+## Gates
+Q1 (thinking 4B vs 4B): 12 vs 13, median 25.2 vs 11.2 s: FAIL. Q1 for the 1.7B: FAIL (8 and 9).
+Q2 (1.7B for light work): lookup+chat 6/8 vs 8/8 = 0.75 < 0.8, and 4.8 s vs 6.0 s = 0.8x > 0.6x: FAIL.
+R1: 4B and 1.7B pass; T1: no configuration has 0 malformed calls, including the baseline (so the client keeps repair).
+Decision: V10 automatic routing NO-GO. Differences under 3 tasks (n=17) are noise.
+Limits: small n; one greedy run per task; the explanation and lookup tasks are drawn from this repository; LC2 and
+the tool tasks use a shared prompt that was taught to the 4B only (the 1.7B does not use this XML form natively).
