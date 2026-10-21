@@ -1,0 +1,88 @@
+Performance cross-check (Track A) and memory-hierarchy feasibility (Track B), Qwen3.5-4B-Q8 INT8 on the RTX 5050 laptop GPU
+(8 GB, 40 W cap, ~0.75 GB held by the desktop), Ryzen 7 260, release builds, no source change. Harness sources and scripts are in
+17-harness/ (they are temporary integration tests, kept as .txt). GPU idle before every run (temperature <= 52 C unless noted).
+
+A. Are ~914 ms TTFT / ~140 prefill / ~31 decode tok/s expected or a regression?
+ 1. Matched A/B, interleaved, same flags (17-harness/ab_matched.sh; old = commit cde2c44, the Qwen3.5 CUDA commit that produced
+    the accepted baselines; new = this tree), marin-run bench --sample-gpu, power cap active in 100% of busy samples:
+      128 in / 64 out, 3 runs + 1 warmup:  OLD 949.8 / 942.6 ms, 134.8 / 135.8 prefill, 40.21 / 40.37 decode
+                                           NEW 949.3 / 918.2 ms, 134.9 / 139.4 prefill, 40.30 / 40.40 decode
+      512 in / 4 out, 1 run, no warmup (the accepted-baseline shape; 3 decode steps only):
+                                           OLD decode 29.47 / 29.08 / 36.37   NEW 35.30 / 29.40 / 28.16   (baseline row: 35.91)
+      2048 in / 4 out:                     OLD 127.8 prefill, 39.73 decode      NEW 128.4 prefill, 37.68 decode  (baseline 128.4, 38.03)
+    -> no regression. The accepted 4-token decode figures (27.3, 35.9, 38.0) are single 3-step measurements with a +-15% spread
+       from clock ramp; steady decode is 40.0-40.6 tok/s.
+ 2. Controls for the 31 tok/s seen earlier the same day with the same binary (17-harness/sampling_control.sh and inline):
+      no sampling / --sample-gpu / external nvidia-smi poller: 40.63 / 40.04 / 40.09, 40.21 / 40.23 / 39.86, 40.62 / 39.69 / 39.96
+      4 busy CPU loops: 39.64 (idle 39.97);  tiny-model GPU job running alongside: decode 40.5 (unchanged), prefill -7%, TTFT +8%
+      hot start (59 C, 1657 MHz) 39.47 / 39.40 vs cool 40.01 / 39.99;  pinned to one core, busy SMT sibling: 40.25-40.35
+      memory clock 12001 MHz, P0, while busy. The 31 tok/s runs (and one 28.4 on the first run of the day) could not be reproduced and
+      are recorded as an environmental difference of that session (the scalar test suite and a user session shared the machine).
+ 3. /bench inside marin: 40.05 / 39.75 decode, 950 / 1014 ms first token, 134.7 / 126.2 prefill (two consecutive runs).
+ 4. Conversations (17-harness/chat_turns.rs.txt; chat, ctx 4096, greedy, 24-token replies; Outcome fields, not benchmark caches):
+      turn 1  prompt 363 reused 0     read 363  ttft 2801 ms (129.6 tok/s)  decode 38.3
+      turn 2  prompt 720 reused 356   read 364  ttft 2989 ms (121.8)         decode 35.4
+      turn 5  prompt 1791 reused 1427 read 364  ttft 3052 ms (119.3)         decode 36.9
+      turn 6  prompt 1831 reused 1784 read 47   ttft  447 ms (105.2)         decode 35.3   (warm, short)
+      resume by replay            1871 tokens read 1871   ttft 14942 ms (125.2 tok/s)
+      resume from checkpoint      restore 1.12 s + ttft 360 ms (read 47), 173 MB, checkpoint save 1.17 s
+    The chat prefill (115-130 tok/s) is below the one-pass 140: 64-token slices (cancellable) and a growing KV. Warm turns read only
+    the new tokens, so reuse works; a fresh benchmark prompt reads everything, which is why /bench TTFT is much larger than a warm turn.
+ 5. Code mode (marin code --log, 3 questions, ctx 8192): reply prompts 476 -> 1934 -> 3347 -> 4784 tokens, each round 12.9-13.6 s for
+    ~1,440 new tokens (the 4 KB file result), i.e. ~110-125 tok/s of new tokens and no replay; later questions 2.8-3.1 s each.
+
+B. Memory
+ 1. Static (marin plan, free VRAM 7.27 GB): ctx 4096 KV window 268 MB + rollback reserve 322 MB; ctx 15360 admitted (full window
+    6.69 GB + 512 MiB safety); ctx 16384 refused (needs 7366 MB); 32768 needs 9548 MB. crates/model/src/qwen35/gpu_budget.rs counts the
+    KV window twice (live cache + staged copy) plus one more startup slab. Per token: 64 KiB of F32 attention KV (8 of 32 layers);
+    fixed: 53 MB of DeltaNet state; ~390 MB workspace after the first long prefill; weights 4.35 GB; desktop ~0.75 GB.
+ 2. Why: gpu_forward.rs stages the whole cache for every forward pass (cache.stage -> DeviceKv::clone_prefix) and swaps it in on success.
+    Trace (17-harness/memory_trace.rs.txt, device-wide used MiB): loaded 5012 -> after a 3,008-token prefill +644 -> after the next
+    decode token, with a checkpoint copy alive, +868; at 9,856 tokens: live KV+state 691 MiB, +1,490 after prefill, +2,167 after one
+    decode token with the checkpoint copy (live + copy + staged = three caches). session_checkpoint needs copy bytes + 512 MiB
+    slack free: at 9,856 tokens free was 1,231 MiB -> REFUSED in one run, 1,286 MiB -> made in the next (the edge).
+ 3. Context scaling, marin-run bench --profile, 17 tokens, 1 run (17-harness/context_scaling.sh):
+      prompt    first token   prefill      decode (ms/token)      peak device VRAM
+        128        0.9 s       143.4 tok/s   37.0  (22.5)            5.42 GB
+       2048       16.0 s       127.7         36.3  (27.4)            5.73
+       8192       81.5 s       100.6         27.3  (36.3)            6.55
+      14336      191.5 s        74.9         21.9  (45.5)            7.41
+    Profile at 8192 (decode, ms/token): state transaction copy 10.02 (28.3%), mlp 8.40, attention 4.14, qkv 4.14, DeltaNet 2.75, lm head
+    1.90, output projection 1.49, norm 0.87; everything else < 0.3. Prefill: one 8,192-token pass copies once (0.24 ms).
+    So the copy is the whole difference between 25.4 and 35.4 ms at 8k: 40 -> 28 tok/s without it, from ~64 MiB x 2 per 1k tokens.
+ 4. Long chat (17-harness/long_chat.rs.txt, ctx 15360, 1,400-token turns, 8-token replies, reuse on):
+      turns 1-6  reused all but the new 1,406 tokens, 11-17 s each, process VRAM 4.8 -> 6.2 GB
+      turn 7     9,815 tokens: no checkpoint copy was possible (cache holds prompt+reply, 9,822), 17.2 s
+      turn 8     11,214 tokens: 123.2 s     turn 9  12,613: 155.0 s     turn 10  14,012: 180.3 s
+    From turn 8 the cache is cut back to the shared prefix, a hybrid cache cannot do that without replaying, and each turn re-reads the
+    whole conversation (77-91 tok/s). Outcome.reused still reports 9,811 / 11,210 / 12,609 for those turns. Nothing tells the user.
+ 5. Transfers (temporary probe on the cuda crate, best of 4): pageable D2H 9.5-9.9, H2D 10.5-11.0 GB/s; pinned 14.4-14.5 GB/s both
+    ways (PCIe 4.0 x8); pinned allocation 11 ms (64 MiB), 138 ms (256), 191 ms (512), 370 ms (1 GiB). Earlier page-by-page export
+    measured 4.5 GB/s. 512 MiB: 37 ms pinned, 50-56 ms pageable.
+
+C. Where offloaded state could live, against replay and the checkpoint file (Qwen3.5-4B-Q8, 64 KiB/token + 53 MB)
+    8k tokens = 563 MiB:  replay 69-80 s | disk checkpoint restore ~1.4 s (1 s weight hash) | pinned RAM H2D 37 ms | pageable 50 ms
+    Active decode streaming: attention reads every token's KV every step: 512 MiB per token at 8k = 37 ms at 14.4 GB/s against a
+      4.1 ms attention stage and 25 ms of compute; at 14k 64 ms. Transfer-bound; only sparse/windowed attention avoids it and that changes numerics.
+    Parking an idle session (not generating) in pinned RAM costs one D2H + one H2D (~75 ms at 8k) and avoids ~70 s of replay or 1.4 s of disk.
+
+D. V5 gates (all must hold)
+    G1 need:   a workload whose idle state does not fit in VRAM after the O(state) fix below (> ~36k tokens of resident KV, or more concurrent
+               sessions than VRAM holds), and whose prefill (~100 tok/s) is worth keeping (a 36k context took > 5 min to build).
+    G2 cost:   restore of a parked state <= 10% of its replay time and <= the checkpoint-file restore; decode inter-token latency of an
+               active sequence within +10% (so no per-token streaming of KV).
+    G3 parity: bit-identical logits against a resident run (a copy, so achievable); HF verification unchanged.
+    G4 safety: admission refuses before OOM, a failed or cancelled move leaves the session intact, memory returns to baseline after.
+    Today: G1 fails (the binding limit is the per-pass copy, not capacity), G2 passes only for parking, not for active KV.
+    Decision: V5 tiering NO-GO now. Recommended next milestone: make the hybrid GPU pass O(state): snapshot only the 53 MB of DeltaNet
+    state (24 x (conv + recurrent)) before a pass, truncate the append-only KV pages on failure and restore the snapshot, in place of
+    cache.stage / clone_prefix; the chat checkpoint becomes the same 53 MB snapshot plus a KV length. Expected (from the profile above): decode
+    at 8k 27 -> ~40 tok/s, at 14k 22 -> ~38; peak KV from three caches to one (admitted context ~15.4k -> ~30k+ on this GPU);
+    no replay cliff before the window. Gates: bit-identical logits and checkpoint/rollback tests, HF verification, no decode regression at
+    128 tokens (copy there is already ~0.2 ms), long-context chat keeps reuse past 15k.
+
+E. Findings not fixed (no source change this cycle)
+    - Outcome.reused counts tokens kept in the record, not tokens a hybrid cache avoided re-reading: after a forced truncation the
+      engine replays everything. (runtime/src/generate.rs:131-142; the replay is gpu_cache.rs truncate -> replay.)
+    - A checkpoint refused for lack of VRAM is silent: the next turn replays (123-180 s above).
+    - 72 device allocations per forward pass (decode too): 29 ms of 31 ms is the CPU waiting for the GPU, so it is not the limit today.

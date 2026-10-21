@@ -20,9 +20,9 @@ pub(super) enum ScheduleError {
 }
 
 /// How many requests may run at once. Each holds its own state (KV and recurrent) for the whole `--ctx` window;
-/// the free GPU memory after loading, minus the safety slack that covers activations, must also hold one idle
-/// session and the staged copy of the one prefill pass in flight (a batched decode step stages nothing). Anything
-/// but Qwen3.5 on CUDA runs one request.
+/// the free GPU memory after loading, minus the safety slack that covers activations and the small marks of the
+/// recurrent state a pass keeps, must also hold one idle session (a full copy). A pass copies none of the keys and
+/// values, and a batched decode step copies nothing. Anything but Qwen3.5 on CUDA runs one request.
 pub(super) fn max_active(loaded: &Loaded) -> usize {
     let Engine::Qwen35Cuda(_) = &loaded.model else {
         return 1;
@@ -42,7 +42,7 @@ pub(super) fn max_active(loaded: &Loaded) -> usize {
         .unwrap_or(0);
     usize::try_from(copies)
         .unwrap_or(usize::MAX)
-        .saturating_sub(2)
+        .saturating_sub(1)
         .clamp(1, MAX_ACTIVE)
 }
 

@@ -54,9 +54,9 @@ pub struct Session {
     kv: EngineCache,
     /// Dies with `loaded`: a new model, tokenizer or context size makes a new `Session`.
     retained: Retained,
-    /// A copy of the cache and its tokens at the end of the prompt of the last `prefill`, which the cache returns to
+    /// A mark of the cache and its tokens at the end of the prompt of the last `prefill`, which the cache returns to
     /// after the reply so the next prompt extends it instead of replaying the conversation.
-    boundary: Option<(EngineCache, Vec<u32>)>,
+    boundary: Option<(model::qwen35::Mark, Vec<u32>)>,
     /// Off when a tool needs full replays.
     pub reuse: bool,
     pub settings: Settings,

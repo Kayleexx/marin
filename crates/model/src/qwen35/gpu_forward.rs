@@ -6,10 +6,29 @@ use super::math::{invalid, size};
 use crate::qwen3::gpu_probe::GpuProbe;
 use crate::{ModelError, Observer};
 use cuda::{DeltaDims, DeltaInputs, DeviceKv, Gpu};
-use metrics::{Stage, StageTimes};
-use runtime::SequenceCache;
+use metrics::Stage;
 
-const CHUNK: usize = 512;
+#[cfg(test)]
+thread_local! {
+    /// Layers still to run before a test's injected failure; `None` means no failure is armed.
+    pub(super) static FAIL_AFTER_LAYERS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether the layer about to run is the one a test asked to fail.
+#[cfg(test)]
+fn injected_failure() -> bool {
+    FAIL_AFTER_LAYERS.with(|armed| match armed.get() {
+        Some(0) => {
+            armed.set(None);
+            true
+        }
+        Some(left) => {
+            armed.set(Some(left.saturating_sub(1)));
+            false
+        }
+        None => false,
+    })
+}
 
 /// The sequences one pass serves: the chunk of a single sequence, or one token each of several.
 pub(super) enum Rows<'a> {
@@ -19,78 +38,6 @@ pub(super) enum Rows<'a> {
         /// Single-row buffers the per-sequence stages work in.
         scratch: Box<Workspace>,
     },
-}
-
-pub(super) fn forward(
-    model: &Qwen35Gpu,
-    tokens: &[u32],
-    cache: &mut GpuCache,
-    mut observe: crate::Observer<'_>,
-    times: Option<&mut StageTimes>,
-) -> Result<Vec<f32>, ModelError> {
-    if tokens.is_empty() {
-        return Err(ModelError::NoTokens);
-    }
-    if cache.owner != model.owner() {
-        return Err(invalid("cache belongs to a different Qwen3.5 GPU model"));
-    }
-    let end = cache
-        .used()
-        .checked_add(tokens.len())
-        .ok_or_else(|| invalid("context overflow"))?;
-    if end > cache.capacity {
-        return Err(kv::KvError::ContextFull {
-            needed: end,
-            capacity: cache.capacity,
-        }
-        .into());
-    }
-    for id in tokens {
-        if *id as usize >= model.config().vocab_size {
-            return Err(ModelError::TokenOutOfRange {
-                token: *id,
-                vocab: model.config().vocab_size,
-            });
-        }
-    }
-    let mut probe = GpuProbe::new(&model.gpu, times);
-    let mut staged = probe.stage(Stage::StateCopy, || {
-        cache.stage(&model.gpu, &model.config, &model.layers)
-    })?;
-    let mut input = Vec::new();
-    input
-        .try_reserve_exact(if cache.replay { end } else { tokens.len() })
-        .map_err(|e| invalid(format!("GPU input allocation: {e}")))?;
-    if cache.replay {
-        input.extend_from_slice(&cache.tokens);
-    }
-    input.extend_from_slice(tokens);
-    let mut logits = Vec::new();
-    let chunk_count = input.len().div_ceil(CHUNK);
-    for (i, chunk) in input.chunks(CHUNK).enumerate() {
-        logits = pass_chunk(
-            model,
-            &mut Rows::One(&mut staged),
-            chunk,
-            &mut probe,
-            if i.saturating_add(1) == chunk_count {
-                observe.take()
-            } else {
-                None
-            },
-        )?;
-    }
-    probe.finish()?;
-    staged
-        .tokens
-        .try_reserve(tokens.len())
-        .map_err(|e| invalid(format!("GPU token ledger: {e}")))?;
-    if cache.replay {
-        staged.tokens.extend_from_slice(&cache.tokens);
-    }
-    staged.tokens.extend_from_slice(tokens);
-    *cache = staged;
-    Ok(logits)
 }
 
 pub(super) fn pass_chunk(
@@ -113,6 +60,10 @@ pub(super) fn pass_chunk(
     })?;
     watch(&mut observe, gpu, 0, &ws.hidden, c.hidden_size)?;
     for (index, layer) in model.layers.iter().enumerate() {
+        #[cfg(test)]
+        if injected_failure() {
+            return Err(invalid("injected failure"));
+        }
         probe.layer(Some(index));
         probe.stage(Stage::Norm, || {
             Ok(gpu.rms_norm_into(

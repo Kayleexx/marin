@@ -4,6 +4,8 @@ mod generate;
 #[cfg(test)]
 mod generate_tests;
 mod ngram;
+#[cfg(test)]
+mod replay_tests;
 mod reuse;
 #[cfg(test)]
 mod reuse_tests;
@@ -34,6 +36,11 @@ pub trait SequenceCache {
     fn clear(&mut self);
     /// Forgets every position from `len` on, so the next pass writes there; the positions below stay as they are.
     fn truncate(&mut self, len: usize) -> Result<(), RollbackError>;
+    /// True if the next pass reads the whole history again, because the cache could not be cut back in place (a cache
+    /// with recurrent state is cut back by starting over).
+    fn replays(&self) -> bool {
+        false
+    }
 }
 
 impl SequenceCache for KvCache {

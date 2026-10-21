@@ -1,0 +1,76 @@
+// Temporary integration test (crates/cli/tests/zz_turns.rs): fresh, warm, replay-resume and checkpoint-resume turns.
+// Run: MODEL=~/models/Qwen3.5-4B-Q8 cargo test --release -p cli --test zz_turns -- --nocapture
+//! TEMPORARY measurement harness for the performance investigation; deleted afterwards.
+use std::path::PathBuf;
+use std::time::Instant;
+
+use cli::config::Home;
+use cli::dialog::{Dialog, Talk};
+use cli::load::{ChatPrecision, load_chat};
+use cli::session::{Session, Settings};
+use cli::setup::precision_for_pick;
+use cli::signal::Interrupt;
+use cli::style::Style;
+use model::BackendChoice;
+use runtime::{Outcome, SequenceCache};
+
+fn session(model: &PathBuf, ctx: usize) -> (Session, f64) {
+    let asked = ChatPrecision { weights: None, kv: None };
+    let started = Instant::now();
+    let loaded = load_chat(model, (Some(ctx), ctx), BackendChoice::Cuda, precision_for_pick(asked, model), &Style::plain(), (false, false)).unwrap();
+    let load = started.elapsed().as_secs_f64();
+    let settings = Settings { max_tokens: 24, temperature: 0.0, top_k: 0, top_p: 1.0, seed: Some(1) };
+    (Session::new(loaded, settings, Style::plain()).unwrap(), load)
+}
+
+fn show(label: &str, wall: f64, o: &Outcome, held: usize) {
+    let decode_rate = if o.decode.as_secs_f64() > 0.0 { o.generated.saturating_sub(1) as f64 / o.decode.as_secs_f64() } else { 0.0 };
+    let read = o.prompt_tokens - o.reused;
+    println!(
+        "TURN {label:<28} wall {wall:6.2}s | prompt {:5} reused {:5} read {:5} | ttft {:6.0}ms (prompt pass {:6.0}ms = {:5.1} tok/s) | generated {:2} decode {:5.1} tok/s | cache {held} tok",
+        o.prompt_tokens, o.reused, read, o.prefill.as_secs_f64() * 1e3, o.prompt_forward.as_secs_f64() * 1e3,
+        if o.prompt_forward.as_secs_f64() > 0.0 { read as f64 / o.prompt_forward.as_secs_f64() } else { 0.0 }, o.generated, decode_rate
+    );
+}
+
+fn ask(dialog: &mut Dialog, session: &mut Session, interrupt: &Interrupt, label: &str, text: &str) {
+    let started = Instant::now();
+    let reply = dialog.chat.ask(session, text, interrupt, &mut Vec::new()).unwrap();
+    show(label, started.elapsed().as_secs_f64(), &reply.outcome, session.kv().used());
+}
+
+#[test]
+fn turns() {
+    let model = PathBuf::from(std::env::var("MODEL").unwrap());
+    let interrupt = Interrupt::unhooked();
+    let home_dir = std::env::temp_dir().join(format!("marin-zz-{}", std::process::id()));
+    let home = Home::new(home_dir.clone(), home_dir.clone());
+    let filler = |n: usize| format!("Note {n}: the lighthouse keeper climbed the spiral stairs each evening, trimmed the lamp and watched the ships. ").repeat(14);
+    let (mut s, load) = session(&model, 4096);
+    println!("LOAD {load:.2}s ctx 4096");
+    let mut dialog = Dialog::new(&s, Talk::Chat, std::env::current_dir().unwrap(), None).unwrap();
+    for n in 0..5 {
+        ask(&mut dialog, &mut s, &interrupt, &format!("chat turn {}", n + 1), &filler(n));
+    }
+    ask(&mut dialog, &mut s, &interrupt, "chat turn 6 (warm, short)", "What did the keeper do?");
+    println!("{}", dialog.save(&s, Some(&home), Some("zz")).unwrap().join(" | "));
+    let started = Instant::now();
+    println!("{}", dialog.checkpoint(&s, Some(&home), Some("zz")).unwrap().join(" | "));
+    println!("CHECKPOINT total {:.2}s", started.elapsed().as_secs_f64());
+    drop(dialog);
+    drop(s);
+    // Replay: a plain copy of the session without its checkpoint.
+    let sessions = home_dir.join("sessions");
+    let json = std::fs::read_to_string(sessions.join("zz.json")).unwrap().replace("\"name\":\"zz\"", "\"name\":\"plain\"");
+    std::fs::write(sessions.join("plain.json"), json).unwrap();
+    for (name, label) in [("plain", "resume by replay"), ("zz", "resume from checkpoint")] {
+        let (mut s, load) = session(&model, 4096);
+        let mut dialog = Dialog::new(&s, Talk::Chat, std::env::current_dir().unwrap(), None).unwrap();
+        let started = Instant::now();
+        let lines = dialog.resume(&mut s, Some(&home), Some(name)).unwrap();
+        println!("RESUME {name}: load {load:.2}s, resume command {:.2}s | {}", started.elapsed().as_secs_f64(), lines.join(" | "));
+        ask(&mut dialog, &mut s, &interrupt, label, "And what about at night?");
+        ask(&mut dialog, &mut s, &interrupt, &format!("{label}, next turn"), "Anything else?");
+    }
+    let _ = std::fs::remove_dir_all(home_dir);
+}

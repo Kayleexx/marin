@@ -3,7 +3,9 @@ use super::{LayerKind, TextConfig};
 use crate::ModelError;
 use cuda::{DeviceKv, KvFormat};
 
-/// Extra GPU bytes beyond retained weights, including staged state and a bounded pass.
+/// Extra GPU bytes beyond retained weights: one cache, the DeltaNet state three times over (live, the mark a pass keeps
+/// to undo itself, and the mark a conversation keeps to return to) and a bounded pass. The keys and values are never
+/// copied.
 pub fn bytes(config: &TextConfig, ctx: usize) -> Result<(u64, u64), ModelError> {
     let c = &config.block;
     let full = config
@@ -54,14 +56,14 @@ pub fn bytes(config: &TextConfig, ctx: usize) -> Result<(u64, u64), ModelError> 
         .and_then(|n| n.checked_add(config.summary().vocab_size))
         .and_then(|n| size(n, 4).ok())
         .ok_or_else(|| invalid("GPU workspace overflow"))?;
-    let overhead = size(fixed, 2)?
+    let overhead = size(fixed, 3)?
         .checked_add(workspace)
         .ok_or_else(|| invalid("GPU state budget overflow"))?;
     let startup = overhead
-        .checked_add(size(first, 2)?)
+        .checked_add(first)
         .ok_or_else(|| invalid("GPU startup budget overflow"))?;
     let whole = overhead
-        .checked_add(size(window.max(first), 2)?)
+        .checked_add(window.max(first))
         .and_then(|n| n.checked_add(first))
         .ok_or_else(|| invalid("GPU window budget overflow"))?;
     Ok((startup as u64, whole.max(startup) as u64))

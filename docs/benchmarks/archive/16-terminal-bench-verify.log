@@ -42,3 +42,5 @@ too small, discovery order and the "what is missing" message, Ctrl-C of both com
 lists both, PASS through the binary, problems explained and the run goes on, a disagreeing reference FAILs, chat and code
 conversations unchanged by benchmarks between questions), crates/cli/tests/perf_pty.rs (palette -> question -> result, check,
 Ctrl-C mid-benchmark, prompt works afterwards).
+
+Addendum (17-performance-and-memory.log): the 31 tok/s decode figures above came from a session whose conditions could not be reproduced. Interleaved, matched runs on an idle machine give 40.0-40.6 tok/s for the same binary and for the commit that produced the accepted baselines.

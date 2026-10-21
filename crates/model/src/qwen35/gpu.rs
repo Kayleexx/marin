@@ -1,5 +1,5 @@
 use super::TextConfig;
-use super::gpu_cache::GpuCache;
+use super::gpu_cache::{GpuCache, Mark};
 use super::gpu_weights::{Layer, load_layers};
 use super::math::{invalid, size};
 use crate::qwen3::weight::Weight;
@@ -118,11 +118,26 @@ impl Qwen35Gpu {
         GpuCache::new(&self.gpu, &self.config, &self.layers, capacity, self.owner)
     }
 
+    /// A mark of `cache` to `rewind` to; see `Mark`.
+    pub fn mark_cache(&self, cache: &GpuCache) -> Result<Mark, ModelError> {
+        if cache.owner != self.owner {
+            return Err(invalid("cache belongs to a different Qwen3.5 GPU model"));
+        }
+        cache.mark(&self.gpu)
+    }
+
+    pub fn rewind_cache(&self, cache: &mut GpuCache, mark: Mark) -> Result<(), ModelError> {
+        if cache.owner != self.owner {
+            return Err(invalid("cache belongs to a different Qwen3.5 GPU model"));
+        }
+        cache.rewind(mark)
+    }
+
     pub fn checkpoint_cache(&self, cache: &GpuCache) -> Result<GpuCache, ModelError> {
         if cache.owner != self.owner {
             return Err(invalid("cache belongs to a different Qwen3.5 GPU model"));
         }
-        cache.stage(&self.gpu, &self.config, &self.layers)
+        cache.duplicate(&self.gpu, &self.config, &self.layers)
     }
 
     pub fn forward_observed(
@@ -131,7 +146,7 @@ impl Qwen35Gpu {
         cache: &mut GpuCache,
         observe: Observer<'_>,
     ) -> Result<Vec<f32>, ModelError> {
-        super::gpu_forward::forward(self, tokens, cache, observe, None)
+        super::gpu_transaction::forward(self, tokens, cache, observe, None)
     }
 
     pub fn forward_profiled(
@@ -140,7 +155,7 @@ impl Qwen35Gpu {
         cache: &mut GpuCache,
         times: &mut metrics::StageTimes,
     ) -> Result<Vec<f32>, ModelError> {
-        super::gpu_forward::forward(self, tokens, cache, None, Some(times))
+        super::gpu_transaction::forward(self, tokens, cache, None, Some(times))
     }
 
     pub(super) fn owner(&self) -> u64 {

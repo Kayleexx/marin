@@ -42,6 +42,35 @@ impl Engine {
         }
     }
 
+    /// A point of a Qwen3.5 GPU cache that `rewind` returns to, taking only the DeltaNet state (a few tens of MB) and no
+    /// second copy of the keys and values. `None` for any other engine, or if the GPU has no room even for that.
+    pub fn mark(&self, cache: &EngineCache) -> Result<Option<crate::qwen35::Mark>, ModelError> {
+        match (self, cache) {
+            (Self::Qwen35Cuda(m), EngineCache::Qwen35Cuda(kv)) => {
+                let free = u64::try_from(m.gpu().info()?.free_bytes).unwrap_or(0);
+                let bytes = u64::try_from(kv.mark_bytes()).unwrap_or(u64::MAX);
+                if free < bytes.saturating_add(GPU_SLACK_BYTES) {
+                    return Ok(None);
+                }
+                Ok(Some(m.mark_cache(kv)?))
+            }
+            (Self::Qwen35Cuda(_), _) => Err(wrong_backend()),
+            _ => Ok(None),
+        }
+    }
+
+    /// Returns `cache` to `mark`. Refused if the history was cut back or restarted since the mark was taken.
+    pub fn rewind(
+        &self,
+        cache: &mut EngineCache,
+        mark: crate::qwen35::Mark,
+    ) -> Result<(), ModelError> {
+        match (self, cache) {
+            (Self::Qwen35Cuda(m), EngineCache::Qwen35Cuda(kv)) => m.rewind_cache(kv, mark),
+            _ => Err(wrong_backend()),
+        }
+    }
+
     /// How many sequences `decode_batch` serves in one pass; 1 where batching is not supported.
     pub fn batch_limit(&self) -> usize {
         match self {

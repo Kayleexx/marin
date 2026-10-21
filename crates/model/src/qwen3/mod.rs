@@ -2,6 +2,7 @@ mod attention;
 mod config;
 mod cpu_memory;
 mod engine;
+mod engine_cache;
 mod export;
 mod fit;
 mod gpu;

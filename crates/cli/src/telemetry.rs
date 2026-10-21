@@ -32,15 +32,21 @@ pub fn request_lines(o: &Outcome) -> Vec<String> {
     } else {
         format!("prompt          {} tokens", o.prompt_tokens)
     };
-    let mut lines = vec![
-        prompt,
+    let mut lines = vec![prompt];
+    if o.replayed > 0 {
+        lines.push(format!(
+            "replayed        {} tokens   (this model's state cannot be cut back to a shared start, so they were read again)",
+            o.replayed
+        ));
+    }
+    lines.extend([
         format!("generated       {} tokens", o.generated),
         format!(
             "first token     {}   (prompt pass {} + first sample)",
             time(o.prefill),
             time(o.prompt_forward)
         ),
-    ];
+    ]);
     if let Some(tps) = rate(o.prompt_tokens.saturating_sub(o.reused), o.prompt_forward) {
         lines.push(format!("prefill         {tps:.1} tok/s"));
     }
@@ -157,6 +163,7 @@ mod tests {
         Outcome {
             prompt_tokens: 100,
             reused: 0,
+            replayed: 0,
             generated: 11,
             stop: StopReason::MaxTokens,
             prefill: Duration::from_millis(520),

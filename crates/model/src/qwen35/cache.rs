@@ -72,6 +72,9 @@ impl SequenceCache for Cache {
         self.tokens.clear();
         self.replay = false;
     }
+    fn replays(&self) -> bool {
+        self.replay
+    }
     fn truncate(&mut self, len: usize) -> Result<(), RollbackError> {
         if len > self.tokens.len() {
             return Err(RollbackError {

@@ -118,7 +118,7 @@ fn delta_device_steps_match_cpu_reference() -> Result {
     Ok(())
 }
 
-fn contents(model: &Qwen35Gpu, cache: &super::GpuCache) -> Result<(Vec<f32>, Vec<u8>)> {
+pub(super) fn contents(model: &Qwen35Gpu, cache: &super::GpuCache) -> Result<(Vec<f32>, Vec<u8>)> {
     let mut state = Vec::new();
     for part in cache.delta.iter().flatten() {
         state.extend(model.gpu.download(&part.conv)?);

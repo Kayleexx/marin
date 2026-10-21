@@ -46,8 +46,10 @@ pub enum StopReason {
 #[derive(Debug, Clone)]
 pub struct Outcome {
     pub prompt_tokens: usize,
-    /// Leading prompt tokens kept from the previous run.
+    /// Leading prompt tokens kept from the previous run and not read again.
     pub reused: usize,
+    /// Leading prompt tokens the record kept but the cache had to read again, because it could not be cut back to them.
+    pub replayed: usize,
     pub generated: usize,
     pub stop: StopReason,
     /// Time until the first token was ready: prompt processing plus the first sample.
@@ -137,9 +139,11 @@ pub fn generate_reusing<M: CausalLm>(
         kv.truncate(keep)?;
     }
     ids.truncate(keep);
+    let replayed = if keep > 0 && kv.replays() { keep } else { 0 };
     let mut outcome = Outcome {
         prompt_tokens: prompt.len(),
-        reused: keep,
+        reused: keep.saturating_sub(replayed),
+        replayed,
         generated: 0,
         stop: StopReason::MaxTokens,
         prefill: Duration::ZERO,

@@ -315,10 +315,17 @@ fn display(plan: Plan) -> Result<(), CliError> {
             "KV window   {}",
             units::bytes(plan.footprint.kv.saturating_sub(plan.footprint.recurrent))
         );
-        println!(
-            "rollback    {} state transaction reserve",
-            units::bytes(plan.footprint.kv)
-        );
+        if backend_name == "cuda" {
+            println!(
+                "rollback    {} per mark of the recurrent state (the KV window is never copied)",
+                units::bytes(plan.footprint.recurrent)
+            );
+        } else {
+            println!(
+                "rollback    {} state transaction reserve",
+                units::bytes(plan.footprint.kv)
+            );
+        }
     } else {
         println!("KV window   {}", units::bytes(plan.footprint.kv));
     }
