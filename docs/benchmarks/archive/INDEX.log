@@ -1,22 +1,52 @@
-# Historical benchmark archive
+# Benchmark archive index
 
-These four files preserve every line of the 5,752-line BENCHMARKS.md as it
-stood before the 2026-10-15 consolidation. In filename order, their bytewise
-concatenation has SHA-256
-`6cf53334a6d2e46d66d60f4203607023e35320cc274ad9a456b58a23fb8f90d0`.
-The original section headings, fixed acceptance gates, failed experiments,
-trace excerpts and reproduction commands have not been rewritten. Later
-measurements may supersede an early number; use the [living summary](../../../BENCHMARKS.md)
-for current decisions.
+BENCHMARKS.md is the living summary: accepted results, retained gates, material NO-GO decisions, commands.
+This folder holds the evidence behind it; lasting trade-offs are in [docs/decisions](../../decisions/); maintained workloads are in `benchmarks/`. Nothing in the source tree, the tests or CI reads these files; they are
+read by people (and linked from BENCHMARKS.md and README.md). Some raw JSON, reference vectors and source copies were
+recorded under the ignored `bench-results/` folder of the measuring machine; an ignored path is not a promise that a
+file exists in a fresh checkout, and the tracked tables and commands stay here.
+
+## Never edit: the pre-consolidation BENCHMARKS.md
+
+01-04 preserve every line of the 5,752-line BENCHMARKS.md as it stood before the 2026-10-15 consolidation. In
+filename order their bytewise concatenation has SHA-256
+`6cf53334a6d2e46d66d60f4203607023e35320cc274ad9a456b58a23fb8f90d0`. Section numbers, fixed gates, failed
+experiments and commands are unrewritten; later measurements may supersede an early number.
 
 | File | Original sections | Content |
 |---|---|---|
-| [01-gpu-foundations.log](01-gpu-foundations.log) | 1–21 | Baseline GPU kernels, attention, quantization, KV, snapshots and first CPU audit. |
-| [02-cpu-stages.log](02-cpu-stages.log) | 22–31 | SIMD and threads, CPU INT8, growable KV, INT4 pilot, loading and consolidation audits. |
-| [03-loader-qwen35-planner.log](03-loader-qwen35-planner.log) | 32–40 | Packed loader, Qwen3.5-2B/4B execution, CUDA and static V9 planner. |
-| [04-granite-moe.log](04-granite-moe.log) | 41–46 | Granite 3.0 CPU/CUDA, strict parity NO-GOs and the H-Tiny feasibility pilot. |
+| [01-gpu-foundations.log](01-gpu-foundations.log) | 1-21 | GPU kernels, attention, quantization, KV, snapshots, first CPU audit. |
+| [02-cpu-stages.log](02-cpu-stages.log) | 22-31 | SIMD and threads, CPU INT8, growable KV, INT4 pilot, loading and consolidation audits. |
+| [03-loader-qwen35-planner.log](03-loader-qwen35-planner.log) | 32-40 | Packed loader, Qwen3.5-2B/4B execution, CUDA, static V9 planner. |
+| [04-granite-moe.log](04-granite-moe.log) | 41-46 | Granite 3.0 CPU/CUDA, strict parity NO-GOs, H-Tiny pilot. |
 
-Some raw JSON and reference vectors were recorded under ignored
-`bench-results/` paths on the measuring machine. The tracked tables and
-commands remain here; an ignored path is not a promise that its raw file is
-available in a fresh checkout.
+## Milestone logs (one per accepted or rejected milestone)
+
+Each log states its gates before the results. Class: **decision** = the reasoning behind a lasting trade-off;
+**evidence** = raw numbers for a claim in BENCHMARKS.md.
+
+| Log | Milestone | Class |
+|---|---|---|
+| [04-server-sessions](04-server-sessions.log), [05-server-checkpoints](05-server-checkpoints.log) | server sessions, reuse | decision |
+| [06-server-scheduling](06-server-scheduling.log) | V7 multi-request scheduling | decision |
+| [07-batched-decode](07-batched-decode.log), [08-batched-memory](08-batched-memory.log) | V7b/V7c batched decode and memory | decision |
+| [09-batched-prefill](09-batched-prefill.log) (NO-GO), [10-shared-prefix](10-shared-prefix.log) (GO) | V8/V9 prefill | decision |
+| [11-coding-v0](11-coding-v0.log), [12-unified-terminal](12-unified-terminal.log), [13-stabilization](13-stabilization.log) | coding mode, one terminal | decision |
+| [14-durable-sessions](14-durable-sessions.log), [15-checkpoint-feasibility](15-checkpoint-feasibility.log), [16-terminal-bench-verify](16-terminal-bench-verify.log) | saved sessions, checkpoints, /bench /verify | decision |
+| [17-performance-and-memory](17-performance-and-memory.log), [18-inference-state-memory](18-inference-state-memory.log), [19-vram-pressure](19-vram-pressure.log) | state-marked passes, host marks | decision + evidence |
+| [20-speculation](20-speculation.log) | V8 speculative decoding, PARTIAL GO | decision + evidence |
+| [21-model-evaluation](21-model-evaluation.log) | V10-A model evaluation, routing NO-GO | decision + evidence |
+
+## Harnesses and raw outputs (one-off, kept so a log can be reproduced or audited)
+
+| Path | Reproduces | Class |
+|---|---|---|
+| `06-load.py`, `06-long-prompt.txt` | 06 load generator and its prompt (frozen; the maintained copy is `benchmarks/server_load.py`) | frozen original |
+| `11-code-eval.py`, `11-edge-questions.txt`, `11-code-transcripts.txt` | 11 task rubric and transcripts | reusable workload + raw |
+| `15-checkpoint-e2e.sh` | 15 end-to-end checkpoint check | reusable workload |
+| `21-harness/eval.py`, `21-harness/repo-questions.txt` | 21 single-shot tasks and the 25 repository questions | reusable workload |
+| `07-batch-probe.rs.txt`, `08-memory-probe.rs.txt`, `17-harness/*.rs.txt`, `18-harness/*.rs.txt`, `19-harness/*.rs.txt` | throw-away Rust probes, stored as .txt so they are not compiled | one-off harness |
+| `08-summarize.py`, `10-summarize.py`, `10-cancel.py`, `10-checks.py`, `11-pty-cancel.py`, `17-harness/*.sh`, `18-harness/*.sh`, `19-harness/*` | log post-processing and A/B drivers | one-off harness |
+| `20-harness/sim.py`, `20-harness/prompts/` | 20 replay simulation and its three prompt classes | one-off harness + inputs |
+| `20-harness/*.out`, `20-harness/specbench*.table.txt` | 20 pass-cost, guess-report and the three spec-bench runs (2 and 3 are earlier, superseded by 4) | raw evidence |
+| `21-harness/runs/`, `21-harness/repo/` | per-task replies, metrics and grades behind 21 | raw evidence |

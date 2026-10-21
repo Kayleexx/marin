@@ -1,0 +1,144 @@
+mod http;
+mod queue;
+mod request;
+mod session;
+mod watch;
+
+use std::io;
+use std::net::{Shutdown, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use runtime::{
+    CausalLm, GenerateParams, Kept, Retained, SequenceCache, StopReason, generate_reusing,
+};
+use serde_json::{Value, json};
+
+use crate::CliError;
+use crate::load::Loaded;
+use crate::session::Settings;
+use request::{Completion, validated_prompt};
+use session::Stored;
+use watch::watch_disconnect;
+
+fn api_error(status: u16, message: impl ToString) -> Value {
+    let kind = if status >= 500 {
+        "server_error"
+    } else {
+        "invalid_request_error"
+    };
+    json!({"error": {"message": message.to_string(), "type": kind}})
+}
+
+fn send_error(stream: &mut TcpStream, status: u16, message: impl ToString) -> io::Result<()> {
+    http::json(stream, status, &api_error(status, message))
+}
+
+fn finish_reason(reason: StopReason) -> &'static str {
+    match reason {
+        StopReason::EndOfText => "stop",
+        StopReason::MaxTokens | StopReason::ContextFull => "length",
+        StopReason::Cancelled => "cancelled",
+    }
+}
+
+fn chunk(id: &str, created: u64, model: &str, delta: Value, finish: Option<&str>) -> Value {
+    json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]
+    })
+}
+
+fn completion(
+    stream: &mut TcpStream,
+    loaded: &Loaded,
+    defaults: Settings,
+    request_id: u64,
+    body: &[u8],
+    stored: &mut Option<Stored>,
+) -> io::Result<()> {
+    let input: Completion = match serde_json::from_slice(body) {
+        Ok(value) => value,
+        Err(e) => return send_error(stream, 400, format!("invalid JSON request: {e}")),
+    };
+    let (prompt, history, mut sampler, max_tokens) =
+        match validated_prompt(loaded, &input, defaults) {
+            Ok(value) => value,
+            Err(e) => return send_error(stream, 400, e),
+        };
+    let persistent = input.marin_session_id.is_some();
+    let session_id = match input.marin_session_id.as_deref() {
+        Some("new") => match session::new_id() {
+            Ok(id) => id,
+            Err(e) => return send_error(stream, 500, e),
+        },
+        Some(id) if session::valid_id(id) => id.to_owned(),
+        Some(_) => return send_error(stream, 400, "invalid marin_session_id"),
+        None => String::new(),
+    };
+    let existing = persistent && input.marin_session_id.as_deref() != Some("new");
+    if existing && stored.as_ref().map(|state| state.id.as_str()) != Some(session_id.as_str()) {
+        return send_error(stream, 404, "session not found or evicted");
+    }
+    let previous = if existing {
+        stored
+            .as_ref()
+            .map(|state| state.retained.tokens().to_vec())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let reusable = if existing {
+        stored.take().filter(|state| state.can_reuse(&prompt))
+    } else {
+        None
+    };
+    *stored = None;
+    let mut active = match reusable
+        .map(Ok)
+        .unwrap_or_else(|| Stored::new(loaded, session_id))
+    {
+        Ok(state) => state,
+        Err(e) => return send_error(stream, 500, e),
+    };
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let id = format!("chatcmpl-{created}-{request_id}");
+    if input.stream {
+        let opened = http::sse_start(stream).and_then(|()| {
+            http::sse(
+                stream,
+                &chunk(
+                    &id,
+                    created,
+                    &loaded.name,
+                    json!({"role": "assistant"}),
+                    None,
+                ),
+            )
+        });
+        if let Err(e) = opened {
+            session::recover(stored, active, loaded, &previous, existing);
+            return Err(e);
+        }
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let watcher = match watch_disconnect(
+        stream,
+        Arc::clone(&cancel),
+        Arc::clone(&done),
+        Arc::clone(&timed_out),
+        queue::RUN_LIMIT,
+    ) {
+        Ok(watcher) => watcher,
+        Err(e) => {
+            session::recover(stored, active, loaded, &previous, existing);
+            return Err(e);
+      

@@ -27,7 +27,7 @@ are labeled; no model support or quality is inferred from header arithmetic.
 ### Acceptance gates for this consolidation and server
 
 - Archive every original benchmark line and retain fixed tolerances, failures,
-  commands and decision history. Keep this living summary at 200–350 lines;
+  commands and decision history. Keep this living summary brief and readable;
   README links must resolve to this page or an archived section.
 - Preserve all Qwen3, Qwen3.5 and Granite execution paths, defaults, scalar
   fallback, state rollback, snapshots and numerical NO-GO decisions. Change
@@ -334,15 +334,19 @@ Full checks: `cargo fmt --all -- --check`, `cargo check --workspace
 `scripts/check-unsafe.sh`. Real-checkpoint ignored tests need their named
 model/reference environment variables and are reported separately.
 
+### From a clean checkout
+
+Tracked and runnable with only the repository: `scripts/check-line-limit.sh`, `scripts/check-unsafe.sh`, the tiny-model fixtures and references under
+`tests/`, and the workloads in `benchmarks/`: `bench_baseline.sh MODEL_DIR` (Qwen3 bf16 CPU and CUDA matrix), `guess_prompts.sh DIR` and `spec_prompts.sh DIR` (prompt
+folders for `marin-run guess` and `spec-bench`; the prompts built from the untracked spec are skipped, with a note, when it is absent), `server_load.py PORT PID SCENARIO` (multi-client load against `marin serve`) with its `long-prompt.txt`.
+Hugging Face references are generated, not tracked: `scripts/gen_reference.py`, `scripts/gen_chat_reference.py`, `scripts/gen_chat_golden.py` (Qwen3 and chat
+template) and `tests/reference/{qwen35,granite}/*.py` (need torch and transformers). The pinned 128-step Qwen3.5-4B INT8 reference
+(`bench-results/qwen35-4b/hf-int8-128.json`, 226 MB) is not in the repository and its exact invocation was not recorded; regenerate with
+`tests/reference/qwen35/full.py MODEL OUT --steps 128` against the 4B BF16 checkpoint and compare it against the figures above before trusting it.
+Lasting trade-offs are in [`docs/decisions/`](docs/decisions/).
+
 ## Archive map
 
-The four files below concatenate byte-for-byte into the pre-consolidation
-BENCHMARKS.md (SHA-256
-`6cf53334a6d2e46d66d60f4203607023e35320cc274ad9a456b58a23fb8f90d0`).
-Section numbers and their original gates remain unchanged inside them:
-
-- [1–21: GPU foundations and first CPU audit](docs/benchmarks/archive/01-gpu-foundations.log)
-- [22–31: CPU SIMD, INT8, KV, INT4 pilots and consolidation](docs/benchmarks/archive/02-cpu-stages.log)
-- [32–40: packed loader, Qwen3.5 and V9 planner](docs/benchmarks/archive/03-loader-qwen35-planner.log)
-- [41–46: Granite MoE, numerical NO-GOs and H-Tiny pilot](docs/benchmarks/archive/04-granite-moe.log)
-- Server logs: [sessions](docs/benchmarks/archive/04-server-sessions.log), [checkpoints](docs/benchmarks/archive/05-server-checkpoints.log), [V7 scheduling](docs/benchmarks/archive/06-server-scheduling.log), [V7b batched decode](docs/benchmarks/archive/07-batched-decode.log), [V7c memory](docs/benchmarks/archive/08-batched-memory.log), [V8 prefill](docs/benchmarks/archive/09-batched-prefill.log), [V9 prefix](docs/benchmarks/archive/10-shared-prefix.log), [Coding V0](docs/benchmarks/archive/11-coding-v0.log), [unified terminal](docs/benchmarks/archive/12-unified-terminal.log), [stabilization](docs/benchmarks/archive/13-stabilization.log), [durable sessions](docs/benchmarks/archive/14-durable-sessions.log), [checkpoints](docs/benchmarks/archive/15-checkpoint-feasibility.log), [in-terminal bench and verify](docs/benchmarks/archive/16-terminal-bench-verify.log), [performance and memory](docs/benchmarks/archive/17-performance-and-memory.log), [O(state) passes](docs/benchmarks/archive/18-inference-state-memory.log), [VRAM pressure](docs/benchmarks/archive/19-vram-pressure.log), [speculation](docs/benchmarks/archive/20-speculation.log), [model evaluation](docs/benchmarks/archive/21-model-evaluation.log) (load generator `06-load.py`, prompt `06-long-prompt.txt`)
+Every log and harness is indexed, with its class, in the [archive index](docs/benchmarks/archive/INDEX.log). The four
+oldest logs (01–04) concatenate byte-for-byte into the pre-consolidation BENCHMARKS.md (SHA-256
+`6cf53334a6d2e46d66d60f4203607023e35320cc274ad9a456b58a23fb8f90d0`); never edit them.

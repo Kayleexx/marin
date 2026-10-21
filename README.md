@@ -5,7 +5,8 @@ Qwen3, Qwen3.5 and Granite text models on CPU or CUDA, measures the work, and
 chooses a backend only when its memory estimate fits. BF16 is the default;
 packed INT8 needs explicit opt-in. The [performance summary](BENCHMARKS.md)
 separates accepted paths from experiments, and the
-[archive](docs/benchmarks/archive/INDEX.log) keeps the full measurement history.
+[archive](docs/benchmarks/archive/INDEX.log) keeps the full measurement history;
+[docs/decisions](docs/decisions/) explains the lasting trade-offs.
 
 ## Install and run
 
