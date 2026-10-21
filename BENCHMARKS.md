@@ -343,7 +343,6 @@ Hugging Face references are generated, not tracked: `scripts/gen_reference.py`, 
 template) and `tests/reference/{qwen35,granite}/*.py` (need torch and transformers). The pinned 128-step Qwen3.5-4B INT8 reference
 (`bench-results/qwen35-4b/hf-int8-128.json`, 226 MB) is not in the repository and its exact invocation was not recorded; regenerate with
 `tests/reference/qwen35/full.py MODEL OUT --steps 128` against the 4B BF16 checkpoint and compare it against the figures above before trusting it.
-Lasting trade-offs are in [`docs/decisions/`](docs/decisions/).
 
 ## Archive map
 

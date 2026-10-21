@@ -1,7 +1,7 @@
 # Benchmark archive index
 
 BENCHMARKS.md is the living summary: accepted results, retained gates, material NO-GO decisions, commands.
-This folder holds the evidence behind it; lasting trade-offs are in [docs/decisions](../../decisions/); maintained workloads are in `benchmarks/`. Nothing in the source tree, the tests or CI reads these files; they are
+This folder holds the evidence behind it; maintained workloads are in `benchmarks/`. Nothing in the source tree, the tests or CI reads these files; they are
 read by people (and linked from BENCHMARKS.md and README.md). Some raw JSON, reference vectors and source copies were
 recorded under the ignored `bench-results/` folder of the measuring machine; an ignored path is not a promise that a
 file exists in a fresh checkout, and the tracked tables and commands stay here.
