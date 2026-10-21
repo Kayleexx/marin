@@ -1,8 +1,0 @@
-prompt tokens and time to first token (the same for every mode):
- code_edit 602 tokens first token 4584 ms
- divergent 72 tokens first token 536 ms
-scenario mode tok/s vs plain paired tok/pass guess ok guessed gap p50 gap p95 sample W J/tok same
-code_edit greedy/plain 40.7 - - 1.00 0% 0% 24.3 26.9 0.234 40.0 0.982 2/2
-code_edit greedy/spec 76.7 1.88x 1.77-2.02x 2.73 79% 74% 0.2 58.3 0.228 39.9 0.521 2/2
-divergent greedy/plain 40.9 - - 1.00 0% 0% 24.3 27.4 0.231 39.9 0.975 2/2
-divergent greedy/spec 45.9 1.12x 1.05-1.20x 1.18 62% 10% 24.0 41.5 0.236 39.9 0.869 2/2

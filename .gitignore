@@ -3,9 +3,11 @@ target/
 *.md
 !README.md
 !BENCHMARKS.md
-!CLAUDE.md
 !docs/decisions/*.md
 __pycache__/
+# Archive: only the milestone logs and INDEX.log are tracked; harnesses and per-run outputs stay local.
+docs/benchmarks/archive/*
+!docs/benchmarks/archive/*.log
 # Raw measurement output on the measuring machine (see docs/benchmarks/archive/INDEX.log).
 bench-results/
 # A pasted terminal session.

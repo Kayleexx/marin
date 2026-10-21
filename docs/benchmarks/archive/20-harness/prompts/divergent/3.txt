@@ -1,1 +1,0 @@
-Write 15 short bug reports. Each starts with 'Steps to reproduce the issue:' and then gives different steps, expected and actual results.

@@ -298,7 +298,7 @@ bounded prefill, CPU INT4, prefill packing, draft-model and Granite caching expe
 ## Reproduce current measurements
 
 Use the same model artifact, context, prompt length, output length, thread count, power mode and warmup on both sides. `bench --json` records the setup;
-`compare` checks ranges; the tracked archive preserves published tables and commands. Pressure runs: `docs/benchmarks/archive/19-harness/`.
+`compare` checks ranges; the tracked archive preserves published tables and commands. The pressure-run drivers are in git history (`git show 5a4a8ee:docs/benchmarks/archive/19-harness/`).
 
 ```bash
 # BF16 reference, then packed INT8 on the same CPU and input
@@ -347,6 +347,6 @@ Lasting trade-offs are in [`docs/decisions/`](docs/decisions/).
 
 ## Archive map
 
-Every log and harness is indexed, with its class, in the [archive index](docs/benchmarks/archive/INDEX.log). The four
+Every log is indexed in the [archive index](docs/benchmarks/archive/INDEX.log). The four
 oldest logs (01–04) concatenate byte-for-byte into the pre-consolidation BENCHMARKS.md (SHA-256
 `6cf53334a6d2e46d66d60f4203607023e35320cc274ad9a456b58a23fb8f90d0`); never edit them.

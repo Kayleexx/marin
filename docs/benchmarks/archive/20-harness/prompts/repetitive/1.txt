@@ -1,1 +1,0 @@
-Write the numbers from 1 to 60, each spelled out in words, one per line.

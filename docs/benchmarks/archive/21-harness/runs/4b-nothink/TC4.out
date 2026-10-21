@@ -1,6 +1,0 @@
-<tool_call>
-<function=read_file>
-<path>Cargo.toml</path>
-<start>1</start>
-<end>5</end>
-</tool_call>

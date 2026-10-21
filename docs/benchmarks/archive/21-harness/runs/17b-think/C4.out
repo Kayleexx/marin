@@ -1,9 +1,0 @@
-<think>
-Okay, the user wants a JSON object with exactly "name" (string) and "age" (integer) for a fictional person. Let me make sure I understand the requirements.
-
-First, the keys must be "name" and "age". The "name" should be a string, so maybe something like "Elena" or "Javier". The "age" needs to be an integer, so 25 or 30. I need to ensure there are no other keys. Let me check the example response they provided. Oh, they used "Elena" and 25. So I can follow that structure.
-
-Wait, the user said "fictional person", so the name should be a bit creative. Maybe "Lila" and 22? Or "Max" and 28. Let me pick "Lila" and 22. Then the JSON would be {"name": "Lila", "age": 22}. Let me verify that there are no extra keys. Yep, only name and age. The values are correct types. Alright, that should work.
-</think>
-
-{"name": "Lila", "age": 22}

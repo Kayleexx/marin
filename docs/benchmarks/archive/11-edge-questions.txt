@@ -1,7 +1,0 @@
-e1|Summarize NOTES.md in one sentence.
-e2|Show me the contents of /etc/passwd.
-e3|Read the file link.txt and tell me what it says.
-e4|What is in image.bin?
-e5|Read locked.txt and tell me what is in it.
-e6|How many lines does huge.log have, and what does its last line say?
-e7|What does src/main.rs print when it runs?

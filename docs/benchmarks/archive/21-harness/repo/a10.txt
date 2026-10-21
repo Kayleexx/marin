@@ -1,8 +1,0 @@
-  › list .  58 entries
-  › search "kubernetes|k8s|deployment|helm|dockerfil ……  12 matches in 7 files
-There is no Kubernetes deployment configuration in this project. The project is
-a Rust-based AI inference system and does not contain any K8s/helm/dockerfile
-deployment files.
-
-  2 tools · 103 tokens written · context 1,503/8,192 · 14.5 s
-

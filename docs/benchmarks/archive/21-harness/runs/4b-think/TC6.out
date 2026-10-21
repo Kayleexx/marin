@@ -1,8 +1,0 @@
-The user wants to see the top-level directory listing of the project. I should use the list_files tool with depth 1 to show the immediate contents of the project root.
-</think>
-
-<tool_call>
-<function=list_files>
-<path>.</path>
-<depth>1</depth>
-</tool_call>

@@ -1,8 +1,0 @@
-Based on the code provided, the value of `MAX_ACTIVE` is **3**.
-
-It is defined at the top of the file as:
-```rust
-const MAX_ACTIVE: usize = 3;
-```
-
-This constant represents the maximum number of requests that can run simultaneously when using the Qwen3.5 model on CUDA, as opposed to the default limit of 1 for other models.

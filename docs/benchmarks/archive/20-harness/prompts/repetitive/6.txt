@@ -1,1 +1,0 @@
-Write a JSON array of 20 objects each with keys id, name, active; use names user1..user20.

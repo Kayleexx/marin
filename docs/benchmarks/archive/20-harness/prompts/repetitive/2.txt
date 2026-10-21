@@ -1,1 +1,0 @@
-List the days of the week and months of the year, then repeat that list three times.

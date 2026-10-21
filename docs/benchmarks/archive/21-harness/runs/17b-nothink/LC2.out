@@ -1,5 +1,0 @@
-To determine which bolt order has the highest price, we need to look at the "price" field for each order and find the maximum value.
-
-After reviewing all the orders, the highest price is for **order 001** with a price of **87.69**.
-
-**Answer: 001**

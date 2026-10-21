@@ -37,16 +37,10 @@ Each log states its gates before the results. Class: **decision** = the reasonin
 | [20-speculation](20-speculation.log) | V8 speculative decoding, PARTIAL GO | decision + evidence |
 | [21-model-evaluation](21-model-evaluation.log) | V10-A model evaluation, routing NO-GO | decision + evidence |
 
-## Harnesses and raw outputs (one-off, kept so a log can be reproduced or audited)
+## Harnesses and raw outputs (not tracked)
 
-| Path | Reproduces | Class |
-|---|---|---|
-| `06-load.py`, `06-long-prompt.txt` | 06 load generator and its prompt (frozen; the maintained copy is `benchmarks/server_load.py`) | frozen original |
-| `11-code-eval.py`, `11-edge-questions.txt`, `11-code-transcripts.txt` | 11 task rubric and transcripts | reusable workload + raw |
-| `15-checkpoint-e2e.sh` | 15 end-to-end checkpoint check | reusable workload |
-| `21-harness/eval.py`, `21-harness/repo-questions.txt` | 21 single-shot tasks and the 25 repository questions | reusable workload |
-| `07-batch-probe.rs.txt`, `08-memory-probe.rs.txt`, `17-harness/*.rs.txt`, `18-harness/*.rs.txt`, `19-harness/*.rs.txt` | throw-away Rust probes, stored as .txt so they are not compiled | one-off harness |
-| `08-summarize.py`, `10-summarize.py`, `10-cancel.py`, `10-checks.py`, `11-pty-cancel.py`, `17-harness/*.sh`, `18-harness/*.sh`, `19-harness/*` | log post-processing and A/B drivers | one-off harness |
-| `20-harness/sim.py`, `20-harness/prompts/` | 20 replay simulation and its three prompt classes | one-off harness + inputs |
-| `20-harness/*.out`, `20-harness/specbench*.table.txt` | 20 pass-cost, guess-report and the three spec-bench runs (2 and 3 are earlier, superseded by 4) | raw evidence |
-| `21-harness/runs/`, `21-harness/repo/` | per-task replies, metrics and grades behind 21 | raw evidence |
+The one-off drivers, Rust probes (`*.rs.txt`), summarizers, prompt sets, transcripts and per-run outputs behind these logs
+(`06-load.py`, `11-code-eval.py`, `15-checkpoint-e2e.sh`, `17-` to `21-harness/`, ...) are no longer tracked; this folder keeps only
+the logs. They stay on the maintainer's machine and in git history: the last commit that contains them is `5a4a8ee`
+(`git show 5a4a8ee:docs/benchmarks/archive/<path>`). Maintained workloads live in `benchmarks/`
+(`server_load.py` replaces `06-load.py`). New harnesses are not committed unless they are worth rerunning.

@@ -1,6 +1,0 @@
-<tool_call>
-<function=read_file>
-<path>src/lib.rs</path>
-<start>10</start>
-<end>20</end>
-</tool_call>

@@ -1,1 +1,0 @@
-Write 20 commit messages, each beginning with 'fix: handle the case where' followed by a different situation.

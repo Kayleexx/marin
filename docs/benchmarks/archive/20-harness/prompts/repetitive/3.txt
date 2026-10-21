@@ -1,1 +1,0 @@
-Write a table of 30 rows: row number, the word 'alpha', the word 'beta', the word 'gamma'.

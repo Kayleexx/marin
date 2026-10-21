@@ -1,8 +1,0 @@
-  › search "windows|installer|setup" in scripts  no matches
-  › list scripts  12 entries
-There is no Windows installer script in the project. The `scripts/` directory
-contains only Python and shell scripts for benchmarking, reference generation,
-and prompt generation, but no Windows-specific installer or setup scripts.
-
-  2 tools · 117 tokens written · context 706/8,192 · 8.2 s
-

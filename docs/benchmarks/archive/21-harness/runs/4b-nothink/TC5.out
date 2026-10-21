@@ -1,7 +1,0 @@
-<tool_call>
-<function=search>
-<parameter=pattern>
-fn parse_header
-</parameter>
-</function>
-</tool_call>

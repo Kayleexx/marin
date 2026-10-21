@@ -1,9 +1,0 @@
-  › search "serve" in crates  421 matches in 83 files
-  › read crates/cli/src/bin/marin.rs:25-30  6 lines
-The default port for `marin serve` is 8000.
-
-This is defined in `crates/cli/src/bin/marin.rs:27` as `const SERVER_PORT: u16
-= 8000;`.
-
-  2 tools · 143 tokens written · context 1,875/8,192 · 17.9 s
-
