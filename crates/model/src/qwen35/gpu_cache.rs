@@ -23,18 +23,7 @@ pub struct GpuCache {
     /// Counts the times the history was cut back or started again, so a `Mark` taken before cannot be applied after.
     pub(super) epoch: u64,
     /// Tells this cache from every other, so a `Mark` is only ever put back into the cache it came from.
-    id: u64,
-}
-
-/// A point in the history of a cache that it can be returned to exactly, without a second copy of the keys and values:
-/// those are only ever appended past the committed length, so cutting them back is enough. What a pass does change in
-/// place is the DeltaNet state, and that is what a mark holds.
-pub struct Mark {
-    delta: Vec<Option<DeltaState>>,
-    positions: usize,
-    tokens: usize,
-    epoch: u64,
-    cache: u64,
+    pub(super) id: u64,
 }
 
 impl GpuCache {
@@ -110,47 +99,6 @@ impl GpuCache {
         Ok(())
     }
 
-    /// Takes a mark of the committed state: a copy of the DeltaNet state and the lengths of the history.
-    pub(super) fn mark(&self, gpu: &Gpu) -> Result<Mark, ModelError> {
-        let mut delta = Vec::new();
-        delta
-            .try_reserve_exact(self.delta.len())
-            .map_err(|e| invalid(format!("GPU state mark: {e}")))?;
-        for state in &self.delta {
-            delta.push(match state {
-                Some(s) => Some(DeltaState {
-                    conv: gpu.copy_buffer(&s.conv)?,
-                    recurrent: gpu.copy_buffer(&s.recurrent)?,
-                }),
-                None => None,
-            });
-        }
-        Ok(Mark {
-            delta,
-            positions: self.kv.len(),
-            tokens: self.tokens.len(),
-            epoch: self.epoch,
-            cache: self.id,
-        })
-    }
-
-    /// Returns to `mark`: the keys and values past its length are forgotten and its DeltaNet state put back. Refused if
-    /// the history was cut back or restarted since, or the cache is not the one the mark came from.
-    pub(super) fn rewind(&mut self, mark: Mark) -> Result<(), ModelError> {
-        let holds = mark.cache == self.id
-            && mark.epoch == self.epoch
-            && !self.replay
-            && self.kv.len() >= mark.positions
-            && self.tokens.len() >= mark.tokens;
-        if !holds {
-            return Err(invalid("the cache no longer extends the marked history"));
-        }
-        self.kv.truncate(mark.positions)?;
-        self.tokens.truncate(mark.tokens);
-        self.delta = mark.delta;
-        Ok(())
-    }
-
     /// A full, independent copy of the cache, for a retained session or a shared prefix.
     pub(super) fn duplicate(
         &self,
@@ -203,18 +151,6 @@ impl GpuCache {
                         .saturating_mul(4),
                 )
             })
-    }
-
-    /// GPU memory a mark of this cache takes: the DeltaNet state, whatever the history.
-    pub fn mark_bytes(&self) -> usize {
-        self.delta.iter().flatten().fold(0_usize, |n, s| {
-            n.saturating_add(
-                s.conv
-                    .len()
-                    .saturating_add(s.recurrent.len())
-                    .saturating_mul(4),
-            )
-        })
     }
 
     pub fn checkpoint_bytes(&self) -> usize {

@@ -3,6 +3,7 @@ use std::io::{self, Read};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use model::EngineCache;
+use model::qwen35::Mark;
 use runtime::{CausalLm, Retained, SequenceCache};
 
 use super::sched::{ScheduleError, Scheduled};
@@ -97,7 +98,7 @@ pub(super) fn checkpoint(
     active: &mut Stored,
     sched: Scheduled<'_>,
     history: &[u32],
-) -> Result<(Option<EngineCache>, usize), ScheduleError> {
+) -> Result<(Option<Mark>, usize), ScheduleError> {
     let cached = active.retained.tokens();
     let keep = if cached.len() == active.cache.used() && history.starts_with(cached) {
         cached.len()
@@ -113,5 +114,5 @@ pub(super) fn checkpoint(
         sched.forward(fresh, &mut active.cache)?;
     }
     active.retained = Retained::restored(history.to_vec());
-    Ok((sched.checkpoint(&active.cache)?, keep))
+    Ok((sched.mark(&active.cache)?, keep))
 }

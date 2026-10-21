@@ -78,7 +78,7 @@ pub(super) fn forward(
         }
         Err(error) => {
             // Without a mark the state was only being rebuilt: it stays to be rebuilt.
-            if mark.is_none_or(|mark| cache.rewind(mark).is_err()) {
+            if mark.is_none_or(|mark| cache.rewind(&model.gpu, mark).is_err()) {
                 cache.kv.clear();
                 cache.replay = true;
                 cache.epoch = cache.epoch.wrapping_add(1);

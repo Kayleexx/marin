@@ -141,3 +141,52 @@ fn mark_bytes_are_the_fixed_state(model: &Qwen35Gpu, cache: &GpuCache) -> bool {
     let layout = model.state_layout().ok();
     layout.is_some_and(|l| cache.mark_bytes() == l.delta_layers.saturating_mul(l.delta_bytes()))
 }
+
+#[test]
+fn a_mark_in_host_memory_returns_exactly_the_bytes_a_mark_on_the_gpu_does() -> Result {
+    let Some(model) = model()? else { return Ok(()) };
+    let (mut live, mut twin) = twins(&model, &ids(10, 70))?;
+    let before = contents(&model, &live)?;
+    let host = model.mark_cache_in_host(&live)?;
+    let device = model.mark_cache(&twin)?;
+    for (cache, mark) in [(&mut live, host), (&mut twin, device)] {
+        model.forward(&ids(200, 600), cache)?;
+        model.forward(&[7], cache)?;
+        model.rewind_cache(cache, mark)?;
+        assert_eq!(cache.used(), 70);
+        assert_eq!(contents(&model, cache)?, before);
+    }
+    assert!(
+        model.forward(&[9], &mut live)? == model.forward(&[9], &mut twin)?,
+        "bit for bit the same logits afterwards"
+    );
+    assert_eq!(contents(&model, &live)?, contents(&model, &twin)?);
+
+    let host = model.mark_cache_in_host(&live)?;
+    live.truncate(40)?;
+    assert!(
+        model.rewind_cache(&mut live, host).is_err(),
+        "a host mark is refused after a cut back too"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_host_mark_that_cannot_be_put_back_leaves_a_cache_that_is_read_again_from_the_start() -> Result
+{
+    let Some(model) = model()? else { return Ok(()) };
+    let (mut live, mut twin) = twins(&model, &ids(10, 70))?;
+    let mut mark = model.mark_cache_in_host(&live)?;
+    mark.drop_a_layer();
+    model.forward(&ids(200, 50), &mut live)?;
+    assert!(model.rewind_cache(&mut live, mark).is_err());
+    assert!(
+        live.replay && live.used() == 0,
+        "never a partly restored cache"
+    );
+    let history = [ids(10, 70), ids(200, 50)].concat();
+    model.forward(&history, &mut live)?;
+    model.forward(&ids(200, 50), &mut twin)?;
+    assert_eq!(contents(&model, &live)?, contents(&model, &twin)?);
+    Ok(())
+}

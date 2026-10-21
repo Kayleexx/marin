@@ -123,7 +123,7 @@ pub fn run(loaded: Loaded, defaults: Settings, port: u16) -> Result<(), CliError
             let Ok(pending) = receiver.recv() else {
                 break;
             };
-            let slot = gate.enter();
+            let slot = gate.enter(pending.id);
             let worker = thread::Builder::new()
                 .name("marin-request".into())
                 .spawn_scoped(scope, move || {

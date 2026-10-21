@@ -36,3 +36,15 @@ pub enum CudaError {
         actual: usize,
     },
 }
+
+impl CudaError {
+    /// Whether the GPU had no memory left for an allocation, which may succeed again once other work has finished.
+    pub fn is_out_of_memory(&self) -> bool {
+        match self {
+            Self::Driver(error) | Self::KvMemory { source: error, .. } => {
+                error.0 == cudarc::driver::sys::CUresult::CUDA_ERROR_OUT_OF_MEMORY
+            }
+            _ => false,
+        }
+    }
+}

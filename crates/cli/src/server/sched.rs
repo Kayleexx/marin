@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use model::qwen35::Mark;
 use model::{Engine, EngineCache, ModelError};
 use runtime::CausalLm;
 use thiserror::Error;
@@ -21,8 +22,9 @@ pub(super) enum ScheduleError {
 
 /// How many requests may run at once. Each holds its own state (KV and recurrent) for the whole `--ctx` window;
 /// the free GPU memory after loading, minus the safety slack that covers activations and the small marks of the
-/// recurrent state a pass keeps, must also hold one idle session (a full copy). A pass copies none of the keys and
-/// values, and a batched decode step copies nothing. Anything but Qwen3.5 on CUDA runs one request.
+/// recurrent state a pass keeps, must also hold one idle session. A pass copies none of the keys and values, and a
+/// batched decode step copies nothing. If the GPU later runs short, a request waits for another to finish
+/// (`Gate::wait_for_memory`). Anything but Qwen3.5 on CUDA runs one request.
 pub(super) fn max_active(loaded: &Loaded) -> usize {
     let Engine::Qwen35Cuda(_) = &loaded.model else {
         return 1;
@@ -85,12 +87,21 @@ impl<'a> Scheduled<'a> {
         self.gate
             .run(1, || self.loaded.model.session_checkpoint(cache))
     }
+
+    /// A point of `cache` for `rewind`; see `Engine::mark`.
+    pub fn mark(&self, cache: &EngineCache) -> Result<Option<Mark>, ModelError> {
+        self.gate.run(1, || self.loaded.model.mark(cache))
+    }
+
+    pub fn rewind(&self, cache: &mut EngineCache, mark: Mark) -> Result<(), ModelError> {
+        self.gate.run(1, || self.loaded.model.rewind(cache, mark))
+    }
 }
 
 impl Scheduled<'_> {
     /// One decode step, run together with the other requests' steps that are waiting.
     fn decode(&self, tokens: &[u32], cache: &mut EngineCache) -> Result<Vec<f32>, ScheduleError> {
-        if self.cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+        if self.cancelled() {
             return Err(ScheduleError::Cancelled);
         }
         let (Some(spare), Some(token)) = (EngineCache::vacant(), tokens.first().copied()) else {
@@ -106,6 +117,26 @@ impl Scheduled<'_> {
         *cache = back;
         Ok(logits?)
     }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.is_some_and(|c| c.load(Ordering::Relaxed))
+    }
+
+    /// Repeats `pass` while it fails for want of GPU memory and `Gate::wait_for_memory` says another request's
+    /// finishing may have freed some. A failed pass leaves the cache as it was, so repeating one is exact.
+    fn retrying<T>(
+        &self,
+        mut pass: impl FnMut() -> Result<T, ScheduleError>,
+    ) -> Result<T, ScheduleError> {
+        loop {
+            match pass() {
+                Err(e)
+                    if e.is_out_of_memory()
+                        && self.gate.wait_for_memory(self.lane, || self.cancelled()) => {}
+                other => return other,
+            }
+        }
+    }
 }
 
 impl CausalLm for Scheduled<'_> {
@@ -114,18 +145,25 @@ impl CausalLm for Scheduled<'_> {
 
     fn forward(&self, tokens: &[u32], cache: &mut EngineCache) -> Result<Vec<f32>, ScheduleError> {
         if tokens.len() == 1 && self.gate.batching() {
-            return self.decode(tokens, cache);
+            return self.retrying(|| self.decode(tokens, cache));
         }
         let mut logits = None;
         for part in tokens.chunks(self.slice) {
-            if self.cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            if self.cancelled() {
                 return Err(ScheduleError::Cancelled);
             }
-            logits = Some(
-                self.gate
-                    .run(part.len(), || self.loaded.model.forward(part, cache))?,
-            );
+            logits = Some(self.retrying(|| {
+                Ok(self
+                    .gate
+                    .run(part.len(), || self.loaded.model.forward(part, cache))?)
+            })?);
         }
         logits.ok_or(ScheduleError::Model(ModelError::NoTokens))
+    }
+}
+
+impl ScheduleError {
+    pub fn is_out_of_memory(&self) -> bool {
+        matches!(self, Self::Model(e) if e.is_out_of_memory())
     }
 }

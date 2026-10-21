@@ -35,3 +35,10 @@ pub enum ModelError {
     #[error("CPU needs another {} MB but only {} MB is available", needed / 1_000_000, available / 1_000_000)]
     CpuMemory { needed: u64, available: u64 },
 }
+
+impl ModelError {
+    /// Whether the pass failed for want of GPU memory; the cache is as it was before it, so it can be repeated.
+    pub fn is_out_of_memory(&self) -> bool {
+        matches!(self, Self::Cuda(error) if error.is_out_of_memory())
+    }
+}

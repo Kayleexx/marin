@@ -54,6 +54,11 @@ fn fail(
     }
 }
 
+/// A GPU out of memory is a condition of the moment: the request can be sent again, unlike a failure of the model.
+fn failure_status(out_of_memory: bool) -> u16 {
+    if out_of_memory { 503 } else { 500 }
+}
+
 fn stop_watching(stream: &TcpStream, done: &AtomicBool, watcher: JoinHandle<()>) {
     done.store(true, Ordering::Relaxed);
     let _ = stream.shutdown(Shutdown::Read);
@@ -114,7 +119,7 @@ pub(super) fn completion(
         .unwrap_or_else(|| Stored::new(loaded, session_id))
     {
         Ok(state) => state,
-        Err(e) => return send_error(stream, 500, e),
+        Err(e) => return send_error(stream, failure_status(e.is_out_of_memory()), e),
     };
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -164,7 +169,12 @@ pub(super) fn completion(
             Err(e) => {
                 stop_watching(stream, &done, watcher);
                 store.recover(active, plain, &previous, existing);
-                return fail(stream, input.stream, 500, e);
+                return fail(
+                    stream,
+                    input.stream,
+                    failure_status(e.is_out_of_memory()),
+                    e,
+                );
             }
         }
     } else {
@@ -239,7 +249,11 @@ pub(super) fn completion(
         }
         Err(e) => {
             store.recover(active, plain, &previous, existing);
-            return fail(stream, input.stream, 500, e);
+            let status = match &e {
+                GenerateError::Model(model) => failure_status(model.is_out_of_memory()),
+                _ => 500,
+            };
+            return fail(stream, input.stream, status, e);
         }
     };
     let reused = skipped.unwrap_or(outcome.reused);
@@ -247,12 +261,14 @@ pub(super) fn completion(
         store.recover(active, plain, &previous, existing);
         return Ok(());
     }
-    if let Some(checkpoint) = checkpoint {
-        active.cache = checkpoint;
+    let mut replayed = 0;
+    let rewound = checkpoint.is_some_and(|mark| plain.rewind(&mut active.cache, mark).is_ok());
+    if rewound {
         active.retained = Retained::restored(history);
     } else if persistent && !history.is_empty() && prompt.starts_with(&history) {
         active.cache.clear();
         if plain.forward(&history, &mut active.cache).is_ok() {
+            replayed = history.len();
             active.retained = Retained::restored(history);
         } else {
             // A failed refresh must not publish a partially rebuilt session.
@@ -270,6 +286,7 @@ pub(super) fn completion(
         );
         if let Some(fields) = final_chunk.as_object_mut() {
             fields.insert("marin_reused_tokens".into(), json!(reused));
+            fields.insert("marin_replayed_tokens".into(), json!(replayed));
             fields.insert(
                 "usage".into(),
                 json!({
@@ -294,6 +311,7 @@ pub(super) fn completion(
                 "model": loaded.name,
                 "marin_session_id": persistent.then_some(active.id.as_str()),
                 "marin_reused_tokens": reused,
+                "marin_replayed_tokens": replayed,
                 "choices": [{
                     "index": 0,
                     "message": {"role": "assistant", "content": answer},

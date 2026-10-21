@@ -43,14 +43,15 @@ impl Engine {
     }
 
     /// A point of a Qwen3.5 GPU cache that `rewind` returns to, taking only the DeltaNet state (a few tens of MB) and no
-    /// second copy of the keys and values. `None` for any other engine, or if the GPU has no room even for that.
+    /// second copy of the keys and values. The state goes on the GPU when it has room to spare and into host memory
+    /// when it has not, so a GPU short of memory still gets a mark. `None` for any other engine.
     pub fn mark(&self, cache: &EngineCache) -> Result<Option<crate::qwen35::Mark>, ModelError> {
         match (self, cache) {
             (Self::Qwen35Cuda(m), EngineCache::Qwen35Cuda(kv)) => {
                 let free = u64::try_from(m.gpu().info()?.free_bytes).unwrap_or(0);
                 let bytes = u64::try_from(kv.mark_bytes()).unwrap_or(u64::MAX);
                 if free < bytes.saturating_add(GPU_SLACK_BYTES) {
-                    return Ok(None);
+                    return Ok(m.mark_cache_in_host(kv).ok());
                 }
                 Ok(Some(m.mark_cache(kv)?))
             }

@@ -227,20 +227,17 @@ the model wrote ([archive](docs/benchmarks/archive/11-coding-v0.log)). Qwen3.5-4
 format (12 read after a repair); tool time median 2 ms, median task 25.8 s. Failures were confident (a call site
 named as the definition, "the code does not exist"). Use it to find `path:line`, then read the line.
 
-V10 puts chat and code behind one `marin` ([archive](docs/benchmarks/archive/12-unified-terminal.log)): the model
-loads in-process (no `marin serve`), the first run lists models with the planner's fit and saves the choice, flags
-beat saved values, `/mode`, `/model`, `/status`, `/settings`, `/clear`, `/help`, `/exit` work in the palette and on a
-pipe, and a running server on port 8000 is reused by `marin code`. In-process code mode first replayed the whole
-conversation every tool round (Qwen3.5 truncation); reusing the server's checkpoint idea took a two-tool question
-from 25.3 to 14.6 s (rounds 8.8/11.6/12.8 s → 5.3/4.7/2.3 s) and Ctrl-C from up to 12 s to 0.01–0.43 s.
+V10 puts chat and code behind one `marin` ([archive](docs/benchmarks/archive/12-unified-terminal.log)): the model loads in-process, the first run
+lists models with the planner's fit, flags beat saved values, `/mode`, `/model`, `/status`, `/settings`, `/clear` work in the palette and on a pipe, and a
+server on port 8000 is reused by `marin code`. Reusing the server's checkpoint idea took a two-tool code question from 25.3 to 14.6 s and Ctrl-C from up to 12 s to 0.01–0.43 s.
 
 Persistent checkpoints — GO, opt-in, Qwen3.5 GPU only ([archive](docs/benchmarks/archive/15-checkpoint-feasibility.log)). Replaying history costs
 1.9 s for 256 tokens, 7.7 s for 1k, 32.8 s for 4k; the state is 51 MiB plus 64 KiB per token. A resume with one question takes 9.3 s
 instead of 25.6 s at 2,265 tokens (~1 s of each restore hashes the weight files); checkpoints under 256 tokens are refused.
 
 `/bench` and `/verify` in `marin` run the `marin-run` code on the loaded model, no reload ([archive](docs/benchmarks/archive/16-terminal-bench-verify.log)).
-Matched, interleaved runs (128 in / 64 out, idle machine) agree within 1% between `marin-run bench`, `/bench` and the Qwen3.5 CUDA commit
-(cde2c44): first token 920–950 ms, prefill 134–139, decode 40.0–40.6 tok/s. One earlier session measured 31.5 decode; four controls did not reproduce it.
+Matched, interleaved runs (128 in / 64 out) agree within 1% between `marin-run bench`, `/bench` and commit cde2c44: first token 920–950 ms,
+prefill 134–139, decode 40.0–40.6 tok/s. One earlier session measured 31.5 decode; four controls did not reproduce it.
 
 ## Context cost on an 8 GB GPU — O(state) passes, GO ([archive](docs/benchmarks/archive/18-inference-state-memory.log))
 
@@ -248,10 +245,18 @@ A Qwen3.5 GPU pass used to stage the whole cache to be undoable. It now runs in 
 is undone by cutting them back, and only the 53 MB of DeltaNet state is marked and put back.
 Matched, interleaved before → after (idle machine, 4B-Q8, decode tok/s; process VRAM peak): 128 tokens 40.0 → 40.1 (4,472 → 4,376 MiB),
 2k 36.7 → 39.4 (4,696 → 4,568), 8k 27.2 → 35.3 (5,496 → 4,984), 14k 22.3 → 32.0 (6,296 → 5,368); prefill and first token unchanged.
-The planner admits ~26–28k tokens instead of 15.4k; its estimate is within 5–50 MiB of the measured peak, plus the 512 MiB safety.
-A 19-turn chat to 27k tokens reuses every turn (11–43 s each, 6.2 GB); before, turns after 9.8k replayed everything (123–180 s).
-`Outcome.replayed` reports tokens a cache had to read again; `reused` no longer counts them. `marin serve --ctx 8192` runs 2 requests at
-once instead of 1. Offloading active KV over PCIe (37 ms/token at 8k) remains NO-GO: **V5 tiering NO-GO**.
+The planner admits ~26–28k tokens instead of 15.4k (estimate within 5–50 MiB of the measured peak, plus the 512 MiB safety). A 19-turn chat
+to 27k tokens reuses every turn (11–43 s each); before, turns after 9.8k replayed everything (123–180 s). `Outcome.replayed` reports tokens a cache
+had to read again; `reused` no longer counts them. `marin serve --ctx 8192` runs 2 requests at once instead of 1. **V5 tiering stays NO-GO** (37 ms/token at 8k).
+
+## Memory pressure after loading — host marks and waiting, GO ([archive](docs/benchmarks/archive/19-vram-pressure.log))
+
+A mark needed the 53 MB plus the 512 MiB safety free, and the server copied the whole history KV every turn; below that the next turn read the
+whole history again. The recurrent-state mark now goes to host memory when the GPU is short (same bytes and logits as a GPU mark), and the server
+returns to a mark instead of a copy (peak at 5k tokens 5,176 → 4,824 MiB). Turns with 340–600 MiB free: chat 29–42 s (2.9–4.3k tokens replayed) →
+6.2–7.3 s, replayed 0; chat at 10k tokens 100–109 → 9.8–10.0 s; server 34–50 → 7.4–8.1 s. Uncontended turns and decode are unchanged (within 0.3%).
+Two requests that do not fit together both failed with 500; now the older finishes and the younger gets a retryable 503 (`Gate::wait_for_memory`).
+`marin_replayed_tokens` reports a re-read. Below ~150 MiB free a single pass cannot run.
 
 ## Results that changed the runtime
 
@@ -288,19 +293,14 @@ reverted prototype.
 - Qwen3.5 vision/MTP, Qwen3.5 snapshots, and Granite 3.0 strict INT8/CUDA
   numerical parity are not accepted capabilities. No H-Tiny execution path
   or larger-than-VRAM expert cache exists.
-- Static memory admission can become stale if another process consumes RAM
-  or VRAM after planning. CUDA GPU quotas and broad quality testing are not
-  demonstrated. Early Qwen3 figures and later model runs use different
+- Admission is planned once; after loading, a pass that finds no GPU memory is waited out or refused (503), not predicted.
+  CUDA GPU quotas and broad quality testing are not demonstrated. Early Qwen3 figures and later model runs use different
   conditions and must not be combined into synthetic speedup claims.
 
 ## Reproduce current measurements
 
-Use the same model artifact, context, prompt length, output length, thread
-count, power mode and warmup on both sides. `bench --json` records the setup;
-`compare` checks ranges. Raw historical files under ignored
-`bench-results/` are optional local evidence; the tracked archive preserves
-published tables and commands. No reference JSON is implicitly produced by
-these commands.
+Use the same model artifact, context, prompt length, output length, thread count, power mode and warmup on both sides. `bench --json` records the setup;
+`compare` checks ranges; the tracked archive preserves published tables and commands. Pressure runs: `docs/benchmarks/archive/19-harness/`.
 
 ```bash
 # BF16 reference, then packed INT8 on the same CPU and input
@@ -347,4 +347,4 @@ Section numbers and their original gates remain unchanged inside them:
 - [22–31: CPU SIMD, INT8, KV, INT4 pilots and consolidation](docs/benchmarks/archive/02-cpu-stages.log)
 - [32–40: packed loader, Qwen3.5 and V9 planner](docs/benchmarks/archive/03-loader-qwen35-planner.log)
 - [41–46: Granite MoE, numerical NO-GOs and H-Tiny pilot](docs/benchmarks/archive/04-granite-moe.log)
-- Server logs: [sessions](docs/benchmarks/archive/04-server-sessions.log), [checkpoints](docs/benchmarks/archive/05-server-checkpoints.log), [V7 scheduling](docs/benchmarks/archive/06-server-scheduling.log), [V7b batched decode](docs/benchmarks/archive/07-batched-decode.log), [V7c memory](docs/benchmarks/archive/08-batched-memory.log), [V8 prefill](docs/benchmarks/archive/09-batched-prefill.log), [V9 prefix](docs/benchmarks/archive/10-shared-prefix.log), [Coding V0](docs/benchmarks/archive/11-coding-v0.log), [unified terminal](docs/benchmarks/archive/12-unified-terminal.log), [stabilization](docs/benchmarks/archive/13-stabilization.log), [durable sessions](docs/benchmarks/archive/14-durable-sessions.log), [checkpoints](docs/benchmarks/archive/15-checkpoint-feasibility.log), [in-terminal bench and verify](docs/benchmarks/archive/16-terminal-bench-verify.log), [performance and memory](docs/benchmarks/archive/17-performance-and-memory.log), [O(state) passes](docs/benchmarks/archive/18-inference-state-memory.log) (load generator `06-load.py`, prompt `06-long-prompt.txt`)
+- Server logs: [sessions](docs/benchmarks/archive/04-server-sessions.log), [checkpoints](docs/benchmarks/archive/05-server-checkpoints.log), [V7 scheduling](docs/benchmarks/archive/06-server-scheduling.log), [V7b batched decode](docs/benchmarks/archive/07-batched-decode.log), [V7c memory](docs/benchmarks/archive/08-batched-memory.log), [V8 prefill](docs/benchmarks/archive/09-batched-prefill.log), [V9 prefix](docs/benchmarks/archive/10-shared-prefix.log), [Coding V0](docs/benchmarks/archive/11-coding-v0.log), [unified terminal](docs/benchmarks/archive/12-unified-terminal.log), [stabilization](docs/benchmarks/archive/13-stabilization.log), [durable sessions](docs/benchmarks/archive/14-durable-sessions.log), [checkpoints](docs/benchmarks/archive/15-checkpoint-feasibility.log), [in-terminal bench and verify](docs/benchmarks/archive/16-terminal-bench-verify.log), [performance and memory](docs/benchmarks/archive/17-performance-and-memory.log), [O(state) passes](docs/benchmarks/archive/18-inference-state-memory.log), [VRAM pressure](docs/benchmarks/archive/19-vram-pressure.log) (load generator `06-load.py`, prompt `06-long-prompt.txt`)

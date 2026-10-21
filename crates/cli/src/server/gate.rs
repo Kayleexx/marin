@@ -19,6 +19,9 @@ const HOLD: Duration = Duration::from_millis(10);
 /// share one pass. They are sampling and writing their last token, a few milliseconds at most.
 const COLLECT: Duration = Duration::from_millis(4);
 
+/// The longest a request waits for another to finish when the GPU has no memory for its next pass.
+const MEMORY_WAIT: Duration = Duration::from_secs(120);
+
 /// A request that has not taken a decode step for this long is no longer waited for.
 const LANE_TTL: Duration = Duration::from_millis(100);
 
@@ -42,7 +45,10 @@ struct State {
     running: bool,
     waiting: Vec<Waiter>,
     hold_until: Option<Instant>,
-    active: usize,
+    /// The requests running now, by lane.
+    admitted: Vec<u64>,
+    /// The running requests that are waiting for GPU memory.
+    starved: Vec<u64>,
     /// Decode steps waiting for a pass, with their caches lent to whoever runs it.
     decodes: Vec<Decode>,
     /// Finished decode steps, by ticket, waiting for their request to pick them up.
@@ -60,7 +66,7 @@ pub(super) struct Gate {
     max_batch: usize,
 }
 
-pub(super) struct Slot<'a>(&'a Gate);
+pub(super) struct Slot<'a>(&'a Gate, u64);
 
 struct Running<'a> {
     gate: &'a Gate,
@@ -109,7 +115,7 @@ impl Gate {
     /// Blocks until fewer than `max_active` requests are running.
     pub fn wait_for_slot(&self) {
         let mut state = self.lock();
-        while state.active >= self.max_active {
+        while state.admitted.len() >= self.max_active {
             state = self
                 .changed
                 .wait(state)
@@ -117,13 +123,48 @@ impl Gate {
         }
     }
 
-    /// Counts one running request until the slot is dropped. Only the accepting thread calls this, right after
+    /// Counts the running request `lane` until the slot is dropped. Only the accepting thread calls this, right after
     /// `wait_for_slot`, so the cap cannot be overshot.
-    pub fn enter(&self) -> Slot<'_> {
+    pub fn enter(&self, lane: u64) -> Slot<'_> {
+        self.lock().admitted.push(lane);
+        Slot(self, lane)
+    }
+
+    /// For a request whose pass was undone because the GPU had no memory left. It waits until another request has
+    /// finished and is then told to try again, as long as some other request can still make progress or it is the
+    /// oldest; when every request is waiting for memory, all but the oldest give way (`false`), which is what lets
+    /// the oldest go on. A request running alone has nobody to wait for. `give_up` ends the wait early.
+    pub fn wait_for_memory(&self, lane: u64, give_up: impl Fn() -> bool) -> bool {
         let mut state = self.lock();
-        state.active = state.active.saturating_add(1);
+        let before = state.admitted.len();
+        let deadline = Instant::now().checked_add(MEMORY_WAIT);
+        state.starved.push(lane);
+        let granted = loop {
+            if state.admitted.len() < before {
+                break true;
+            }
+            let others_progress = state
+                .admitted
+                .iter()
+                .any(|other| *other != lane && !state.starved.contains(other));
+            let oldest = state.admitted.iter().all(|other| *other >= lane);
+            let left = deadline.map_or(Duration::ZERO, |d| {
+                d.saturating_duration_since(Instant::now())
+            });
+            let alone = before < 2;
+            if alone || (!others_progress && !oldest) || left.is_zero() || give_up() {
+                break false;
+            }
+            state = self
+                .changed
+                .wait_timeout(state, left.min(Duration::from_millis(200)))
+                .map(|(state, _)| state)
+                .unwrap_or_else(|e| e.into_inner().0);
+        };
+        state.starved.retain(|other| *other != lane);
         drop(state);
-        Slot(self)
+        self.changed.notify_all();
+        granted
     }
 
     /// Queues a pass and blocks until it is this pass's turn, or until another request's pass finished it.
@@ -247,7 +288,7 @@ impl Gate {
 impl Drop for Slot<'_> {
     fn drop(&mut self) {
         let mut state = self.0.lock();
-        state.active = state.active.saturating_sub(1);
+        state.admitted.retain(|lane| *lane != self.1);
         drop(state);
         self.0.changed.notify_all();
     }
@@ -326,10 +367,46 @@ mod tests {
                 });
             }
         });
-        let first = gate.enter();
-        let second = gate.enter();
-        assert_eq!(gate.lock().active, 2);
+        let first = gate.enter(0);
+        let second = gate.enter(1);
+        assert_eq!(gate.lock().admitted.len(), 2);
         drop((first, second));
-        assert_eq!(gate.lock().active, 0);
+        assert_eq!(gate.lock().admitted.len(), 0);
+    }
+
+    #[test]
+    fn a_request_alone_has_nobody_to_wait_for_when_the_gpu_is_full() {
+        let gate = Gate::new(2, 1);
+        let _only = gate.enter(5);
+        assert!(!gate.wait_for_memory(5, || false));
+    }
+
+    #[test]
+    fn the_oldest_waits_for_a_finish_and_the_younger_gives_way_once_all_are_waiting() {
+        let gate = &Gate::new(3, 1);
+        let older = gate.enter(1);
+        let younger = gate.enter(2);
+        std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| gate.wait_for_memory(1, || false));
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(
+                !waiting.is_finished(),
+                "the younger is still making progress"
+            );
+            let gave_way = scope.spawn(|| gate.wait_for_memory(2, || false));
+            assert!(!gave_way.join().unwrap_or(true));
+            drop(younger);
+            assert!(waiting.join().unwrap_or(false));
+        });
+        drop(older);
+    }
+
+    #[test]
+    fn a_wait_for_memory_ends_when_the_request_is_cancelled() {
+        let gate = Gate::new(2, 1);
+        let _older = gate.enter(1);
+        let _younger = gate.enter(2);
+        assert!(!gate.wait_for_memory(1, || true));
+        assert!(gate.lock().starved.is_empty());
     }
 }

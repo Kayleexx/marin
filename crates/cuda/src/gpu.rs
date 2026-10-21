@@ -273,6 +273,21 @@ impl Gpu {
         })
     }
 
+    /// Overwrites all of `dst` with `values`.
+    pub fn upload_into(&self, values: &[f32], dst: &mut Buffer) -> Result<(), CudaError> {
+        if values.len() != dst.len {
+            return Err(CudaError::Shape {
+                what: "upload into buffer",
+                expected: dst.len,
+                actual: values.len(),
+            });
+        }
+        let started = Instant::now();
+        self.stream.memcpy_htod(values, &mut dst.data)?;
+        self.counters.upload(std::mem::size_of_val(values), started);
+        Ok(())
+    }
+
     pub fn zeros(&self, len: usize) -> Result<Buffer, CudaError> {
         self.counters.allocation();
         Ok(Buffer {

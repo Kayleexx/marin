@@ -1,5 +1,6 @@
 use super::TextConfig;
-use super::gpu_cache::{GpuCache, Mark};
+use super::gpu_cache::GpuCache;
+use super::gpu_mark::Mark;
 use super::gpu_weights::{Layer, load_layers};
 use super::math::{invalid, size};
 use crate::qwen3::weight::Weight;
@@ -126,11 +127,19 @@ impl Qwen35Gpu {
         cache.mark(&self.gpu)
     }
 
+    /// Like `mark_cache`, with the state in host memory so that the GPU needs no room for it.
+    pub fn mark_cache_in_host(&self, cache: &GpuCache) -> Result<Mark, ModelError> {
+        if cache.owner != self.owner {
+            return Err(invalid("cache belongs to a different Qwen3.5 GPU model"));
+        }
+        cache.mark_in_host(&self.gpu)
+    }
+
     pub fn rewind_cache(&self, cache: &mut GpuCache, mark: Mark) -> Result<(), ModelError> {
         if cache.owner != self.owner {
             return Err(invalid("cache belongs to a different Qwen3.5 GPU model"));
         }
-        cache.rewind(mark)
+        cache.rewind(&self.gpu, mark)
     }
 
     pub fn checkpoint_cache(&self, cache: &GpuCache) -> Result<GpuCache, ModelError> {
