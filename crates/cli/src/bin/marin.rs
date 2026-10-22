@@ -121,7 +121,7 @@ fn run(cli: MarinCli, matches: &ArgMatches, style: Style) -> Result<ExitCode, Cl
                 None => session(&l, style, Talk::Code, root, log),
             }
         }
-        Some(MarinCommand::Serve { port }) => {
+        Some(MarinCommand::Serve { port, idle_unload }) => {
             if cli.options.snapshot.is_some() {
                 return Err(CliError::BadOption(
                     "--snapshot is not supported by marin serve".into(),
@@ -136,15 +136,20 @@ fn run(cli: MarinCli, matches: &ArgMatches, style: Style) -> Result<ExitCode, Cl
             let l = launching(cli.options, matches, style, false);
             let defaults = setup::settings(&l.options)?;
             let path = absolute(&pick_model(&l, false, style)?.path);
-            let loaded = load::load_chat(
-                &path,
-                (l.options.ctx, CHAT_CTX),
-                backend_choice(l.options.backend),
-                setup::chat_precision(&l.options, &l.explicit, &path, &l.saved)?,
-                &style,
-                (false, false),
-            )?;
-            cli::server::run(loaded, defaults, port)?;
+            let precision = setup::chat_precision(&l.options, &l.explicit, &path, &l.saved)?;
+            let backend = backend_choice(l.options.backend);
+            let reload = || {
+                load::load_chat(
+                    &path,
+                    (l.options.ctx, CHAT_CTX),
+                    backend,
+                    precision,
+                    &style,
+                    (false, false),
+                )
+            };
+            let idle = idle_unload.map(std::time::Duration::from_secs);
+            cli::server::run(reload()?, &reload, defaults, port, idle)?;
             Ok(ExitCode::SUCCESS)
         }
         None => {

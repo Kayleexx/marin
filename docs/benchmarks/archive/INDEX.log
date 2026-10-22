@@ -1,7 +1,7 @@
 # Benchmark archive index
 
 BENCHMARKS.md is the living summary: accepted results, retained gates, material NO-GO decisions, commands.
-This folder holds the evidence behind it; maintained workloads are in `benchmarks/`. Nothing in the source tree, the tests or CI reads these files; they are
+This folder holds the evidence behind it; the workload scripts are kept locally, not published. Nothing in the source tree, the tests or CI reads these files; they are
 read by people (and linked from BENCHMARKS.md and README.md). Some raw JSON, reference vectors and source copies were
 recorded under the ignored `bench-results/` folder of the measuring machine; an ignored path is not a promise that a
 file exists in a fresh checkout, and the tracked tables and commands stay here.
@@ -36,11 +36,13 @@ Each log states its gates before the results. Class: **decision** = the reasonin
 | [17-performance-and-memory](17-performance-and-memory.log), [18-inference-state-memory](18-inference-state-memory.log), [19-vram-pressure](19-vram-pressure.log) | state-marked passes, host marks | decision + evidence |
 | [20-speculation](20-speculation.log) | V8 speculative decoding, PARTIAL GO | decision + evidence |
 | [21-model-evaluation](21-model-evaluation.log) | V10-A model evaluation, routing NO-GO | decision + evidence |
+| [22-session-continuity](22-session-continuity.log) | V11 multi-session continuity, hot/cold sessions, GO | decision + evidence |
+| [23-model-hibernation](23-model-hibernation.log) | V11 model hibernation (--idle-unload), GO opt-in | decision + evidence |
+| [24-baseline-evaluation](24-baseline-evaluation.log) | Baseline evaluation of every installed model/backend on the V11 tree: matrix, paired regression check, HF verify, workflows, bottlenecks; gates first | decision + evidence |
 
 ## Harnesses and raw outputs (not tracked)
 
 The one-off drivers, Rust probes (`*.rs.txt`), summarizers, prompt sets, transcripts and per-run outputs behind these logs
 (`06-load.py`, `11-code-eval.py`, `15-checkpoint-e2e.sh`, `17-` to `21-harness/`, ...) are no longer tracked; this folder keeps only
 the logs. They stay on the maintainer's machine and in git history: the last commit that contains them is `5a4a8ee`
-(`git show 5a4a8ee:docs/benchmarks/archive/<path>`). Maintained workloads live in `benchmarks/`
-(`server_load.py` replaces `06-load.py`). New harnesses are not committed unless they are worth rerunning.
+(`git show 5a4a8ee:docs/benchmarks/archive/<path>`). The workload scripts (`server_load.py` replaces `06-load.py`) are kept locally in `benchmarks/`, which is not published.

@@ -252,6 +252,39 @@ Greedy output identical in 64 of 64 runs; sampled identical in 26 of 28 (a pass 
 (+53 MB resident mark); under a second program holding the GPU both finished identically. The server does not guess. A draft model and a controller
 were not built: copying already uses the cheap check and nothing measured loses.
 
+## Multi-session continuity (V11) — GO ([archive](docs/benchmarks/archive/22-session-continuity.log))
+
+The server kept one idle session, so a second client evicted the first (404 and a full re-read). Now one session stays hot on the GPU and up to 16 others
+(2 GiB together) are copied to host memory when displaced and thawed on their next request; a running session is in no list (409 if asked for again, 404 if
+dropped or lost with a restart). Nothing is written to disk. Qwen3.5-4B Q8, `--ctx 8192`, greedy, before → after:
+
+| Workload | Before | After |
+|---|---|---|
+| Two clients alternating, 1.1k-token histories | 6 of 8 turns 404; returns 8.3–8.9 s to first token; wall 67.6 s | 0 × 404; 0.28–0.37 s; wall 18.3 s |
+| Two clients alternating, 4k-token histories | 4 × 404; returns 31–34 s; wall 194 s | 0 × 404; 0.35–0.48 s; wall 65 s |
+| Three clients at once | 3 × 404; wall 30.3 s | 0 × 404; wall 16.1 s |
+| One client (follow-ups, decode ~39 tok/s) | 0.25–0.36 s | unchanged (decode within run-order noise) |
+
+A cold session costs 51 MiB + 64 KiB per token (~310 MiB at 4k); GPU use is unchanged. Every answer was identical to the old server's. Not covered end to end:
+two overlapping requests for one id (Store-level test only) and a thaw that finds no GPU memory (503, session kept; Store-level only). Limits are constants.
+
+## Model hibernation (V11) — GO, opt-in ([archive](docs/benchmarks/archive/23-model-hibernation.log))
+
+`marin serve --idle-unload SECONDS` (off by default) drops the model, the shared prefix and the hot session's GPU cache after a quiet period and reloads
+through the same loader call when a completion arrives (`/v1/models` does not wake it). One lifecycle owner holds the model; a request holds it for its whole run,
+so it is never released under a request; waiting requests share one wake; a failed load leaves it asleep with every session kept (503, retryable). Sessions
+made before a sleep come back from host memory; if the model files changed meanwhile they are dropped. Qwen3.5-4B Q8, 6 cycles, one 3k-token chat session:
+
+| Measure | Result |
+|---|---|
+| Process VRAM | 4,696 MiB → 0 every cycle (device back to the 710–747 MiB desktop level) |
+| Wake to first token | 4.9–6.2 s, of which the model load is 4.6–5.8 s (the same with a cold page cache) |
+| Warm first token / resumed session | 0.30–0.33 s; 0 tokens re-read, 2.7–3.0k reused every cycle |
+| Power | not claimed: loaded idle 8.8 W vs unloaded 9.1 W, while the no-server baseline moved 7.5 → 13.8 W between windows |
+
+Also closed: a second request for a running session id gets 409 (tested end to end), a thaw or a new cache that finds no GPU memory keeps the session and answers 503
+(tested on the 4B), and a client hanging up during a cold resume loses nothing.
+
 ## Model evaluation (V10-A) — routing NO-GO, one model ([archive](docs/benchmarks/archive/21-model-evaluation.log))
 
 Gates were written first; 17 held-out single-shot tasks per configuration (greedy, official templates, no parser repair; numbers, JSON and tool calls checked by
@@ -268,6 +301,27 @@ Thinking costs 2.2x the time and 4.2x the tokens for no gain (12 vs 13, noise), 
 fast prefill and fails the quality gate (light work 6/8 vs 8/8; tool format 0/4). Every model wrote malformed calls, so strict parsing is not met by any: the tool client's
 repair stays. Repository tasks (4B, tools): dev 9/17, held-out 6/8. Not run: Qwen3-0.6B (the 1.7B already fails), Qwen3.5-2B-Base (a base model), Granite (experimental pilot). VRAM is the all-programs reading (about 0.8 GB is the desktop).
 Smallest policy that the data allows: keep the 4B non-thinking as the only chat/code model; offer thinking only as an explicit per-request opt-in. Not implemented.
+
+## Baseline evaluation on the V11 tree ([archive](docs/benchmarks/archive/24-baseline-evaluation.log))
+
+Every installed model and backend, one process at a time, gates fixed in `plan.txt` first; RTX 5050 at 40 W. Paired old/new runs (HEAD against the V11 tree) agree
+within 2% on CPU and CUDA: **no software regression**. Today's 4B CUDA decode is 32 tok/s against 35.9 recorded; an older build (8130ad7) measured now gives the same 32, so
+the gap is the machine (power cap), not code. Small CUDA models swing 20–90% between cells with the clocks; only the 4B/2B/Granite numbers repeat within 3%.
+
+| Model / backend | Load | TTFT @128 / @1024 | Prefill @512 | Decode @128 | RSS / process VRAM |
+|---|---:|---:|---:|---:|---:|
+| Qwen3-1.7B BF16 CUDA | 2.8 s | 0.10 / 0.96 s | 1,269 | 52.7 | 0.8 / 3.8 GB |
+| Qwen3.5-2B BF16 CUDA | 3.9 s | 0.38 / 3.06 s | 337 | 46.9 | 1.2 / 3.9 GB |
+| Qwen3.5-4B Q8 CUDA | 3.9 s | 1.04 / 7.66 s | 126 | 32.7 | 0.9 / 4.6 GB |
+| Granite 3.0 BF16 CUDA (experimental) | 2.7 s | 0.30 / 2.97 s | 336 | 137 | 0.3 / 2.8 GB |
+| Qwen3.5-4B Q8 CPU | 4.2 s | 3.2 / 24.5 s | 39 | 4.3 | 4.6 GB |
+| Qwen3.5-2B INT8 CPU | 2.7 s | 1.5 / 11.6 s | 87 | 10.0 | 2.1 GB |
+| Qwen3-1.7B INT8 CPU | 2.7 s | 0.66 / 5.5 s | 189 | 12.3 | 2.1 GB |
+
+4B CUDA at 8k context: TTFT 87 s (prefill 94 tok/s), decode 29, 5.0 GB. HF checks pass everywhere they were made for the model; the Granite CUDA/Q8 relative-RMS miss
+(1.098e-5 against 1e-5) is unchanged. Workflows pass on the 4B: chat, save/resume, checkpoint resume (7 s against 14 s), code mode, two-client batching (+40%
+aggregate), speculation (identical text, 1.86× on whole-file edits, 1.00× on chat), hibernation, and the server pressure/cold/sleep tests.
+Largest bottleneck: INT8 prefill (81% of it in the projections at about 1 TFLOP/s); on CPU, decode reads weights at 19–22 GB/s with 1.5 of 16 cores busy.
 
 ## Results that changed the runtime
 
@@ -337,8 +391,7 @@ model/reference environment variables and are reported separately.
 ### From a clean checkout
 
 Tracked and runnable with only the repository: `scripts/check-line-limit.sh`, `scripts/check-unsafe.sh`, the tiny-model fixtures and references under
-`tests/`, and the workloads in `benchmarks/`: `bench_baseline.sh MODEL_DIR` (Qwen3 bf16 CPU and CUDA matrix), `guess_prompts.sh DIR` and `spec_prompts.sh DIR` (prompt
-folders for `marin-run guess` and `spec-bench`; the prompts built from the untracked spec are skipped, with a note, when it is absent), `server_load.py PORT PID SCENARIO` (multi-client load against `marin serve`) with its `long-prompt.txt`.
+`tests/`. The measurement workloads (`bench_baseline.sh`, `server_load.py`, prompt builders, hibernation and evaluation drivers) live in the maintainer's local `benchmarks/` folder, which is not published; the archive logs record the exact commands.
 Hugging Face references are generated, not tracked: `scripts/gen_reference.py`, `scripts/gen_chat_reference.py`, `scripts/gen_chat_golden.py` (Qwen3 and chat
 template) and `tests/reference/{qwen35,granite}/*.py` (need torch and transformers). The pinned 128-step Qwen3.5-4B INT8 reference
 (`bench-results/qwen35-4b/hf-int8-128.json`, 226 MB) is not in the repository and its exact invocation was not recorded; regenerate with

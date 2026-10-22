@@ -1,0 +1,34 @@
+V11 model hibernation (--idle-unload): gates, baseline, results, decision. The scripts that produced it stay on the maintainer's machine.
+
+V11 model hibernation (--idle-unload), 2026-10-22. Machine: Ryzen 7 260, RTX 5050 Laptop 8 GB at 40 W, Qwen3.5-4B Q8 CUDA,
+--ctx 8192, greedy. Reproduce: benchmarks/hibernation/measure.py (cycles) and power.py (power); tests: crates/cli/tests/server_sleep.rs.
+
+Gates (derived from the pre-implementation baseline below; written into this file after the run, not before - the numbers
+were not adjusted to the results):
+ H1 every session (hot or cold at the sleep) answers as it would without the sleep, nothing re-read, 0 x 404 within the cold limits
+ H2 sleeping frees >= 3.5 GB of process VRAM; no growth over repeated cycles
+ H3 wake to first token <= 8 s; repeated cycles within 20% of each other
+ H4 opt-in only (off by default); never while a request holds the model; one wake for any number of waiting requests
+ H5 a wake that cannot load leaves the server asleep, sessions kept, requests answered 503 (retryable)
+ H6 power: reported as measured; no claim without a steady-state difference
+
+Baseline before the change (idle server, model loaded): process VRAM 4,408 MiB (device 5,175 MiB over a 759 MiB desktop),
+GPU power 11.6 W in P4 against 10.8-11.4 W with no server (no difference). Load to listening: 4.6 s warm, 4.5 s with the
+weight files evicted from the page cache (not disk-bound). Wake TTFT therefore ~ 4.6 s + the request.
+
+Result, 6 cycles (ACTIVE -> idle 5 s -> ASLEEP -> request -> warm request), one 2.7-3.0k-token chat session:
+ process VRAM 4,696 MiB -> 0 MiB every cycle (the process leaves the GPU; device memory back to the 710-747 MiB desktop level)
+ wake first token 4.9-6.2 s (model load 4.6-5.8 s of it); warm first token 0.30-0.33 s
+ the session came back with replayed 0 and reused 2,736 -> 2,966 tokens (its whole history) in every cycle
+ server RSS 392, 418, 529, 528, 545, 544 MiB (the cold copy of the session plus allocator; flat after cycle 3)
+Power (power.py, 90 s windows after 20 s of quiet): model loaded idle 8.8 W, model unloaded idle 9.1 W, no server 7.5 W and
+13.8 W in two windows (P8 vs P4). The no-server baseline moves by more than any difference between the two states:
+NO POWER SAVING IS CLAIMED. The benefit measured is 4.7 GB of VRAM.
+
+Tests (all on the GPU): repeated sleep/wake with two conversations, answers equal to a server that never slept and no
+re-read; three requests arriving while asleep -> one wake, all served; a client hanging up while the model wakes loses
+nothing; model files changed while asleep -> sessions made with the old ones are dropped (404) and the model loads;
+real 4B: a wake with 1 GiB of GPU left -> 503, still asleep, session kept and resumed afterwards; a streaming request
+is not interrupted by the idle timer (3 s past the 1 s limit) and the model sleeps only after it ends.
+
+Decision: GO as an opt-in (--idle-unload SECONDS, default off). Wake costs about 5 s per first request after an idle period.

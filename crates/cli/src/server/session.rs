@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Read};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -6,6 +7,7 @@ use model::EngineCache;
 use model::qwen35::Mark;
 use runtime::{CausalLm, Retained, SequenceCache};
 
+use super::cold::{COLD_BYTES, COLD_SESSIONS, Cold};
 use super::sched::{ScheduleError, Scheduled};
 use crate::load::Loaded;
 
@@ -43,33 +45,136 @@ pub(super) fn new_id() -> io::Result<String> {
     Ok(format!("{:032x}", u128::from_be_bytes(bytes)))
 }
 
-/// The one idle session kept between requests. A request takes it out for its whole run, so a second request for
-/// the same ID finds nothing instead of sharing the state.
+/// Why a session id cannot be served right now.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Refused {
+    /// Another request is running this session.
+    Running,
+    /// The server holds no session with this id (never made, dropped, or lost with a restart).
+    Missing,
+}
+
+pub(super) enum Entry {
+    Hot(Stored),
+    Cold(Cold),
+}
+
 #[derive(Default)]
-pub(super) struct Store(Mutex<Option<Stored>>);
+struct Inner {
+    hot: Option<Stored>,
+    /// Oldest first.
+    cold: VecDeque<Cold>,
+    cold_bytes: usize,
+    /// (session id, lease number) of every session a request has claimed.
+    running: Vec<(String, u64)>,
+    leases: u64,
+}
+
+/// What the server keeps of sessions between requests: at most one hot session (its cache on the GPU) and a bounded
+/// number of cold ones (host memory, see `cold`). A request claims a session for its whole run, so the cache is never
+/// shared and a second request for the same id is refused while the first runs.
+#[derive(Default)]
+pub(super) struct Store(Mutex<Inner>);
+
+/// A claim on a session id; dropping it makes the id claimable again.
+pub(super) struct Lease<'a> {
+    store: &'a Store,
+    id: String,
+    number: u64,
+}
+
+impl Drop for Lease<'_> {
+    fn drop(&mut self) {
+        self.store
+            .lock()
+            .running
+            .retain(|(id, number)| !(*id == self.id && *number == self.number));
+    }
+}
 
 impl Store {
-    fn lock(&self) -> MutexGuard<'_, Option<Stored>> {
+    fn lock(&self) -> MutexGuard<'_, Inner> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub fn take(&self, id: &str) -> Option<Stored> {
-        let mut slot = self.lock();
-        if slot.as_ref().is_some_and(|state| state.id == id) {
-            slot.take()
+    pub fn claim(&self, id: &str) -> Result<(Lease<'_>, Entry), Refused> {
+        let mut inner = self.lock();
+        if inner.running.iter().any(|(running, _)| running == id) {
+            return Err(Refused::Running);
+        }
+        let found = if inner.hot.as_ref().is_some_and(|state| state.id == id) {
+            inner.hot.take().map(Entry::Hot)
         } else {
-            None
+            let at = inner.cold.iter().position(|cold| cold.id == id);
+            let cold = at.and_then(|at| inner.cold.remove(at));
+            if let Some(cold) = &cold {
+                inner.cold_bytes = inner.cold_bytes.saturating_sub(cold.bytes());
+            }
+            cold.map(Entry::Cold)
+        };
+        let entry = found.ok_or(Refused::Missing)?;
+        inner.leases = inner.leases.wrapping_add(1);
+        let number = inner.leases;
+        inner.running.push((id.to_owned(), number));
+        Ok((
+            Lease {
+                store: self,
+                id: id.to_owned(),
+                number,
+            },
+            entry,
+        ))
+    }
+
+    /// Makes room for a request that will build a cache: the hot session, if any, goes cold.
+    pub fn make_room(&self, sched: Scheduled<'_>) {
+        let old = self.lock().hot.take();
+        if let Some(old) = old {
+            self.shelve(old, sched);
         }
     }
 
-    pub fn evict(&self) {
-        let old = self.lock().take();
-        drop(old);
+    /// Makes `state` the hot session; the one it replaces goes cold.
+    pub fn put(&self, state: Stored, sched: Scheduled<'_>) {
+        let old = self.lock().hot.replace(state);
+        if let Some(old) = old {
+            self.shelve(old, sched);
+        }
     }
 
-    pub fn put(&self, state: Stored) {
-        let old = self.lock().replace(state);
-        drop(old);
+    fn shelve(&self, old: Stored, sched: Scheduled<'_>) {
+        if let Ok(Some(cold)) = sched.spill(&old) {
+            drop(old);
+            self.add_cold(cold);
+        }
+    }
+
+    /// Forgets every cold session, for weights that are no longer the ones they were made with.
+    pub fn clear_cold(&self) {
+        let mut inner = self.lock();
+        inner.cold.clear();
+        inner.cold_bytes = 0;
+    }
+
+    /// Keeps `cold` as the most recent cold session; the oldest go while the count or the bytes are over the limits.
+    pub fn add_cold(&self, cold: Cold) {
+        let mut inner = self.lock();
+        if cold.bytes() > COLD_BYTES {
+            return;
+        }
+        if let Some(at) = inner.cold.iter().position(|old| old.id == cold.id)
+            && let Some(old) = inner.cold.remove(at)
+        {
+            inner.cold_bytes = inner.cold_bytes.saturating_sub(old.bytes());
+        }
+        inner.cold_bytes = inner.cold_bytes.saturating_add(cold.bytes());
+        inner.cold.push_back(cold);
+        while inner.cold.len() > COLD_SESSIONS || inner.cold_bytes > COLD_BYTES {
+            match inner.cold.pop_front() {
+                Some(oldest) => inner.cold_bytes = inner.cold_bytes.saturating_sub(oldest.bytes()),
+                None => break,
+            }
+        }
     }
 
     /// Puts the session back as it was before a failed or cancelled request. A new session leaves nothing behind.
@@ -90,7 +195,7 @@ impl Store {
             active.cache.clear();
             active.retained.forget();
         }
-        self.put(active);
+        self.put(active, sched);
     }
 }
 
@@ -116,3 +221,7 @@ pub(super) fn checkpoint(
     active.retained = Retained::restored(history.to_vec());
     Ok((sched.mark(&active.cache)?, keep))
 }
+
+#[cfg(test)]
+#[path = "session_tests.rs"]
+mod tests;

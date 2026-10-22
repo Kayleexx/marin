@@ -5,7 +5,9 @@ use model::{Engine, EngineCache, ModelError};
 use runtime::CausalLm;
 use thiserror::Error;
 
+use super::cold::{self, Cold};
 use super::gate::{Gate, SLICE};
+use super::session::Stored;
 use crate::load::Loaded;
 
 /// Most requests that run at once; each holds its own KV and recurrent state on the GPU.
@@ -91,6 +93,21 @@ impl<'a> Scheduled<'a> {
     /// A point of `cache` for `rewind`; see `Engine::mark`.
     pub fn mark(&self, cache: &EngineCache) -> Result<Option<Mark>, ModelError> {
         self.gate.run(1, || self.loaded.model.mark(cache))
+    }
+
+    /// A session's state as host bytes; `None` if it cannot or should not be kept (see `cold::capture`).
+    pub fn spill(&self, stored: &Stored) -> Result<Option<Cold>, ModelError> {
+        self.gate
+            .run(1, || cold::capture(&self.loaded.model, stored))
+    }
+
+    /// A cold session back on the GPU. Waits for memory like a pass does; the cold session is only read.
+    pub fn thaw(&self, cold: &Cold) -> Result<Stored, ScheduleError> {
+        self.retrying(|| {
+            Ok(self
+                .gate
+                .run(1, || cold::thaw(&self.loaded.model, self.loaded.ctx, cold))?)
+        })
     }
 
     pub fn rewind(&self, cache: &mut EngineCache, mark: Mark) -> Result<(), ModelError> {

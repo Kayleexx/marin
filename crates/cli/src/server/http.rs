@@ -146,6 +146,7 @@ pub(super) fn json(stream: &mut TcpStream, status: u16, body: &Value) -> io::Res
         200 => "OK",
         400 => "Bad Request",
         408 => "Request Timeout",
+        409 => "Conflict",
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Content Too Large",

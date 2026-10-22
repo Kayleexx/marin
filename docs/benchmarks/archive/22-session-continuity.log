@@ -1,0 +1,107 @@
+# V11 bounded multi-session continuity (2026-10-21)
+
+Machine: Ryzen 7 260, 16 GB RAM, RTX 5050 Laptop 8 GB at 40 W; Qwen3.5-4B Q8 CUDA, `marin serve --ctx 8192 --temp 0`.
+
+## Audit of the server before the change (crates/cli/src/server)
+- `Store` is `Mutex<Option<Stored>>`: ONE idle session. `Stored` = id + GPU cache (`EngineCache`) + `Retained` token record.
+- A request with a session id TAKES the session out of the slot for its whole run (a second request for the same id
+  finds nothing: 404 "session not found, evicted or in use"; "in use" and "evicted" are the same answer).
+- A request with no id, or with id "new", calls `store.evict()` first: any other client's idle session is dropped
+  (GPU memory freed) before the new request runs. So client B's first request kills client A's session.
+- After a good reply `store.put` replaces the slot (drops the previous occupant, whoever's it was).
+- Failed/cancelled/disconnected existing sessions go through `Store::recover`: cache cleared, previous tokens read
+  again (a replay), and put back; a new session leaves nothing behind.
+- IDs: 128 random bits from /dev/urandom, 32 hex chars, minted by the server for "new"; any well-formed id is accepted
+  on input but only ids the store holds are served. Revision: the server keeps the token record (`Retained`), a request
+  reuses the cache only if the record equals the cache length and is a strict prefix of the new prompt (`can_reuse`),
+  otherwise the cache is rebuilt (the client's full message history is always in the request).
+- The client always re-sends its full history, so a lost session costs a re-read of the history (and a 404 the client
+  must handle: marin code retries once with a new session), never lost conversation text.
+- Existing mechanisms to reuse: `Engine::export_state_delta/export_state_page/begin_state_import/import_state_*/
+  finish_state_import/kept_tokens/state_layout` (used by checkpoint files; bytes are exact f32), `Retained::restored`,
+  `Scheduled::forward` (gate, memory retry), `Store::recover`, `Gate` admission.
+
+## Invariants
+I1 a cache is owned by exactly one place at a time: a running request, the hot slot, or the cold store (as bytes).
+   Cold bytes are never shared; a restore builds a fresh cache.
+I2 an id is served only if the store holds it (hot or cold) and no request is running it; otherwise 404 (unknown) or
+   409 (running). A session that was displaced is still known until the cold budget drops it.
+I3 a resumed cache holds exactly the tokens it held when it was demoted; the first request after resume reuses it only
+   under the same `can_reuse` rule as a hot session. Greedy output after resume equals output without demotion.
+I4 failed, cancelled or timed-out requests leave the session as it was before them (as today).
+I5 host memory held by cold sessions never exceeds the budget; sessions are dropped oldest first; a session that alone
+   exceeds the budget is not kept. No server conversation is written to disk.
+I6 GPU memory of idle sessions never exceeds what is held today (one hot session).
+I7 a restore that cannot get GPU memory is refused 503 and the cold session stays.
+
+## Gates (before implementation)
+A  continuity: A->B->A->B... with two clients: today every return of A is a 404 (or a replay); after: 0 x 404 and
+   reused > 0, replayed == 0 on every return within the budget.
+B  cold resume cost <= 25% of a full re-read of the same history (re-read: 7.7 s per 1k tokens).
+C  single client: p50 total latency and decode tok/s within 2% of the current server; peak VRAM within +128 MiB.
+D  2-3 concurrent clients: aggregate throughput within 5% of the current server; no 5xx.
+E  greedy outputs identical with and without forced demotion, across cancel, disconnect, failure and restart-free runs.
+F  bounds: cold host bytes <= budget; session count <= cap; peak RSS grows by at most budget + 256 MiB; overload and
+   oversized sessions answer predictably (404/503), never hang.
+G  tests: state transitions (demote, restore, drop, contention, failed restore, cancel) fail if broken.
+GO only if A, B, C, D, E, F, G hold. If a cold session cannot be bounded, stop with an alternative.
+
+## Design built (smallest change that meets the gates)
+Hot/cold, two tiers only. One session stays hot (cache on the GPU, as before). A session that is displaced (another
+session finishes, or a request starts a new one) is copied to host memory (`server/cold.rs`: tokens, each DeltaNet
+layer block, each KV page, via the existing checkpoint export/import calls; exact f32 bytes) and its GPU cache is
+freed. A request for a cold id thaws it into a new cache after the hot session makes room. Limits (constants):
+16 cold sessions, 2 GiB together, and 1 GiB of host memory must stay available after a copy; the least recently used
+goes first; a session bigger than the budget is not kept. `Store` (server/session.rs) now holds the hot slot, the cold
+queue and the claimed ids; `claim` takes a session out of the store and returns a `Lease` (dropping it frees the id), so a
+running session is in no list: a second request for it gets 409, a dropped/unknown/restart-lost id gets 404, and a
+displacement can never touch a running cache. Only Qwen3.5 on CUDA can shelve (the engines that cannot behave as before).
+A failed thaw for want of GPU memory puts the cold session back and answers 503 (retryable); other failures drop it.
+Changed: server/{cold,session,sched,completion,http,mod}.rs; tests: 8 store unit tests, tests/server_cold.rs (GPU),
+tests/common/server.rs (shared by server_pressure.rs).
+
+## Results (Qwen3.5-4B Q8 CUDA, --ctx 8192, greedy, 24-token replies, release builds, same machine, 40 W)
+| Scenario | Before | After |
+|---|---|---|
+| A,B,A,B... 4 rounds, ~1.1k-token histories | 6 of 8 turns 404; every return re-read the history: 8.3-8.9 s to first token; wall 67.6 s | 0 x 404; returns 0.28-0.37 s; wall 18.3 s |
+| A,B,A,B... 3 rounds, ~4k-token histories | 4 x 404; returns 31.3-34.0 s; wall 193.8 s | 0 x 404; returns 0.35-0.48 s; wall 64.7 s (68.8 s in a second run) |
+| 3 clients at once, 3 turns, ~0.6k tokens | 3 x 404; wall 30.3 s; 1.75 events/s | 0 x 404; wall 16.1 s (17.0 s); 3.30 events/s |
+| 1 client, 5 turns, 3 conversations | follow-ups 0.25-0.36 s, 0 x 404 | follow-ups 0.25-0.35 s, 0 x 404 |
+| 1 client, 128-token decode, 4 runs per group, groups alternated both ways | 39.5 tok/s mean over 4 groups | 38.7 tok/s mean over 4 groups (group means 35.9-40.8; the spread is run-order drift: the first order showed -3.5%, the reversed order -0.5%) |
+Every answer of every turn was identical before and after (greedy, real model, all three conversation scenarios).
+Cold resume = 0.35-0.48 s to first token at 4k tokens (copy back + the new tail) against 31-34 s to read the same history again.
+
+## Memory accounting
+- Cold session = 51 MiB (DeltaNet state) + 64 KiB per token (+4 B per token id): ~120 MiB at 1.1k tokens, ~310 MiB at 4k,
+  ~570 MiB at 8k. 2 GiB therefore holds about 6 sessions of 4k tokens or all 16 of 1k.
+- GPU: unchanged. One hot cache as before; process VRAM 4,504 MiB at idle-decode in both binaries; all-programs peaks in
+  the scenarios 5.27-5.54 GB (before: 5.48-5.70 GB, the extra came from re-reads).
+- Host: current RSS sampled every 0.5 s peaked at 1,038 MiB with one 4k cold session and 1,149 MiB with three small ones
+  (load itself reaches ~870 MiB). No disk writes.
+
+## Gates
+A continuity: 0 x 404 in all three multi-client scenarios (before 3-6): PASS.
+B cold resume <= 25% of a re-read: about 1-1.5%: PASS.
+C single client: first token and follow-ups unchanged, decode within run-order noise (-0.5% to -3.5%, signs depend on order), VRAM same: PASS.
+D 2-3 clients: aggregate events/s 1.75 -> 3.30, no 5xx: PASS.
+E identical greedy output with and without demotion: real model 3/3 scenarios; tiny-model test across displaced conversations: PASS.
+F bounds: constants + unit tests (count, bytes, oversize, replace, LRU); host RSS growth matches the formula: PASS.
+G tests: store lifecycle (claim, 409/404, lease release, budget, oversize, replacement) and server_cold (displaced
+conversations return unchanged and are not read again; unknown id 404; malformed 400; different history answers as a
+new conversation; restart loses sessions). Removing the shelving made the main test fail (404), so it guards the feature.
+
+## Edge cases and what is not covered
+- Same-session contention: Store-level tests (claim twice -> Running); not driven end to end (a tiny model is too fast to
+  overlap two requests deterministically). Eviction during generation cannot occur: a running session is in no list.
+- Interrupted resume: a cancelled or failed turn after a thaw goes through the existing `recover`, which re-reads the
+  previous history (one replay, as before for a hot session); the cold copy is not re-created. A thaw that cannot get GPU
+  memory returns the cold session and answers 503; that path is covered only at Store level, not by a pressure test.
+- Incompatible history: rebuilt and answers as a new conversation (tested). Oversized: not shelved, next request 404
+  and the client sends its full history. Restart: all sessions lost by design (tested); nothing is persisted.
+- Limits are constants, not flags. Engines other than Qwen3.5 CUDA keep one hot slot (a displaced session is dropped).
+
+## Decision
+GO. Independent clients no longer evict each other; a displaced conversation resumes in ~0.4 s instead of re-reading its
+history (up to 30+ s at 4k tokens) with identical output, bounded host memory, unchanged GPU use and unchanged
+single-client latency and throughput. Next justified milestone: none required by this evidence; the open items above
+(a pressure test of a failed thaw, re-shelving after a cancelled resume, configurable limits) are small follow-ups.

@@ -1,0 +1,154 @@
+Baseline evaluation on the V11 tree. Gates first (written before any run), then results. Scripts stay on the maintainer's machine.
+
+=== GATES ===
+Marin baseline evaluation: workload limits and stopping gates (fixed before any measurement)
+
+Tree: HEAD c36e076 plus the uncommitted V11 work; release binaries rebuilt from it. No source change in this milestone.
+Tool: `marin-run bench` (+ --sample-gpu --json), run one cell at a time by benchmarks/evaluation/matrix.py. Nothing else uses the GPU.
+
+Models used: every installed checkpoint with a supported path. Not measured: Granite-4.0-H-Tiny (no weights, header only),
+Qwen3.5-4B BF16 on CUDA (does not fit 8 GB), Qwen3.5-4B BF16 on CPU (8.7 GB RSS against ~8 GB available), the *-Base twins of
+Qwen3 (same architecture and code path as the measured chat models; used only for the HF checks that were made for them).
+
+Cells:  prompt 128 / 512 / 1024 x 64 decode tokens, plus 128 x 32 decode tokens; fixed seed 0, temperature 0.
+GPU:    warmup 1, runs 3.      CPU: warmup 1, runs 2 (models >= 2B: warmup 0, runs 1 at prompts 512 and 1024; labelled).
+Long context (2k/4k/8k, 32 tokens, 1 run, warmup 0): Qwen3.5-4B Q8 CUDA, Qwen3.5-2B CUDA, Qwen3-1.7B CUDA (f16 KV); CPU: 0.6B to 2k.
+Scalar fallback: MARIN_MATMUL_SCALAR=1, Qwen3-0.6B CPU, 128 x 32, 1 run.
+
+Gates:
+  G1 per cell timeout 600 s (long context 900 s); a timeout is recorded, never retried.
+  G2 total GPU matrix stops at 90 min, CPU matrix at 120 min; unfinished cells are listed as not measured.
+  G3 drift probe: Qwen3-0.6B CUDA 128x32 (3 runs) before, between and after the GPU matrix. Decode TPS spread over the probes
+     <= 5% means the matrix is comparable inside itself; more means hardware drift and every cell is marked.
+  G4 a cell starts only if the GPU is below 60 C and no marin, python or cargo process uses it (the desktop compositor and editor always hold ~240 MiB).
+  G5 regression = same command, same session, paired against the accepted BENCHMARKS.md row, decode or prefill more than 10%
+     slower after the drift probe is taken into account. A historical row alone is never proof.
+  G6 numerical checks use the existing HF references only (tests/reference, bench-results); a reference made for a different
+     model is not run. Granite thresholds are not changed: a known NO-GO miss is reported as a miss, not as a regression.
+  G7 workflows: each feature runs only where it is supported; pass/fail is output correctness (greedy equal, state isolated,
+     recovery) first, timing second. Source unchanged => the last full-suite result (816 + 816, HF PASS) stands; only focused checks rerun.
+
+=== RESULTS ===
+Marin baseline evaluation on the V11 tree (HEAD c36e076 + uncommitted V11 work; no source changed in this milestone)
+RTX 5050 Laptop 8 GB at a 40 W cap, Ryzen 7 260 (16 threads), 14 GB RAM, Arch Linux, release binaries, fixed seed 0, temperature 0.
+Gates and limits: plan.txt (written before the first run). Raw data: bench-results/evaluation/ (git-ignored; one JSON + text per cell).
+Reproduce: python3 benchmarks/evaluation/matrix.py {probe,gpu,long,scalar,cpu}; paired.sh OLD_BIN OUT; verify.sh; parity.sh; coldload.sh;
+           benchmarks/server_load.py; benchmarks/hibernation/measure.py; marin-run spec-bench (prompts: benchmarks/spec_prompts.sh).
+
+1. SUPPORTED-MODEL MATRIX (installed checkpoints)
+   model (dir)                         CPU            CUDA           status
+   Qwen3-0.6B / 1.7B (chat)            BF16, INT8     BF16, INT8     accepted (HF PASS on both backends)
+   Qwen3-1.7B-Base                     BF16           BF16           accepted (HF PASS on CUDA); same code path, not benchmarked
+   Qwen3-0.6B-Base                     -              -              same path as Qwen3-0.6B; no reference made for it; not measured
+   Qwen3.5-2B-Base (text)              BF16, INT8     BF16           accepted (HF PASS cpu, cuda, int8). CUDA INT8 not claimed in BENCHMARKS.md; not run
+   Qwen3.5-4B Q8 (packed)              INT8           INT8           accepted (HF PASS cpu + cuda); the only chat model with server, sessions, speculation
+   Qwen3.5-4B BF16 (8.8 GB dir)        not run*       does not fit   *8.7 GB RSS against ~8 GB available: skipped by the memory gate
+   Granite-3.0-1B-A400M-Instruct       BF16           BF16           CPU BF16 accepted (HF PASS); CUDA BF16 experimental (code-step-2 RMS miss, below)
+   Granite-3.0-1B Q8 pilot             INT8           -              experimental (same RMS miss)
+   Granite-4.0-H-Tiny                  -              -              checkpoint unavailable (config + index only); blocked, no implementation
+   Not supported anywhere: vision, MTP, CPU INT4, Qwen3.5 CPU per-stage profile ("not supported yet").
+
+2. PERFORMANCE (medians; 64 decode tokens at prompt 128, TTFT/prefill at 512 and 1024; models were mostly page-cache warm)
+backend model           load s  TTFT@128  prefill@512  TTFT@1024  decode@128  p50 ms  p95 ms  RSS MB  VRAM MB(proc)
+cuda   granite-bf16     2.72      303ms     335.8      2.97s     137.22     6.9     9.9     294 2840
+cuda   q3-0.6b-bf16     0.61       44ms    2781.2      0.47s     149.92     6.6     7.2     521 1624
+cuda   q3-0.6b-int8     0.99       34ms    3371.4      0.59s     225.74     4.1     6.1     674 1048
+cuda   q3-1.7b-bf16     2.81      105ms    1269.2      0.96s      52.71    18.2    29.8     817 3768
+cuda   q3-1.7b-int8     3.34      101ms    1600.3      0.95s      80.25    10.7    20.5    1123 2200
+cuda   q35-2b-bf16      3.90      376ms     336.7      3.06s      46.92    21.9    28.2    1216 3864
+cuda   q35-4b-int8      3.93     1035ms     126.2      7.66s      32.74    29.5    37.5     872 4568
+cpu    granite-bf16     2.35      840ms     362.9      2.33s      26.21    37.9    39.7    2710 -
+cpu    granite-int8     1.64      839ms     384.3      2.29s      47.05    21.1    23.0    1473 -
+cpu    q3-0.6b-bf16     1.01      285ms     571.7      1.92s      19.04    52.1    54.4    1519 -
+cpu    q3-0.6b-int8     1.16      232ms     641.3      1.82s      36.17    27.2    30.2     979 -
+cpu    q3-1.7b-bf16     2.53      824ms     180.1      5.57s       6.54   152.0   160.8    3715 -
+cpu    q3-1.7b-int8     2.68      658ms     188.5      5.46s      12.28    80.9    85.9    2142 -
+cpu    q35-2b-bf16      4.62     1706ms      78.5     12.77s       5.62   177.3   184.6    3844 -
+cpu    q35-2b-int8      2.69     1467ms      86.9     11.63s       9.96    99.2   107.6    2108 -
+cpu    q35-4b-int8      4.24     3203ms      39.4     24.52s       4.34   229.5   254.0    4573 -
+   Full 16-cell-per-model table (128x32, 128x64, 512x64, 1024x64), all runs and clocks: bench-results/evaluation/table.txt.
+   CPU cells: warmup 1 / runs 2 (Qwen3.5 at 512 and 1024: 1 run, no warmup, labelled). GPU cells: warmup 1 / runs 3.
+   Decode speed barely depends on the decode length (32 vs 64 differ by <= 3% on big models; small models swing 10-50%, see drift).
+
+   Long context (CUDA, 32 decode tokens, 1 run):
+     Qwen3.5-4B Q8   2k: TTFT 15.8 s prefill 129.6 dec 31.6 | 4k: 33.4 s 122.6 30.9 | 8k: 87.0 s 94.2 29.1   process VRAM 4.57 / 4.70 / 4.98 GB
+     Qwen3.5-2B BF16 2k:  6.3 s 326.5 45.3 | 4k: 13.0 s 314.5 45.2 | 8k: 28.8 s 284.0 44.3                      VRAM 3.86 / 3.90 / 4.02 GB
+     Qwen3-1.7B f16KV 2k: 1.1 s 1792 61.6 | 4k: 2.4 s 1716 40.1 | 8k: 5.1 s 1594 37.6 (1 run; decode noisy)    VRAM 3.70 / 3.93 / 4.38 GB
+     Qwen3-0.6B CPU  2k: TTFT 5.0 s prefill 411 decode 13.5
+   Cold vs warm load (files dropped with posix_fadvise; 'warm' is whatever stayed cached, 14 GB RAM): cold adds 0.3-1.2 s
+     (0.6B 1.16/0.77 s, 1.7B 3.47/2.10, 4B Q8 3.67/3.03, Granite 2.46/1.86, Qwen3.5-2B 4.05/4.31). NVMe makes loading CPU/format-bound, not disk-bound.
+   Scalar fallback (Qwen3-0.6B CPU 128x32): prefill 78 vs 488 tok/s, decode 7.3 vs 18.8 tok/s (SIMD is 6.3x / 2.6x); outputs equal.
+
+3. CLOCKS / POWER / HEAT (bench --sample-gpu)
+   Cap 40 W. Big models run at the cap: 4B 36-39 W, 2B 33-39 W, 1.7B 30-37 W at 0.9-1.5 GHz; 0.6B 10-33 W at 1.4-1.8 GHz. Peak 62 C, no thermal slowdown.
+   Probe (Qwen3-0.6B CUDA 128x32 decode): 148.0 (start, cool GPU) -> 185.3 -> 186.1. The later two agree within 0.4%; the first is 20% lower.
+   => G3 fails for the first probe: the cells before probe 2 (the small Qwen3 models) are marked noisy. 0.6B/1.7B decode spread 20-90% between
+      cells of one model comes from clock/launch variance, not software; do not read small-model cell-to-cell differences as findings.
+   Large-model (4B, 2B, Granite-pair) cells repeat within 1-3%.
+   GPU probe: memory 300 GB/s first, 262 GB/s sustained; fp32 11 TFLOP/s; bf16 tensor 27.8 TFLOP/s; power cap active in 67% of busy samples.
+
+4. REGRESSION CHECK (G5; paired, interleaved old/new/old/new, 3 runs each, same session)
+   old = HEAD c36e076 built from git archive; new = working tree. Prompt 512x32 on CUDA, 256x32 / 128x16 on CPU.
+     4B Q8 CUDA     prefill 130.7 -> 132.3 (+1.2%)  decode 32.07 -> 31.99 (-0.2%)
+     2B BF16 CUDA   328.9 -> 329.0 (+0.1%)           46.67 -> 46.31 (-0.8%)
+     1.7B BF16 CUDA 1433.9 -> 1440.0 (+0.4%)         45.03 -> 44.83 (-0.4%)
+     Granite CUDA   345.8 -> 345.2 (-0.2%)           152.59 -> 153.32 (+0.5%)
+     0.6B CPU       398 -> 528 (first old run 237 was a cold start; the other three 522-559)  decode 18.51 -> 18.48 (-0.2%)
+     4B Q8 CPU      40.0 -> 41.1 (+2.8%)             4.50 -> 4.42 (-1.8%)
+   V11 left the generation path unchanged. Against the BENCHMARKS.md rows the machine is slower today (4B CUDA decode 35.9 recorded vs
+   32.1 now, -10%; 4B CPU 4.75 vs 4.3). A build of the older commit 8130ad7 measured now: 4B Q8 CUDA 512x32 decode 31.5/31.9 (new 32.4/32.1),
+   prefill 131/127 (new 127/128). Same speed on old and new code => the gap to the recorded row is the machine (power cap, clocks, ambient),
+   not software. CONFIRMED SOFTWARE REGRESSIONS: none.
+
+5. NUMERICAL CHECKS (existing HF references only, marin-run verify)
+   PASS: Qwen3-0.6B cpu+cuda, Qwen3-1.7B cpu+cuda, Qwen3-1.7B-Base cuda (max logit diff 1.5e-5 - 1.9e-5, token choices match);
+         Qwen3.5-4B Q8 cuda (1.31e-5; normalized 3.879e-6, RMS 3.288e-6) and cpu; Qwen3.5-2B cuda, cpu, int8; Granite BF16 cpu.
+   FAIL (known NO-GO, thresholds unchanged): Granite BF16 CUDA and Granite Q8 CPU pilot: case 2 (Python function) step 2, relative RMS 1.098e-5
+         against the fixed 1e-5 gate (normalized 3.38e-6 passes); greedy tokens match. Same result as the archived decision: not a regression.
+   Greedy parity (parity.sh): CPU vs CUDA equal for Qwen3-0.6B, 1.7B, Qwen3.5-2B-Base, 4B Q8, Granite; SIMD vs scalar equal.
+
+6. END-TO-END WORKFLOWS (Qwen3.5-4B Q8 CUDA release unless stated)
+   PASS  chat, fresh + 2 warm turns piped through `marin`: correct recall of name and number; save, new-process resume, correct answer.
+   PASS  /checkpoint on a 1,121-token chat: state 127 MB saved in 1.0 s; resume with it 7 s total (1.02 s state load) vs 14 s re-reading the
+         history; both answered correctly. Below 256 tokens the checkpoint is refused with a clear reason (by design).
+   PASS  code mode (marin code .): 4 bounded read-only tool calls, correct answer, 24 s, context 1,513/8,192, log written.
+   PASS  server concurrency (ctx 8192, up to 2 at once): 1 client 32-39 ev/s; 2 clients 49-50 ev/s aggregate (+40%, each 25-27/s);
+         3rd client queues (TTFT 5.2 s) and is served; short requests next to a long prefill got first token in 0.16-0.67 s; no panics.
+   PASS  speculation (opt-in, greedy, 128 tokens, 1 round): output identical to plain in all 8 prompts (same 2/2). Speed vs plain:
+         edit-file 1.86x (58.6 vs 31.5 tok/s, 0.68 vs 1.27 J/tok), edit-diff 1.29x, chat 1.00x, fresh 1.00x (no loss).
+   PASS  hibernation (3 cycles): process VRAM 4,696 -> 0 MiB, wake first token 4.2 s (load 3.9 s), warm 0.35 s, session reused 2,736-2,833, replayed 0.
+         Power in this run: 20.0 W loaded-idle vs 14.6 W asleep (both P4); the earlier 90 s windows contradicted this (8.8 vs 9.1 W), so
+         NO power saving is claimed: it depends on the P-state the card idles in.
+   PASS  hot/cold sessions, 409/404, cancellation and hang-up, memory-pressure refusal and recovery, failed-wake stampede, repeated sleep/wake,
+         changed-weights invalidation: cargo test server_cold (6), server_pressure (1), server_sleep (6) on the real 4B, 0 failed.
+         Source unchanged since the last full-suite run (816 CUDA + 816 scalar passed, HF PASS), so the full suites were not rerun.
+   Not run (unsupported by design): server/sessions/speculation on Qwen3, Granite, Qwen3.5-2B; Qwen3 GPU prefix snapshot (--snapshot) not exercised here.
+
+7. BOTTLENECKS (profile: 4B Q8 CUDA 512x16)
+   Prefill 4B CUDA (130 tok/s): MLP 50.6%, QKV 23.5%, attention-out 7.2% = 81% in the INT8 projections at 0.56-1.23 TFLOP/s (card: 11 fp32,
+         27.8 bf16 tensor); DeltaNet recurrence 17.1%; attention 1.1%. Prefill falls from 130 to 94 tok/s at 8k as recurrence/attention grow.
+   Decode 4B CUDA (31-33 tok/s, 142 GB/s effective of 262 sustained): MLP 37.6% at 206 GB/s, QKV 18.7% at only 92 GB/s, DeltaNet 12.8%,
+         lm head 9.6% at 225 GB/s, norms 4.0%, state copy 2.5%, unaccounted 3.6%. Memory-bandwidth and power-cap limited, with QKV and DeltaNet below the bandwidth the MLP reaches.
+   Decode, Qwen3 / Granite CUDA: 0.6B and Granite are launch- and clock-limited (6-7 ms/token at 224-366 GB/s); 1.7B/2B around 180 GB/s.
+   CPU decode: effective weight read 19-22 GB/s with only 1.3-1.6 of 16 cores busy during decode (Granite INT8 reaches 65 GB/s); CPU prefill is
+         multithreaded (8 threads) and compute-bound (40 - 640 tok/s by model).
+   Loading: 2.5-4.6 s for 1-4 GB checkpoints, CPU/format-bound (cold cache adds <= 1.2 s). Sessions: restore 1 s per 1k tokens (checkpoint) or
+         cold-host thaw; a 4B wake costs 3.9 s of load.
+   Kind of each problem:  4B prefill = optimization opportunity.  4B decode = mostly hardware limit (power cap), partly QKV/DeltaNet kernels.
+         4B / Granite CUDA gap to the recorded rows = hardware drift.  Granite CUDA RMS miss = known numerical NO-GO.  CPU decode single-core = opportunity.
+
+8. TOP 3 OPTIMISATIONS (ranked; none started)
+   1. Faster INT8 prefill for Qwen3.5 on CUDA (tensor-core or tiled dequantizing GEMM for MLP/QKV/out). Evidence: 81% of prefill at ~1 TFLOP/s on
+      a card that sustains 11-27; 4B TTFT 7.7 s at 1k, 15.8 s at 2k, 87 s at 8k. Realistic 2-3x prefill (the card is power capped, so not the
+      raw ratio). Benefit: every long prompt, code mode, restores, cold-session replays. Risk: numerics (HF gate 1e-4 / 1e-5), medium-high effort; no extra memory.
+   2. Multithreaded CPU decode GEMV. Evidence: 1.3-1.6 cores busy and 19-22 GB/s at decode. Needs a CPU bandwidth probe first to know the ceiling
+      (not measured); plausible 1.5-2.5x CPU decode on Qwen3/Qwen3.5 for the users without a GPU, which the spec targets. Risk: low (same math,
+      scalar equal), small effort, no memory cost.
+   3. Qwen3.5 decode kernels: QKV at 92 GB/s vs MLP 206 GB/s, DeltaNet 12.8%, norms/copies 6.5%. Closing QKV to MLP-level would save about 10% of
+      decode time, i.e. ~3 tok/s; the rest is the power cap. Low user-visible gain, medium risk.
+   Not recommended: more batching (2 clients already +40%); power savings from hibernation (unproven).
+
+9. LIMITS OF THIS BASELINE
+   One GPU, one session, 1-3 runs per cell (1 for 4B-CPU long prompts and the 2k-8k cells). Small CUDA models are noisy (point 3). Models were
+   mostly warm in the page cache except in coldload. Qwen3-0.6B-Base, Qwen3 snapshot, Qwen3.5-2B CUDA INT8 were not measured. 8k+ Qwen3.5 contexts
+   past 8192 and CPU contexts past 2k were not run (CPU 4B at 2k would take about 1 minute of prefill per request).

@@ -13,7 +13,7 @@ use super::gate::Gate;
 use super::prefix::Prefix;
 use super::request::{Completion, validated_prompt};
 use super::sched::{ScheduleError, Scheduled};
-use super::session::{self, Store, Stored};
+use super::session::{self, Entry, Refused, Store, Stored};
 use super::watch::watch_disconnect;
 use super::{api_error, finish_reason, http, queue, send_error};
 use crate::load::Loaded;
@@ -65,6 +65,22 @@ fn stop_watching(stream: &TcpStream, done: &AtomicBool, watcher: JoinHandle<()>)
     let _ = watcher.join();
 }
 
+/// The session as a hot one. A cold session is thawed after the hot one makes room; if the GPU has no memory it goes
+/// back to the cold store untouched (whatever the failure) and the request can be sent again.
+fn revive(store: &Store, sched: Scheduled<'_>, entry: Entry) -> Result<Stored, ScheduleError> {
+    match entry {
+        Entry::Hot(state) => Ok(state),
+        Entry::Cold(cold) => {
+            store.make_room(sched);
+            let thawed = sched.thaw(&cold);
+            if thawed.is_err() {
+                store.add_cold(cold);
+            }
+            thawed
+        }
+    }
+}
+
 pub(super) fn completion(
     ctx: Context<'_>,
     stream: &mut TcpStream,
@@ -99,28 +115,45 @@ pub(super) fn completion(
         None => String::new(),
     };
     let existing = persistent && input.marin_session_id.as_deref() != Some("new");
-    let taken = if existing {
-        match store.take(&session_id) {
-            Some(state) => Some(state),
-            None => return send_error(stream, 404, "session not found, evicted or in use"),
+    let (_lease, taken) = if existing {
+        match store.claim(&session_id) {
+            Ok((lease, entry)) => match revive(store, plain, entry) {
+                Ok(state) => (Some(lease), Some(state)),
+                Err(e) => return send_error(stream, failure_status(e.is_out_of_memory()), e),
+            },
+            Err(Refused::Running) => {
+                return send_error(stream, 409, "session is running another request");
+            }
+            Err(Refused::Missing) => {
+                return send_error(stream, 404, "session not found or dropped");
+            }
         }
     } else {
-        store.evict();
-        None
+        store.make_room(plain);
+        (None, None)
     };
     let previous = taken
         .as_ref()
         .map(|state| state.retained.tokens().to_vec())
         .unwrap_or_default();
-    let reusable = taken.filter(|state| state.can_reuse(&prompt));
+    let (reusable, spare) = match taken {
+        Some(state) if state.can_reuse(&prompt) => (Some(state), None),
+        other => (None, other),
+    };
     let mut active = match reusable
         .or_else(|| prefix.and_then(|p| p.start(plain, &prompt, &session_id)))
         .map(Ok)
         .unwrap_or_else(|| Stored::new(loaded, session_id))
     {
         Ok(state) => state,
-        Err(e) => return send_error(stream, failure_status(e.is_out_of_memory()), e),
+        Err(e) => {
+            if let Some(old) = spare {
+                store.put(old, plain);
+            }
+            return send_error(stream, failure_status(e.is_out_of_memory()), e);
+        }
     };
+    drop(spare);
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -327,7 +360,7 @@ pub(super) fn completion(
     };
     if response.is_ok() {
         if persistent {
-            store.put(active);
+            store.put(active, plain);
         }
     } else {
         store.recover(active, plain, &previous, existing);

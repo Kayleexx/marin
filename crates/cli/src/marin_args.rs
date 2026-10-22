@@ -41,6 +41,10 @@ pub enum MarinCommand {
         /// Local TCP port (0 asks the OS to choose an available port)
         #[arg(long, default_value_t = 8000)]
         port: u16,
+        /// Release the model's GPU memory after this many idle seconds and load it again when the next request comes
+        /// (conversations are kept); off unless given
+        #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+        idle_unload: Option<u64>,
     },
     /// Ask questions about a code project: the model reads it with list, read and search tools (read-only)
     Code {

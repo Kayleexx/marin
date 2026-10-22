@@ -103,17 +103,26 @@ including Marin's prior assistant text, on the next request. For example:
 ```
 
 `marin_reused_tokens` reports exact token-prefix reuse; a changed prefix
-starts fresh. IDs are bearer secrets scoped to this server process; an evicted
-or unknown ID returns 404. `"new"` resets the one retained slot. Sessions
+starts fresh. IDs are bearer secrets scoped to this server process; a dropped
+or unknown ID returns 404 and one that another request is running returns 409.
+One session stays hot on the GPU; up to 16 more (2 GiB of host memory together) are
+kept cold in host memory and come back to the GPU on their next request, so
+independent clients do not evict each other. Nothing is written to disk and a
+restart loses them. `"new"` starts a new session. Sessions
 reuse attention KV and Qwen3.5 recurrent/convolution state. To preserve the
 official multi-turn template, Qwen3.5 CUDA checkpoints the stable history
 before generation and avoids replaying it after the reply. Other backends
 still rebuild that history after each opt-in turn.
 
+`marin serve --idle-unload SECONDS` (off by default) releases the model's GPU memory after that many idle seconds,
+about 4.7 GB for Qwen3.5-4B Q8, and loads it again when the next completion arrives, taking about 5 s. Sessions are
+kept, hot or cold, within the limits above; a request that arrives while the model is loading waits for it, and one
+that finds too little GPU memory to load gets 503 and can be sent again. `/v1/models` answers without waking it.
+
 Add `"stream":true` for `text/event-stream` chunks ending in `[DONE]`;
 the final chunk includes the session ID, reuse count and token usage; `/v1/models` reports the context window. TCP write half-close
 still permits a response. At most two requests wait beyond those running;
-further connections receive 503. A session ID in use by another request returns 404. Queued and partial-read requests time out after
+further connections receive 503. Queued and partial-read requests time out after
 10 seconds; generation requests cancellation after 300 seconds, effective
 at the next model boundary. The 1 MiB body and selected context limits still
 apply. A failed or cancelled turn never publishes partial state; a session
