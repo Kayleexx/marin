@@ -107,21 +107,11 @@ pub fn fit(text: &str, max: usize) -> String {
 /// Between calls the cursor always rests on the first line of the block.
 pub struct Screen {
     style: Style,
-    /// Blocks start at this column, leaving the startup portrait to their left untouched.
-    indent: usize,
 }
 
 impl Screen {
     pub fn new(style: Style) -> Self {
-        Self { style, indent: 0 }
-    }
-
-    pub fn set_indent(&mut self, indent: usize) {
-        self.indent = indent;
-    }
-
-    pub fn indent(&self) -> usize {
-        self.indent
+        Self { style }
     }
 
     fn styled(&self, kind: Kind, text: &str) -> String {
@@ -152,13 +142,12 @@ impl Screen {
 
     pub fn draw(&self, lines: &[Line], cursor_col: usize) -> io::Result<()> {
         let width = width();
-        let indent = u16::try_from(self.indent).unwrap_or(0);
-        let usable = width.saturating_sub(self.indent).saturating_sub(1);
+        let usable = width.saturating_sub(1);
         let mut out = io::stdout().lock();
-        queue!(out, MoveToColumn(indent), Clear(ClearType::FromCursorDown))?;
+        queue!(out, MoveToColumn(0), Clear(ClearType::FromCursorDown))?;
         for (i, line) in lines.iter().enumerate() {
             if i > 0 {
-                queue!(out, Print("\r\n"), MoveToColumn(indent))?;
+                queue!(out, Print("\r\n"), MoveToColumn(0))?;
             }
             queue!(out, Print(self.paint(line, usable)))?;
         }
@@ -166,28 +155,22 @@ impl Screen {
         if up > 0 {
             queue!(out, MoveUp(up))?;
         }
-        let column = u16::try_from(
-            self.indent
-                .saturating_add(cursor_col)
-                .min(width.saturating_sub(1)),
-        )
-        .unwrap_or(0);
+        let column = u16::try_from(cursor_col.min(width.saturating_sub(1))).unwrap_or(0);
         queue!(out, MoveToColumn(column))?;
         out.flush()
     }
 
     /// Prints permanent lines where the block was; the next `draw` starts below them.
     pub fn print(&self, lines: &[Line]) -> io::Result<()> {
-        let indent = u16::try_from(self.indent).unwrap_or(0);
-        let usable = width().saturating_sub(self.indent).saturating_sub(1);
+        let usable = width().saturating_sub(1);
         let mut out = io::stdout().lock();
-        queue!(out, MoveToColumn(indent), Clear(ClearType::FromCursorDown))?;
+        queue!(out, MoveToColumn(0), Clear(ClearType::FromCursorDown))?;
         for line in lines {
             queue!(
                 out,
                 Print(self.paint(line, usable)),
                 Print("\r\n"),
-                MoveToColumn(indent)
+                MoveToColumn(0)
             )?;
         }
         out.flush()

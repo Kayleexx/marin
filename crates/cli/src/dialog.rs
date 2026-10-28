@@ -335,10 +335,16 @@ pub fn run_piped(
             None => {}
         }
         let answered = match dialog.talk() {
-            Talk::Chat => dialog
-                .chat
-                .ask(session, line, interrupt, &mut io::stdout().lock())
-                .map(drop),
+            Talk::Chat => {
+                let answered = dialog
+                    .chat
+                    .ask(session, line, interrupt, &mut io::stdout().lock())
+                    .map(drop);
+                if let Some(note) = dialog.chat.take_left_out_note() {
+                    println!("{}", style.dim(&note));
+                }
+                answered
+            }
             Talk::Code => dialog
                 .ask_code(session, interrupt, Ui::piped(style), line)
                 .map(drop),

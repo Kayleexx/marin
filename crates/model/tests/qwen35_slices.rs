@@ -74,11 +74,17 @@ fn sliced_prefill_matches_one_pass_on_the_fixture() -> Result {
         |_, _| {},
     )?;
     let tokens: Vec<u32> = (1..100).collect();
-    let (max, rms) = check(&engine, &tokens, 7, 128)?;
+    let mut worst = (0.0_f32, 0.0_f32);
+    for slice in [1, 7, 15, 16, 17, 64] {
+        let (max, rms) = check(&engine, &tokens, slice, 128)?;
+        worst = (worst.0.max(max), worst.1.max(rms));
+    }
     std::fs::remove_dir_all(&temp)?;
     assert!(
-        max <= 1e-4 && rms <= 1e-5,
-        "normalized max {max}, relative RMS {rms}"
+        worst.0 <= 1e-4 && worst.1 <= 1e-5,
+        "normalized max {}, relative RMS {}",
+        worst.0,
+        worst.1
     );
     Ok(())
 }

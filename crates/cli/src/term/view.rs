@@ -84,9 +84,8 @@ pub(crate) fn input_line(editor: &Editor, prefix: &str, columns: usize) -> (Stri
 }
 
 impl App {
-    /// Columns left for blocks: the whole width, or what remains right of the startup portrait.
     fn columns(&self) -> usize {
-        width().saturating_sub(self.screen.indent())
+        width()
     }
 
     /// Runtime details live in the inspect panel; the prompt only hints at what is available.

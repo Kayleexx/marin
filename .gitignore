@@ -4,9 +4,15 @@ target/
 !README.md
 !BENCHMARKS.md
 __pycache__/
-# Archive: only the milestone logs and INDEX.log are tracked; harnesses and per-run outputs stay local.
+# Archive: only these logs and INDEX.log are published; the rest stays local in bench-results/archive.
 docs/benchmarks/archive/*
-!docs/benchmarks/archive/*.log
+!docs/benchmarks/archive/INDEX.log
+!docs/benchmarks/archive/06-server-scheduling.log
+!docs/benchmarks/archive/10-shared-prefix.log
+!docs/benchmarks/archive/22-session-continuity.log
+!docs/benchmarks/archive/25-qwen35-int8-prefill.log
+!docs/benchmarks/archive/30-cpu-history-reuse-planner.log
+!docs/benchmarks/archive/34-v01-final-pass.log
 # Local measurement scripts; the archive logs record the commands.
 /benchmarks/
 # Raw measurement output on the measuring machine (see docs/benchmarks/archive/INDEX.log).

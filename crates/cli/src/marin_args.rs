@@ -4,6 +4,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::arg_types::{ChatQuantArg, KvTypeArg};
 use crate::args::BackendArg;
+use crate::assist::AssistAction;
 
 const EXAMPLES: &str = "\
 Examples:
@@ -66,6 +67,11 @@ pub enum MarinCommand {
         /// Treat the text as this kind instead of detecting it: markdown, text, rust, python, json, diff, csv, log, ...
         #[arg(long = "as", value_name = "KIND")]
         kind: Option<String>,
+    },
+    /// The opt-in background assistant: suggestions after a command fails in a repo you allowed (off by default)
+    Assist {
+        #[command(subcommand)]
+        action: AssistAction,
     },
     /// Show the default model, or set it to PATH
     Model { path: Option<PathBuf> },

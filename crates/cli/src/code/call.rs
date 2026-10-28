@@ -40,9 +40,6 @@ fn cut_after<'a>(text: &'a str, marker: &str) -> &'a str {
         .unwrap_or(text)
 }
 
-/// The longest malformed reply that is kept in the history, so a runaway cannot fill the window.
-const KEEP_CHARS: usize = 600;
-
 impl Call {
     /// The call written the way the model is told to write it.
     fn canonical(&self) -> String {
@@ -108,21 +105,20 @@ pub fn parse(reply: &str) -> Parsed {
         .unwrap_or(text)
         .trim_end()
         .to_owned();
-    let valid: Option<Vec<&Call>> = calls.iter().map(|c| c.as_ref().ok()).collect();
-    let kept = match valid {
-        _ if calls.is_empty() => text.trim_end().to_owned(),
+    let valid: Vec<&Call> = calls.iter().filter_map(|c| c.as_ref().ok()).collect();
+    let kept = if calls.is_empty() {
+        text.trim_end().to_owned()
+    } else if valid.len() == calls.len() && repaired == 0 && complete {
+        cut_after(text, CLOSE).to_owned()
+    } else {
         // What ran is what the history says, in the proper form, so a slip is not repeated from the context.
-        Some(done) if repaired > 0 || !complete => {
-            let rendered: Vec<String> = done.iter().map(|c| c.canonical()).collect();
-            let lead = if shown.is_empty() {
-                String::new()
-            } else {
-                format!("{shown}\n")
-            };
-            format!("{lead}{}", rendered.join("\n"))
-        }
-        Some(_) => cut_after(text, CLOSE).to_owned(),
-        None => text.trim_end().chars().take(KEEP_CHARS).collect(),
+        let rendered: Vec<String> = valid.iter().map(|c| c.canonical()).collect();
+        let lead = if shown.is_empty() {
+            String::new()
+        } else {
+            format!("{shown}\n")
+        };
+        format!("{lead}{}", rendered.join("\n"))
     };
     Parsed {
         shown,
@@ -394,12 +390,18 @@ mod tests {
     }
 
     #[test]
-    fn a_broken_call_is_kept_short_and_a_long_answer_is_kept_whole() {
+    fn a_broken_call_is_not_kept_but_what_ran_and_a_long_answer_are() {
         let broken = parse(&format!(
-            "<tool_call>\n<function=nothing>\n{}",
-            "x".repeat(5000)
+            "<tool_call>\n<function=search>\n{}",
+            "</parameter>\n".repeat(500)
         ));
-        assert!(broken.calls[0].is_err() && broken.kept.chars().count() == 600);
+        assert!(broken.calls[0].is_err() && broken.kept.is_empty());
+        let mixed = parse(&format!(
+            "Looking.\n<tool_call>\n<function=read_file>\n<parameter=path>\na.rs\n</parameter>\n</function>\n</tool_call>\n\
+             <tool_call>\n<function=search>\n{}",
+            "</path>".repeat(200)
+        ));
+        assert!(mixed.kept.starts_with("Looking.\n<tool_call>") && !mixed.kept.contains("</path>"));
         let long = "word ".repeat(2000);
         assert_eq!(parse(&long).kept, long.trim_end());
     }

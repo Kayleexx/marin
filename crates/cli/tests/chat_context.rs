@@ -94,10 +94,38 @@ fn a_new_conversation_starts_clean_and_equal_settings_repeat_exactly(
     Ok(())
 }
 
-/// The signal handler can be installed once per process, so both checks share one test.
+fn a_full_window_is_reported_and_the_newest_question_always_stays(
+    interrupt: &Interrupt,
+) -> Result<()> {
+    let mut session = session(3)?;
+    let mut chat = Chat::new(&session);
+    assert_eq!(chat.take_left_out_note(), None);
+    let mut told = None;
+    for turn in 0..40 {
+        let question = format!("tell me about the number {turn} please");
+        chat.ask(&mut session, &question, interrupt, &mut Vec::new())?;
+        assert!(session.last_prompt.len() <= session.ctx);
+        let kept = session.loaded.dir.tokenizer.encode(&question)?;
+        assert!(
+            session
+                .last_prompt
+                .windows(kept.len())
+                .any(|w| w == kept.as_slice()),
+            "the newest question is in the prompt"
+        );
+        if told.is_none() {
+            told = chat.take_left_out_note();
+        }
+    }
+    assert!(told.is_some_and(|note| note.contains("no longer fit")));
+    Ok(())
+}
+
+/// The signal handler can be installed once per process, so all checks share one test.
 #[test]
 fn conversation_continuity() -> Result<()> {
     let interrupt = Interrupt::install()?;
     each_turn_sends_the_whole_history_and_the_new_user_text(&interrupt)?;
-    a_new_conversation_starts_clean_and_equal_settings_repeat_exactly(&interrupt)
+    a_new_conversation_starts_clean_and_equal_settings_repeat_exactly(&interrupt)?;
+    a_full_window_is_reported_and_the_newest_question_always_stays(&interrupt)
 }

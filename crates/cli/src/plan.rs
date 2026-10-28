@@ -285,7 +285,7 @@ fn display(plan: Plan) -> Result<(), CliError> {
             &plan.dir.config_json,
             plan.dir.generation_config_json.as_deref(),
         )?;
-        text.workspace_bytes(plan.ctx, plan.ctx)? as u64
+        crate::memory::pass_workspace(&text, plan.ctx)?
     } else {
         model::cpu_workspace_bytes(&plan.config, plan.ctx)?
     };
@@ -332,7 +332,7 @@ fn display(plan: Plan) -> Result<(), CliError> {
     if backend_name == "cuda" {
         println!("CPU work    {} fallback prefill", units::bytes(workspace));
     } else {
-        println!("workspace   {} full prefill", units::bytes(workspace));
+        println!("workspace   {} per pass", units::bytes(workspace));
     }
     println!("safety      {}", units::bytes(model::CPU_SLACK_BYTES));
     println!(

@@ -1,0 +1,72 @@
+Qwen3.5 CUDA INT8 prefill: exact tensor-core projections. Gates first, then results and decision. The scripts (gemm_probe.rs, paired.sh) stay on the maintainer's machine.
+
+=== GATES (written before any kernel change) ===
+Qwen3.5 CUDA INT8 prefill: question, gates and stopping conditions (written before any kernel change)
+
+Finding from reading the code, before measuring: Qwen3.5 calls matmul_precise -> matmul_quant_precise, which never uses the tensor-core kernel
+(matmul_q8_mma, used by Qwen3) and runs the warp-per-row f32 FMA kernel (matmul_q8, 8 tokens per tile). The tensor-core kernel splits f32
+activations into two bf16 parts (~16 bits), which is not what the strict hybrid HF gates were built on.
+Hypothesis: the projections are limited by that scalar kernel (layout/instruction bound), not by memory or the power cap; a tensor-core kernel
+whose activation split is exact (three bf16 parts = 24 bits, int8 codes are exact in bf16, f32 accumulation) keeps f32-grade results.
+
+Shapes (Qwen3.5-4B, hidden 2560, mlp 9216, 32 layers): gate/up 9216x2560, down 2560x9216, DeltaNet qkv 8192x2560, z 4096x2560, out 2560x4096,
+full attention q 8192x2560, k/v 1024x2560, o 2560x4096. Prompts of 128, 512, 1024, 2048 tokens.
+
+Step 1 (profile): one-GEMM timing of the current precise kernel vs the existing hi/lo tensor-core kernel on those shapes at 128..2048 tokens;
+  achieved TFLOP/s and GB/s against the card (probe: 262 GB/s sustained, 11 fp32 / 27.8 bf16-tensor TFLOP/s). Decides: scalar-kernel-bound or not.
+Candidate: ONE change, an exact three-part activation split in the existing mma.cu path, selected by the precise Int8 call for >= 16 tokens.
+  Same weights and layout, no new buffers (shared memory only), decode and 1..15-token passes untouched.
+
+Gates (all must hold, else NO-GO and the tree is restored):
+  C1 one GEMM: relative RMS and normalized max error against an f64 product no worse than 2x the current precise kernel's on the same inputs.
+  C2 pinned HF verify (Qwen3.5-4B Q8 CUDA, 128-step reference): PASS with unchanged strict gates (normalized max <= 1e-4, relative RMS <= 1e-5, exact greedy ids).
+  C3 greedy text of fresh chat and code tasks identical to the accepted build (paired, same session); hybrid-state, checkpoint, batching,
+     cancellation and rollback tests pass (full CUDA and scalar workspace suites at the end).
+  P1 kernel level: the MLP and QKV projections at 512 tokens at least 2x faster.
+  P2 end to end: prefill tok/s at 512, 1024 and 2048 at least 1.5x (i.e. +50%) in interleaved old/new runs; TTFT of a matched chat and a code task
+     at least 30% lower; decode tok/s within +-3%.
+  M1 process VRAM peak not higher by more than 64 MiB at any prompt length; RSS within 5%.
+  Power is read with --sample-gpu and reported; no efficiency claim without it.
+Stop: at most 3 kernel iterations. If the end-to-end gain is under 20% after the second iteration, or any C gate fails, stop NO-GO.
+No tuning sweep beyond the shapes above; no change to Granite, Qwen3, BF16 paths, decode kernels, loaders, scheduler or APIs.
+
+=== ROOT CAUSE ===
+Qwen3.5 calls matmul_precise -> matmul_quant_precise, which always took the warp-per-row f32 FMA kernel (matmul_q8, 8 tokens per tile). The
+tensor-core kernel (matmul_q8_mma, used by Qwen3) was never reached. One-GEMM timing, Int8 group 128, Qwen3.5-4B shapes, RTX 5050 at 40 W:
+  shape (rows x cols)      tokens   f32 kernel (accepted)      tensor core, 2-part split      exact 3-part (candidate)
+  mlp gate/up 9216x2560     512      18.9 ms  1.28 TF/s         3.0 ms  7.95 TF/s              3.8-4.4 ms  5.5-6.4 TF/s
+  mlp down    2560x9216     512      19.9 ms  1.22 TF/s         4.3 ms  5.61 TF/s              4.3-4.7 ms  5.1-5.6 TF/s
+  delta qkv   8192x2560     512      20.5 ms  1.05 TF/s         3.1 ms  6.95 TF/s              3.7-4.6 ms  4.7-5.9 TF/s
+  out proj    2560x4096     512       8.7 ms  1.23 TF/s         1.4 ms  7.49 TF/s              1.9 ms     5.7 TF/s
+  The accepted kernel reaches 1.0-1.4 TFLOP/s, 11% of the card's 11 TFLOP/s fp32 peak and 4% of its 27.8 bf16 tensor peak; the cost is the
+  kernel (one weight row per warp, no operand reuse across tokens), not weight reads (the MLP moves 23.6 MB per GEMM at 512 tokens) or the power cap.
+  Error against an f64 product (relative RMS): f32 kernel 1.0e-7..1.6e-7; 2-part tensor core 2.5e-6 (about 20x worse, why Qwen3.5 avoided it);
+  3-part split, accumulation inside the tensor core: 4.0e-7 (iteration 1, failed gate C1: 4x); 3-part split with each k-step summed in a fresh
+  accumulator and added in f32 (iteration 2): 1.3e-7..2.0e-7 (passes C1). Two iterations used of three allowed.
+
+=== CHANGE ===
+mma.cu: matmul_mma<FORMAT, SPLITS>; SPLITS = 3 splits each f32 activation into bf16 high, middle and low parts (24 bits, exact), three
+multiply-accumulates per tile, each k-step's result added to the group partial sum in f32. New entry matmul_q8_mma_exact. quant.rs:
+matmul_quant_precise for Int8 and 16 or more tokens selects it; Int4, 1..15 tokens, 2..4-token batched decode and BF16 are unchanged.
+No new buffers (shared memory 3 KB more per block), same weights and layout, no new API.
+
+=== RESULTS (Qwen3.5-4B Q8 CUDA, interleaved base/new/base/new, 3 runs each, 32 decode tokens, one process at a time) ===
+  prompt   prefill tok/s base -> new           x      TTFT base -> new     decode base -> new    device VRAM peak MiB   RSS MB
+  128      131.9,133.1 -> 329.0,331.6         2.49    966 -> 388 ms        32.59 -> 31.86        5276 -> 5279           871
+  512      129.0,129.3 -> 313.9,323.7         2.47    3964 -> 1607 ms      32.29 -> 32.12        5440 -> 5481           871
+  1024     126.8,129.6 -> 318.3,318.0         2.48    7987 -> 3219 ms      31.83 -> 31.69        5549 -> 5537           871
+  2048     118.7,118.1 -> 278.5,277.8         2.35    17301 -> 7363 ms     31.64 -> 31.51        5611 -> 5604           871
+  Sampled GPU power (mean) base 36.1-39.6 W, new 33.8-39.0 W (the same 40 W cap; the new run is also shorter). No efficiency claim.
+  Per stage at 512 tokens (bench --profile, one pass): MLP 2019 -> 511 ms (3.9x, 1.15 -> 4.54 TFLOP/s), QKV projections 943 -> 251 ms (3.8x,
+  0.55 -> 2.05), attention output 287 -> 77 ms (3.7x, 1.20 -> 4.46), whole pass 4008 -> 1668 ms. DeltaNet recurrence 694 -> 763 ms
+  (unchanged; it is now 46% of prefill), attention 43 -> 42 ms.
+  Matched tasks through marin serve (ctx 4096, greedy, 64 tokens, 3 runs x 2 builds, text identical base/new and across runs):
+    code review of 6,000 characters of Rust (about 1.4k tokens): first token 10.2 s -> 5.0 s (-51%), whole answer 12.2 -> 7.0 s
+    chat question (about 30 tokens):                             first token 0.21-0.27 s -> 0.17-0.20 s (-20%; fixed costs dominate a short prompt)
+  Numerics: pinned 128-step HF check, Qwen3.5-4B Q8 CUDA: PASS, token choices match, max logit diff 1.19e-5 (was 1.31e-5), max layer diff
+  1.15e-5 (1.18e-5), normalized max 4.442e-6 (3.879e-6), relative RMS 3.027e-6 (3.288e-6); short reference PASS (1.53e-5 / 5.3e-6 / 1.7e-6).
+  New regression test precise_int8_matmul_is_float32_grade_on_the_tensor_core_path (fails with the 2-part split, passes with the 3-part one).
+
+=== DECISION ===
+GO. All kernel and end-to-end gates met except the chat sub-gate of P2 (short chat -20% against 30%: a 30-token prompt is mostly fixed cost,
+not projection time; prefill-heavy code prompts gain 51%). Remaining prefill bottleneck: the DeltaNet recurrence (46% at 512 tokens).

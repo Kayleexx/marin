@@ -10,16 +10,16 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-cuda = { version = "0.0.0", path = "../cuda" }
-kv = { version = "0.0.0", path = "../kv" }
-loader = { version = "0.0.0", path = "../loader" }
-metrics = { version = "0.0.0", path = "../metrics" }
-runtime = { version = "0.0.0", path = "../runtime" }
+cuda = { version = "0.1.0", path = "../cuda" }
+kv = { version = "0.1.0", path = "../kv" }
+loader = { version = "0.1.0", path = "../loader" }
+metrics = { version = "0.1.0", path = "../metrics" }
+runtime = { version = "0.1.0", path = "../runtime" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-tensor = { version = "0.0.0", path = "../tensor" }
+tensor = { version = "0.1.0", path = "../tensor" }
 thiserror = "2.0.21"
 
 
 [dev-dependencies]
-sampler = { version = "0.0.0", path = "../sampler" }
+sampler = { version = "0.1.0", path = "../sampler" }

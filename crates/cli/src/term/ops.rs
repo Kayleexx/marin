@@ -6,7 +6,6 @@ use std::time::Duration;
 use crossterm::cursor::MoveTo;
 use crossterm::event;
 use crossterm::queue;
-use crossterm::style::Print;
 use crossterm::terminal::{Clear, ClearType};
 use model::BackendChoice;
 use runtime::StopReason;
@@ -313,17 +312,11 @@ impl App {
         out.flush()
     }
 
-    /// The first prompt ends the startup view: its input line beside the portrait is erased, and the
-    /// conversation continues at the left edge below the welcome, which stays in the scrollback.
+    /// The first prompt ends the startup view: its input line is erased and the conversation continues below
+    /// the welcome, which stays in the scrollback.
     fn leave_startup_view(&mut self) -> io::Result<()> {
-        if let Some(column) = self.splash.take() {
+        if std::mem::take(&mut self.splash) {
             self.screen.print(&[])?;
-            if column > 0 {
-                let mut out = io::stdout().lock();
-                queue!(out, Print("\r\n\r\n"))?;
-                out.flush()?;
-            }
-            self.screen.set_indent(0);
         }
         Ok(())
     }
@@ -351,6 +344,9 @@ impl App {
                     .ask(session, text, &self.interrupt, &mut out);
                 out.finish_markdown()?;
                 out.finish_placeholder(result.is_ok())?;
+                if let Some(note) = self.dialog.chat.take_left_out_note() {
+                    println!("{}", self.style.dim(&note));
+                }
                 match result {
                     Ok(reply) => {
                         let note = match reply.outcome.stop {

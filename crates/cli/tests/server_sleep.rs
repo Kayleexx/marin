@@ -18,8 +18,8 @@ use qwen35::{Res, Scratch, have_gpu, packed_tiny};
 use serde_json::{Value, json};
 use server::Server;
 use talk::{
-    LONG, REAL, Talker, Turn, real_model, send_and_hang_up, start_real, start_stream, take_gpu,
-    text,
+    LONG, REAL, Talker, Turn, exclusive_gpu, real_model, send_and_hang_up, start_real,
+    start_stream, take_gpu, text,
 };
 
 fn start_idle(model: &Path, home: &Path) -> Res<Server> {
@@ -53,6 +53,7 @@ fn every_conversation_survives_repeated_sleep_and_wake() -> Res {
     if !have_gpu()? {
         return Ok(());
     }
+    let _alone = exclusive_gpu();
     let scratch = Scratch::new("sleep-cycles")?;
     let packed = packed_tiny(&scratch.0)?;
     let (control_a, control_b) = (
@@ -87,6 +88,7 @@ fn requests_arriving_while_it_sleeps_wake_it_once() -> Res {
     if !have_gpu()? {
         return Ok(());
     }
+    let _alone = exclusive_gpu();
     let scratch = Scratch::new("sleep-wake-once")?;
     let packed = packed_tiny(&scratch.0)?;
     let server = start_idle(&packed, &scratch.0)?;
@@ -135,6 +137,7 @@ fn hanging_up_while_the_model_wakes_loses_nothing() -> Res {
     if !have_gpu()? {
         return Ok(());
     }
+    let _alone = exclusive_gpu();
     let scratch = Scratch::new("sleep-hangup")?;
     let packed = packed_tiny(&scratch.0)?;
     let control = alone(&packed, &scratch.0, "alpha", 2)?;
@@ -162,6 +165,7 @@ fn files_changed_while_it_sleeps_drop_the_sessions_made_with_the_old_ones() -> R
     if !have_gpu()? {
         return Ok(());
     }
+    let _alone = exclusive_gpu();
     let scratch = Scratch::new("sleep-stale")?;
     let packed = packed_tiny(&scratch.0)?;
     let server = start_idle(&packed, &scratch.0)?;
@@ -194,6 +198,7 @@ fn a_model_that_cannot_load_stays_asleep_and_a_running_request_keeps_it() -> Res
     let (true, Some(model)) = (have_gpu()?, real_model()) else {
         return Ok(());
     };
+    let _alone = exclusive_gpu();
     let scratch = Scratch::new("sleep-real")?;
     let server = start_real(&model, &scratch.0, &["--idle-unload", "1"])?;
     let mut a = Talker::long("alpha", REAL);
@@ -238,6 +243,7 @@ fn requests_arriving_while_the_model_cannot_load_are_all_refused_and_the_next_wa
     let (true, Some(model)) = (have_gpu()?, real_model()) else {
         return Ok(());
     };
+    let _alone = exclusive_gpu();
     let scratch = Scratch::new("sleep-stampede")?;
     let server = start_real(&model, &scratch.0, &["--idle-unload", "1"])?;
     let mut a = Talker::long("alpha", REAL);

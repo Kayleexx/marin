@@ -11,5 +11,5 @@ workspace = true
 
 [dependencies]
 cudarc = { version = "0.19.10", default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-12080"] }
-tensor = { version = "0.0.0", path = "../tensor" }
+tensor = { version = "0.1.0", path = "../tensor" }
 thiserror = "2.0.21"

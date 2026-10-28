@@ -18,18 +18,18 @@ path = "src/bin/marin-run.rs"
 workspace = true
 
 [dependencies]
-chat = { version = "0.0.0", path = "../chat" }
+chat = { version = "0.1.0", path = "../chat" }
 clap = { version = "4.6.7", features = ["derive", "wrap_help"] }
 crossterm = { version = "0.29.0", default-features = false, features = ["events", "bracketed-paste"] }
 ctrlc = "3.5.2"
-kv = { version = "0.0.0", path = "../kv" }
-loader = { version = "0.0.0", path = "../loader" }
-metrics = { version = "0.0.0", path = "../metrics" }
-model = { version = "0.0.0", path = "../model" }
-runtime = { version = "0.0.0", path = "../runtime" }
-sampler = { version = "0.0.0", path = "../sampler" }
+kv = { version = "0.1.0", path = "../kv" }
+loader = { version = "0.1.0", path = "../loader" }
+metrics = { version = "0.1.0", path = "../metrics" }
+model = { version = "0.1.0", path = "../model" }
+runtime = { version = "0.1.0", path = "../runtime" }
+sampler = { version = "0.1.0", path = "../sampler" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-tensor = { version = "0.0.0", path = "../tensor" }
+tensor = { version = "0.1.0", path = "../tensor" }
 thiserror = "2.0.21"
 unicode-width = "0.2.2"

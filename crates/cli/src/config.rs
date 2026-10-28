@@ -1,5 +1,7 @@
 use std::env;
 use std::fs;
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use chat::{ModelKind, classify};
@@ -70,6 +72,11 @@ impl Home {
         self.state_dir.join("sessions")
     }
 
+    /// The background assistant's private folder.
+    pub fn assist_dir(&self) -> PathBuf {
+        self.state_dir.join("assist")
+    }
+
     fn history_file(&self) -> PathBuf {
         self.state_dir.join("history")
     }
@@ -117,15 +124,27 @@ impl Home {
             .collect()
     }
 
+    /// What was typed is private like a saved conversation: the folder is 0700 and the file 0600, even if an earlier
+    /// version made it readable by others.
     pub fn save_history(&self, entries: &[String]) -> std::io::Result<()> {
-        fs::create_dir_all(&self.state_dir)?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&self.state_dir)?;
         let start = entries.len().saturating_sub(MAX_HISTORY);
         let mut text = String::new();
         for entry in entries.iter().skip(start) {
             text.push_str(&serde_json::to_string(entry).map_err(std::io::Error::other)?);
             text.push('\n');
         }
-        fs::write(self.history_file(), text)
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(self.history_file())?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.write_all(text.as_bytes())
     }
 }
 
@@ -259,6 +278,19 @@ mod tests {
         let entries = vec!["one".to_string(), "two\nlines".to_string()];
         home.save_history(&entries).unwrap();
         assert_eq!(home.load_history(), entries);
+    }
+
+    #[test]
+    fn the_prompt_history_is_private_even_when_an_older_file_was_not() {
+        let temp = Temp::new("private-history");
+        let home = Home::new(temp.0.join("c"), temp.0.join("s"));
+        home.save_history(&["a".to_string()]).unwrap();
+        let file = temp.0.join("s").join("history");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        home.save_history(&["b".to_string()]).unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&file), 0o600);
+        assert_eq!(mode(&temp.0.join("s")), 0o700);
     }
 
     #[test]

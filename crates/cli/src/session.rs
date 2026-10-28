@@ -1,4 +1,4 @@
-mod prefill;
+pub(crate) mod prefill;
 mod state;
 
 use std::io::{IsTerminal, Write};

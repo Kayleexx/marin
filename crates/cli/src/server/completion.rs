@@ -153,6 +153,9 @@ pub(super) fn completion(
             return send_error(stream, failure_status(e.is_out_of_memory()), e);
         }
     };
+    let fallback = spare
+        .as_ref()
+        .and_then(|old| plain.spill_if_tight(old).ok().flatten());
     drop(spare);
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -172,7 +175,7 @@ pub(super) fn completion(
             )
         });
         if let Err(e) = opened {
-            store.recover(active, plain, &previous, existing);
+            store.recover(active, plain, &previous, existing, fallback, None);
             return Err(e);
         }
     }
@@ -188,7 +191,7 @@ pub(super) fn completion(
     ) {
         Ok(watcher) => watcher,
         Err(e) => {
-            store.recover(active, plain, &previous, existing);
+            store.recover(active, plain, &previous, existing, fallback, None);
             return Err(e);
         }
     };
@@ -201,7 +204,7 @@ pub(super) fn completion(
             Ok((checkpoint, keep)) => (checkpoint, Some(keep)),
             Err(e) => {
                 stop_watching(stream, &done, watcher);
-                store.recover(active, plain, &previous, existing);
+                store.recover(active, plain, &previous, existing, fallback, None);
                 return fail(
                     stream,
                     input.stream,
@@ -215,7 +218,14 @@ pub(super) fn completion(
     };
     if cancel.load(Ordering::Relaxed) {
         stop_watching(stream, &done, watcher);
-        store.recover(active, plain, &previous, existing);
+        store.recover(
+            active,
+            plain,
+            &previous,
+            existing,
+            fallback,
+            checkpoint.map(|m| (m, history.as_slice())),
+        );
         if timed_out.load(Ordering::Relaxed) {
             return fail(stream, input.stream, 504, "generation timed out");
         }
@@ -267,21 +277,49 @@ pub(super) fn completion(
     );
     stop_watching(stream, &done, watcher);
     if timed_out.load(Ordering::Relaxed) {
-        store.recover(active, plain, &previous, existing);
+        store.recover(
+            active,
+            plain,
+            &previous,
+            existing,
+            fallback,
+            checkpoint.map(|m| (m, history.as_slice())),
+        );
         return fail(stream, input.stream, 504, "generation timed out");
     }
     if let Some(message) = failure {
-        store.recover(active, plain, &previous, existing);
+        store.recover(
+            active,
+            plain,
+            &previous,
+            existing,
+            fallback,
+            checkpoint.map(|m| (m, history.as_slice())),
+        );
         return fail(stream, input.stream, 500, message);
     }
     let outcome = match result {
         Ok(value) => value,
         Err(GenerateError::Model(ScheduleError::Cancelled)) => {
-            store.recover(active, plain, &previous, existing);
+            store.recover(
+                active,
+                plain,
+                &previous,
+                existing,
+                fallback,
+                checkpoint.map(|m| (m, history.as_slice())),
+            );
             return Ok(());
         }
         Err(e) => {
-            store.recover(active, plain, &previous, existing);
+            store.recover(
+                active,
+                plain,
+                &previous,
+                existing,
+                fallback,
+                checkpoint.map(|m| (m, history.as_slice())),
+            );
             let status = match &e {
                 GenerateError::Model(model) => failure_status(model.is_out_of_memory()),
                 _ => 500,
@@ -291,7 +329,14 @@ pub(super) fn completion(
     };
     let reused = skipped.unwrap_or(outcome.reused);
     if outcome.stop == StopReason::Cancelled {
-        store.recover(active, plain, &previous, existing);
+        store.recover(
+            active,
+            plain,
+            &previous,
+            existing,
+            fallback,
+            checkpoint.map(|m| (m, history.as_slice())),
+        );
         return Ok(());
     }
     let mut replayed = 0;
@@ -305,7 +350,7 @@ pub(super) fn completion(
             active.retained = Retained::restored(history);
         } else {
             // A failed refresh must not publish a partially rebuilt session.
-            store.recover(active, plain, &previous, existing);
+            store.recover(active, plain, &previous, existing, fallback, None);
             return fail(stream, input.stream, 500, "failed to refresh session state");
         }
     }
@@ -363,7 +408,7 @@ pub(super) fn completion(
             store.put(active, plain);
         }
     } else {
-        store.recover(active, plain, &previous, existing);
+        store.recover(active, plain, &previous, existing, fallback, None);
     }
     response
 }

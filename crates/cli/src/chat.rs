@@ -13,6 +13,7 @@ use crate::signal::Interrupt;
 pub struct Chat {
     conversation: Conversation,
     specials: Vec<String>,
+    left_out: usize,
 }
 
 impl Chat {
@@ -20,6 +21,17 @@ impl Chat {
         Self {
             conversation: Conversation::default(),
             specials: session.loaded.dir.tokenizer.special_tokens(),
+            left_out: 0,
+        }
+    }
+
+    /// What to tell the user when the oldest messages stopped fitting the window since the last call.
+    pub fn take_left_out_note(&mut self) -> Option<String> {
+        match std::mem::take(&mut self.left_out) {
+            0 => None,
+            n => Some(format!(
+                "the {n} oldest message(s) no longer fit the context window and are no longer seen by the model"
+            )),
         }
     }
 
@@ -102,10 +114,13 @@ impl Chat {
         let reserved = session.settings.max_tokens.min(session.ctx / 2);
         let budget = session.ctx.saturating_sub(reserved);
         let tokenizer = &session.loaded.dir.tokenizer;
-        let (prompt, _) = fit(&mut self.conversation, &self.specials, budget, |t| {
+        let before = self.conversation.messages().len();
+        let fitted = fit(&mut self.conversation, &self.specials, budget, |t| {
             tokenizer.encode(t).map(|ids| ids.len())
-        })
-        .map_err(|e| match e {
+        });
+        let after = self.conversation.messages().len();
+        self.left_out = self.left_out.saturating_add(before.saturating_sub(after));
+        let (prompt, _) = fitted.map_err(|e| match e {
             FitError::TooLong { tokens, .. } => CliError::PromptTooLong {
                 tokens,
                 ctx: session.ctx,

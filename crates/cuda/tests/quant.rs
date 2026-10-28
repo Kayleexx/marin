@@ -70,6 +70,53 @@ fn quantized_matmul_matches_the_dequantized_reference_for_every_format_group_and
     }
 }
 
+/// The precise Int8 product keeps the f32 activations whole (three bf16 parts) on the tensor-core path, so it is as close to the
+/// f64 reference as the f32 kernel is; two parts, as `matmul_quant` uses, would be about ten times further off.
+#[test]
+fn precise_int8_matmul_is_float32_grade_on_the_tensor_core_path() {
+    let Some(gpu) = gpu().unwrap() else { return };
+    for group in [32, 128, 256] {
+        for (rows, cols) in [(70, 512), (130, 1024)] {
+            let q = quantize(
+                &bf16_bits(&values(rows * cols, 5)),
+                rows,
+                cols,
+                scheme(QuantBits::Int8, group),
+            )
+            .unwrap();
+            let device = gpu.upload_quantized(&q).unwrap();
+            for (tokens, magnitude) in [
+                (1, 1.0),
+                (15, 1.0),
+                (16, 1.0),
+                (17, 1.0),
+                (40, 1.0e3),
+                (64, 1.0),
+                (65, 1.0e-3),
+            ] {
+                let x: Vec<f32> = values(tokens * cols, 77)
+                    .iter()
+                    .map(|v| v * magnitude)
+                    .collect();
+                let expected = reference(&q, &x, tokens).unwrap();
+                let mut out = gpu.zeros(tokens * rows).unwrap();
+                gpu.matmul_quant_precise(&device, &gpu.upload(&x).unwrap(), tokens, &mut out)
+                    .unwrap();
+                let got = gpu.download(&out).unwrap();
+                let scale = expected.iter().fold(0.0_f32, |m, e| m.max(e.abs()));
+                let worst = got
+                    .iter()
+                    .zip(&expected)
+                    .fold(0.0_f32, |m, (a, e)| m.max((a - e).abs()));
+                assert!(
+                    worst <= 1.0e-6 * scale,
+                    "group {group} {rows}x{cols} tokens {tokens}: worst {worst} of {scale}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn quantized_matmul_handles_model_sized_rows_and_zero_groups_and_extreme_weights() {
     let Some(gpu) = gpu().unwrap() else { return };

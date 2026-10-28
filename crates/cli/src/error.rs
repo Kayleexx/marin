@@ -88,9 +88,9 @@ impl CliError {
                 "download the whole model folder (config.json, tokenizer.json, model.safetensors) from Hugging Face",
             ),
             Self::ModelNotLoaded => Some("open / actions and choose Switch model"),
-            Self::Loader(LoaderError::NotADirectory(_)) => {
-                Some("pass the folder that contains config.json, not a file inside it")
-            }
+            Self::Loader(LoaderError::NotADirectory(_)) => Some(
+                "the path must be an existing model folder (the one that contains config.json), not a file inside it",
+            ),
             Self::Loader(LoaderError::Safetensors { .. }) => {
                 Some("the file may be a partial download; fetch it again")
             }

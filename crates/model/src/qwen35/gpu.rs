@@ -1,6 +1,6 @@
 use super::TextConfig;
 use super::gpu_cache::GpuCache;
-use super::gpu_mark::Mark;
+use super::gpu_mark::GpuMark;
 use super::gpu_transaction::{self as transaction, Pass};
 use super::gpu_weights::{Layer, load_layers};
 use super::math::{invalid, size};
@@ -120,8 +120,8 @@ impl Qwen35Gpu {
         GpuCache::new(&self.gpu, &self.config, &self.layers, capacity, self.owner)
     }
 
-    /// A mark of `cache` to `rewind` to; see `Mark`.
-    pub fn mark_cache(&self, cache: &GpuCache) -> Result<Mark, ModelError> {
+    /// A mark of `cache` to `rewind` to; see `GpuMark`.
+    pub fn mark_cache(&self, cache: &GpuCache) -> Result<GpuMark, ModelError> {
         if cache.owner != self.owner {
             return Err(invalid("cache belongs to a different Qwen3.5 GPU model"));
         }
@@ -129,14 +129,14 @@ impl Qwen35Gpu {
     }
 
     /// Like `mark_cache`, with the state in host memory so that the GPU needs no room for it.
-    pub fn mark_cache_in_host(&self, cache: &GpuCache) -> Result<Mark, ModelError> {
+    pub fn mark_cache_in_host(&self, cache: &GpuCache) -> Result<GpuMark, ModelError> {
         if cache.owner != self.owner {
             return Err(invalid("cache belongs to a different Qwen3.5 GPU model"));
         }
         cache.mark_in_host(&self.gpu)
     }
 
-    pub fn rewind_cache(&self, cache: &mut GpuCache, mark: Mark) -> Result<(), ModelError> {
+    pub fn rewind_cache(&self, cache: &mut GpuCache, mark: GpuMark) -> Result<(), ModelError> {
         if cache.owner != self.owner {
             return Err(invalid("cache belongs to a different Qwen3.5 GPU model"));
         }

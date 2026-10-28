@@ -1,0 +1,48 @@
+Final v0.1 pass: two optimization candidates, both NO-GO; packaging fixes
+
+GATES (fixed before measuring): coding accuracy at least the baseline on the 25 tasks (development and held-out reported
+separately) with no new invalid calls; low-end candidate must remove measured redundant prefill without changing output.
+Baseline = the current working tree, not HEAD.
+
+BASELINE (scripts/code_eval.py run, Qwen3.5-4B packed INT8, CUDA, ctx 8192, temp 0, one run)
+  14/25 (development 9/17, held-out 5/8), tool calls 77, invalid 9, repeated 5, 642 s, 197,941 prompt tokens.
+  Earlier runs of the same code: 16/25, 15/25, 15/25. Run-to-run noise is one or two tasks, so a small gain cannot be proven here.
+
+A. CODING RELIABILITY: NO-GO (nothing implemented)
+  Failures audited in saved transcripts. t1 and a5 fail on stale graders (max_active moved from line 26 to 30; Store::evict no
+  longer exists, so "not found" was the right answer). a12 and b4 are model loops (the same broad search three times; a tool
+  name read as a file): the search tool already says "use a more specific pattern or path".
+  Constrained tool-call output: 5 invalid calls in 72, and only 3 of 9 failing tasks involved any invalid call; the sampler has no
+  mask hook, so it would be new machinery for a ceiling of a task or two.
+  Verifying cited locations: 135 citations in 50 answers, 0 lines past the end of a file, invented paths in one task (t2, already failing).
+
+B. LOW-END EFFICIENCY: NO-GO (nothing implemented)
+  `marin-run turns`, CPU, same reply in every row. Warm turn (keep) against reading the history again (replay):
+    Qwen3-0.6B   history 2,280 tokens  0.32 s vs 6.9 s   (48 tokens read);  4,142 tokens  0.72 s vs 18.0 s  (47 read)
+    Qwen3-1.7B   history 2,280 tokens  0.50 s vs 13.4 s   (52 read);         4,142 tokens  0.93 s vs 37.0 s  (52 read)
+  Warm turns already read only new tokens. An edited history re-reads from the edit, which is inherent and reported as replayed.
+  What remains is prefill getting slower per token at long context on the CPU; that needs a kernel change, out of scope.
+
+PACKAGING
+  LICENSE added (Apache-2.0, official text, unmodified). Workspace version 0.0.0 to 0.1.0 (Cargo.lock: the ten workspace entries only).
+  CI calls scripts/check-line-limit.sh and scripts/check-unsafe.sh instead of carrying copies. scripts/code_eval.py reproduces
+  the 25-task benchmark from a clone (it reproduced 16/25 and 15/25 from the saved earlier runs).
+
+DECISION: no optimization candidate passes; v0.1 keeps the archive 30 and 31 changes.
+
+server_cold failures: root causes and fixes (0.1.0)
+  hanging_up_during_a_cold_resume_loses_nothing (404): Store::make_room and Store::put took the hot session out of the store
+  and spilled it to host memory outside the lock; during the spill the id was in neither hot, cold nor running, so a request
+  for it was answered 404 although nothing was lost (the test's next client turn arrives while the hung-up request displaces
+  it). Fix: the id is recorded as moving in the same step that takes it out, and claim waits until it is cold again.
+  Unit test a_session_being_spilled_is_waited_for_not_reported_missing failed before (claim answered Missing at once) and passes.
+  a_different_history_that_finds_no_gpu_memory_does_not_lose_the_session (no pressure reached): the request releases the old
+  session's GPU cache before its pass (copying it to host first when memory is tight), so a replacement history no longer than
+  the kept one needs nothing extra and fits at every step. The test now uses a history longer than the whole kept session
+  (300 sentences, about 3,900 tokens against about 4,500 kept plus the rest), take_gpu fails the test if the hold leaves more
+  than 64 MiB above what was asked, and the failure message lists (MiB left, status) per step.
+  Isolation: every GPU test in server_cold and server_sleep now takes exclusive_gpu(), so tiny-model servers no longer run
+  while another test starves the GPU.
+  server_cold alone after the changes: 6 passed, 0 failed (943 s).
+Startup art: the three portrait assets (source image and licence not recorded) and the code and tests that drew them are
+  removed; the wordmark layout is the only startup view. Chat 309 lib tests, pty tests 9, all passing.

@@ -24,7 +24,27 @@ impl Server {
         Self::spawn(model, home, &tiny, &[], "packed")
     }
 
+    /// Starts a server. The GPU of a server that was just stopped is given back a moment after its process ends, so a
+    /// refusal for lack of free memory is tried again for up to half a minute before it is reported.
     pub fn spawn(
+        model: &Path,
+        home: &Path,
+        extra: &[&str],
+        serve: &[&str],
+        name: &str,
+    ) -> Res<Self> {
+        for _ in 0..30 {
+            match Self::try_spawn(model, home, extra, serve, name) {
+                Err(e) if e.to_string().contains("the GPU has") => {
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+                started => return started,
+            }
+        }
+        Self::try_spawn(model, home, extra, serve, name)
+    }
+
+    fn try_spawn(
         model: &Path,
         home: &Path,
         extra: &[&str],
@@ -50,7 +70,11 @@ impl Server {
         while !line.starts_with("listening http://") {
             line.clear();
             if reader.read_line(&mut line)? == 0 {
-                return Err("the server did not start".into());
+                let mut why = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    stderr.read_to_string(&mut why)?;
+                }
+                return Err(format!("the server did not start: {}", why.trim()).into());
             }
         }
         let address = line

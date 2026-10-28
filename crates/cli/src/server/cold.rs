@@ -2,7 +2,7 @@
 //! DeltaNet layer's state and each page of keys and values, exactly as the checkpoint code exports them. It holds no GPU
 //! memory. Thawing builds a new cache from these bytes, so no cache is ever shared; they are never written to disk.
 
-use model::{Engine, ModelError, PAGE_TOKENS, pages_for};
+use model::{Engine, GPU_SLACK_BYTES, ModelError, PAGE_TOKENS, pages_for};
 use runtime::Retained;
 
 use super::session::Stored;
@@ -90,6 +90,24 @@ pub(super) fn capture(engine: &Engine, stored: &Stored) -> Result<Option<Cold>, 
         pages,
         bytes,
     }))
+}
+
+/// A host copy of a session that is about to be released, only when the GPU is too short of memory to read it again
+/// from its tokens (its size and the usual slack are not free). Copying costs about as much as the pass it guards.
+pub(super) fn capture_if_tight(
+    engine: &Engine,
+    stored: &Stored,
+) -> Result<Option<Cold>, ModelError> {
+    let Some(free) = engine.gpu_free_bytes() else {
+        return Ok(None);
+    };
+    let need = size_of(engine, stored.retained.tokens().len())
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .unwrap_or(u64::MAX);
+    if free >= need.saturating_add(GPU_SLACK_BYTES) {
+        return Ok(None);
+    }
+    capture(engine, stored)
 }
 
 /// A new hot session holding exactly what the cold one held. `ctx` is the server's window.

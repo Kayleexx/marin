@@ -29,6 +29,7 @@ pub(super) fn forward(
         let core = recurrent(w, c, (qkv, z, a, b), conv, state, observe)?;
         out.copy_from_slice(&core);
     }
+    tensor::ensure_finite(state, "Delta recurrent state")?;
     w.out.apply(&cores)
 }
 
@@ -117,7 +118,6 @@ fn recurrent(
             }
         }
     }
-    tensor::ensure_finite(state, "Delta recurrent state")?;
     notify(observe, "core", &core);
     tensor::rms_norm_rows(&mut core, &w.norm, c.rms_norm_eps)?;
     for (v, z) in core.iter_mut().zip(z) {

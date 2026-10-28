@@ -97,3 +97,29 @@ fn leases_of_one_id_do_not_release_each_other() {
     drop(second);
     assert!(store.lock().running.is_empty());
 }
+
+#[test]
+fn a_session_being_spilled_is_waited_for_not_reported_missing() {
+    let store = Store::default();
+    store.lock().hot = Some(hot("a"));
+    let (old, moving) = store.displace(None).expect("hot");
+    let (sent, got) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            sent.send(store.claim("a").map(|(_, entry)| entry))
+                .expect("receiver")
+        });
+        assert!(
+            got.recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "the claim must wait while the session is moving to host memory"
+        );
+        store.add_cold(Cold::placeholder(&old.id, 10));
+        drop(moving);
+        let claimed = got.recv().expect("claim answered");
+        assert!(
+            matches!(claimed, Ok(Entry::Cold(_))),
+            "the claim finds the cold copy"
+        );
+    });
+}

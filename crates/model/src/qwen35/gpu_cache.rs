@@ -1,5 +1,5 @@
 use super::TextConfig;
-use super::gpu_mark::Mark;
+use super::gpu_mark::GpuMark;
 use super::gpu_weights::{Layer, Mixer};
 use super::math::{invalid, size};
 use crate::ModelError;
@@ -21,14 +21,14 @@ pub struct GpuCache {
     pub(super) capacity: usize,
     pub(super) replay: bool,
     pub(super) owner: u64,
-    /// Counts the times the history was cut back or started again, so a `Mark` taken before cannot be applied after.
+    /// Counts the times the history was cut back or started again, so a `GpuMark` taken before cannot be applied after.
     pub(super) epoch: u64,
-    /// Tells this cache from every other, so a `Mark` is only ever put back into the cache it came from.
+    /// Tells this cache from every other, so a `GpuMark` is only ever put back into the cache it came from.
     pub(super) id: u64,
     /// The mark taken before the last `forward_rows`, which a cut back inside that pass turns into `resume`.
-    pub(super) pending: Option<Mark>,
+    pub(super) pending: Option<GpuMark>,
     /// Where a pass after a cut back inside the last `forward_rows` starts reading instead of at the very beginning.
-    pub(super) resume: Option<Mark>,
+    pub(super) resume: Option<GpuMark>,
 }
 
 impl GpuCache {

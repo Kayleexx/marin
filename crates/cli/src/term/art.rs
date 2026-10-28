@@ -34,21 +34,6 @@ fn allowed(glyph: char) -> bool {
 }
 
 impl Art {
-    /// The full composition at its largest, 96x44 cells, for big terminals.
-    pub fn portrait_xl() -> Option<Self> {
-        Self::parse(include_bytes!("../../assets/portrait-xl.bin"), true)
-    }
-
-    /// The full composition, 68x31 cells.
-    pub fn portrait_large() -> Option<Self> {
-        Self::parse(include_bytes!("../../assets/portrait-large.bin"), true)
-    }
-
-    /// A face-focused crop, 46x21 cells, for terminals too small for the full composition.
-    pub fn portrait_medium() -> Option<Self> {
-        Self::parse(include_bytes!("../../assets/portrait-medium.bin"), true)
-    }
-
     /// The textured wordmark, 44x8 cells.
     pub fn wordmark_wide() -> Option<Self> {
         Self::parse(include_bytes!("../../assets/wordmark-wide.bin"), true)
@@ -203,11 +188,8 @@ mod tests {
         }
     }
 
-    fn all() -> [(&'static str, Art, usize, usize); 5] {
+    fn all() -> [(&'static str, Art, usize, usize); 2] {
         [
-            ("xl", Art::portrait_xl().unwrap(), 96, 44),
-            ("large", Art::portrait_large().unwrap(), 68, 31),
-            ("medium", Art::portrait_medium().unwrap(), 46, 21),
             ("wide wordmark", Art::wordmark_wide().unwrap(), 44, 8),
             ("narrow wordmark", Art::wordmark_narrow().unwrap(), 22, 4),
         ]
@@ -297,73 +279,12 @@ mod tests {
     }
 
     #[test]
-    fn truecolor_rows_use_braille_and_block_glyphs_with_sequences_only_when_colors_change() {
-        let art = Art::portrait_large().unwrap();
-        let rows = art.render(&caps(Color::Truecolor, true));
-        let text = rows.concat();
-        assert!(
-            text.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)),
-            "braille texture"
-        );
-        assert!(
-            art.cells
-                .iter()
-                .all(|c| c.glyph == ' ' || ('\u{2800}'..='\u{28ff}').contains(&c.glyph)),
-            "portraits are thin braille glyphs only, no block rectangles"
-        );
-        let glyph_count = art.cells.iter().filter(|c| c.glyph != ' ').count();
-        assert!(
-            text.matches("\x1b[38;2").count() <= glyph_count,
-            "no redundant foreground codes"
-        );
-        assert!(rows.iter().all(|r| r.ends_with("\x1b[0m")));
-    }
-
-    #[test]
     fn every_asset_lets_the_terminal_background_show_through() {
         let truecolor = caps(Color::Truecolor, true);
         let wordmark = Art::wordmark_wide().unwrap().render(&truecolor).concat();
         assert!(
             wordmark.contains("\x1b[49m"),
             "dark cells use the default background"
-        );
-        let portrait = Art::portrait_large().unwrap().render(&truecolor).concat();
-        assert!(
-            portrait.contains("\x1b[49m") && !portrait.contains("\x1b[48"),
-            "portraits are foreground glyphs on the terminal's own background"
-        );
-    }
-
-    #[test]
-    fn the_portraits_stay_in_the_cool_palette_with_no_pink() {
-        for art in [
-            Art::portrait_large().unwrap(),
-            Art::portrait_medium().unwrap(),
-        ] {
-            let pink = art
-                .cells
-                .iter()
-                .flat_map(|c| [c.fg, c.bg])
-                .filter(|[r, g, b]| {
-                    *r > 150 && *r > g.saturating_add(60) && *b > g.saturating_add(30)
-                })
-                .count();
-            assert_eq!(pink, 0, "no magenta/pink cells");
-        }
-    }
-
-    #[test]
-    fn the_ascii_fallback_uses_the_whole_ramp_even_for_a_dark_portrait() {
-        let used: std::collections::BTreeSet<char> = Art::portrait_large()
-            .unwrap()
-            .render(&caps(Color::None, true))
-            .concat()
-            .chars()
-            .collect();
-        assert!(
-            used.len() >= 8,
-            "only {} distinct ramp characters: {used:?}",
-            used.len()
         );
     }
 

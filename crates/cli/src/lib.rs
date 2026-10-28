@@ -2,6 +2,7 @@
 
 pub mod arg_types;
 pub mod args;
+pub mod assist;
 pub mod bench;
 pub mod chat;
 pub mod checkpoint;

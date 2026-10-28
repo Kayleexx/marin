@@ -58,7 +58,6 @@ fn some_row(lines: &[String], matches: impl Fn(&String) -> bool) -> bool {
 /// A chat turn followed by the palette, the inspect panel and both closed again; returns the screen after each.
 /// Every step waits for the screen it needs instead of for a fixed time, so a slow machine only makes it slower.
 fn chat_session(cols: usize, color: bool, sandbox: &Sandbox) -> Res<Vec<vt::Screen>> {
-    // The first prompt sits to the right of the portrait, so it does not start its row.
     let prompt = screen_is(cols, |l| some_row(l, |r| r.contains("you >")));
     let reply_started = screen_is(cols, |l| some_row(l, |r| r.starts_with("marin > ")));
     let reply_done = screen_is(cols, |l| {

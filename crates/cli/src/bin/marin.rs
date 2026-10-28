@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use clap::{ArgMatches, CommandFactory, FromArgMatches};
 use runtime::StopReason;
 
+use cli::assist::{self, Next};
 use cli::choose::{self, Chosen};
 use cli::config::{self, Home};
 use cli::dialog::{self, Dialog, Talk};
@@ -92,6 +93,21 @@ fn run(cli: MarinCli, matches: &ArgMatches, style: Style) -> Result<ExitCode, Cl
             )
             .map(|()| ExitCode::SUCCESS)
         }
+        Some(MarinCommand::Assist { action }) => {
+            match assist::run(action, Home::detect().as_ref())? {
+                Next::Done => Ok(ExitCode::SUCCESS),
+                Next::Exit(code) => Ok(code),
+                Next::Chat { draft, repo, code } => {
+                    if !(stdin_is_terminal() && io::IsTerminal::is_terminal(&io::stdout())) {
+                        println!("{draft}");
+                        return Ok(ExitCode::SUCCESS);
+                    }
+                    let l = launching(cli.options, matches, style, true);
+                    let talk = if code { Talk::Code } else { Talk::Chat };
+                    session(&l, style, (talk, repo, None), Some(draft))
+                }
+            }
+        }
         Some(MarinCommand::Show { path, kind }) => {
             show::run(path.as_deref(), kind.as_deref(), cli.options.no_color)
                 .map(|()| ExitCode::SUCCESS)
@@ -100,7 +116,7 @@ fn run(cli: MarinCli, matches: &ArgMatches, style: Style) -> Result<ExitCode, Cl
             let l = launching(cli.options, matches, style, true);
             let text = prompt.join(" ");
             if text.trim().is_empty() && stdin_is_terminal() {
-                return session(&l, style, Talk::Chat, PathBuf::from("."), None);
+                return session(&l, style, (Talk::Chat, PathBuf::from("."), None), None);
             }
             one_shot(&text, &l, style)
         }
@@ -118,7 +134,7 @@ fn run(cli: MarinCli, matches: &ArgMatches, style: Style) -> Result<ExitCode, Cl
                     log,
                     no_color: l.options.no_color,
                 }),
-                None => session(&l, style, Talk::Code, root, log),
+                None => session(&l, style, (Talk::Code, root, log), None),
             }
         }
         Some(MarinCommand::Serve { port, idle_unload }) => {
@@ -154,7 +170,7 @@ fn run(cli: MarinCli, matches: &ArgMatches, style: Style) -> Result<ExitCode, Cl
         }
         None => {
             let l = launching(cli.options, matches, style, true);
-            session(&l, style, Talk::Chat, PathBuf::from("."), None)
+            session(&l, style, (Talk::Chat, PathBuf::from("."), None), None)
         }
     }
 }
@@ -326,9 +342,8 @@ fn one_shot(prompt: &str, l: &Launching, style: Style) -> Result<ExitCode, CliEr
 fn session(
     l: &Launching,
     style: Style,
-    talk: Talk,
-    root: PathBuf,
-    log: Option<PathBuf>,
+    (talk, root, log): (Talk, PathBuf, Option<PathBuf>),
+    draft: Option<String>,
 ) -> Result<ExitCode, CliError> {
     setup::settings(&l.options)?;
     let interrupt = Interrupt::install().map_err(|e| CliError::Io(io::Error::other(e)))?;
@@ -342,7 +357,7 @@ fn session(
     let mut dialog = Dialog::new(&session, talk, absolute(&root), log)?;
     if interactive {
         let caps = Caps::detect(l.options.no_color);
-        let splash = splash::show(&caps)?;
+        splash::show(&caps)?;
         let code = app::run(Launch {
             session,
             dialog,
@@ -352,7 +367,8 @@ fn session(
             precision: setup::asked_precision(&l.options)?,
             style,
             caps,
-            splash: Some(splash),
+            splash: true,
+            draft,
         })?;
         return Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)));
     }

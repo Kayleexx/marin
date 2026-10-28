@@ -101,6 +101,12 @@ impl<'a> Scheduled<'a> {
             .run(1, || cold::capture(&self.loaded.model, stored))
     }
 
+    /// `spill`, but only while the GPU is too short of memory to read the session again.
+    pub fn spill_if_tight(&self, stored: &Stored) -> Result<Option<Cold>, ModelError> {
+        self.gate
+            .run(1, || cold::capture_if_tight(&self.loaded.model, stored))
+    }
+
     /// A cold session back on the GPU. Waits for memory like a pass does; the cold session is only read.
     pub fn thaw(&self, cold: &Cold) -> Result<Stored, ScheduleError> {
         self.retrying(|| {

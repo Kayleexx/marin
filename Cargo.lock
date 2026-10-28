@@ -150,7 +150,7 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "chat"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -200,7 +200,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "cli"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "chat",
  "clap",
@@ -312,7 +312,7 @@ dependencies = [
 
 [[package]]
 name = "cuda"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "cudarc",
  "tensor",
@@ -531,7 +531,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "kv"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "thiserror",
 ]
@@ -572,7 +572,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "loader"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -620,7 +620,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "metrics"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "minimal-lexical"
@@ -642,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "model"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "cuda",
  "kv",
@@ -980,7 +980,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "runtime"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "kv",
  "sampler",
@@ -1014,7 +1014,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "sampler"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "thiserror",
 ]
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "tensor"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "pulp",
  "thiserror",

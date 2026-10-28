@@ -57,6 +57,60 @@ fn complete_model_incremental_replay_reset_and_session_isolation() {
         m.forward(&[17], &mut independent).unwrap()
     );
 }
+fn break_last_layer(m: &mut Qwen35) {
+    let h = m.config().hidden_size;
+    let ff = m.config().intermediate_size;
+    let n = h.checked_mul(ff).unwrap();
+    let last = m.blocks.last_mut().unwrap();
+    last.common.gate = Linear::new(vec![1000.0; n], h);
+    last.common.up = Linear::new(vec![1000.0; n], h);
+    last.common.down = Linear::new(vec![f32::MAX; n], ff);
+}
+#[test]
+fn a_non_finite_recurrent_state_fails_the_pass_leaves_the_cache_and_a_retry_succeeds() {
+    let m = load();
+    let mut c = m.new_cache(32).unwrap();
+    let mut reference = m.new_cache(32).unwrap();
+    m.forward(&[17, 4, 81], &mut c).unwrap();
+    m.forward(&[17, 4, 81], &mut reference).unwrap();
+    let poisoned = c
+        .states
+        .iter_mut()
+        .find_map(|s| match &mut s.storage {
+            Storage::Delta { recurrent, .. } => recurrent.first_mut(),
+            Storage::Full(_) => None,
+        })
+        .unwrap();
+    let original = std::mem::replace(poisoned, f32::INFINITY);
+    let before = contents(&c);
+    assert!(m.forward(&[29, 5], &mut c).is_err());
+    assert_eq!(contents(&c), before);
+    let healed = c
+        .states
+        .iter_mut()
+        .find_map(|s| match &mut s.storage {
+            Storage::Delta { recurrent, .. } => recurrent.first_mut(),
+            Storage::Full(_) => None,
+        })
+        .unwrap();
+    *healed = original;
+    assert_eq!(
+        m.forward(&[29, 5], &mut c).unwrap(),
+        m.forward(&[29, 5], &mut reference).unwrap()
+    );
+}
+#[test]
+fn a_replaying_pass_that_fails_stays_to_be_replayed() {
+    let mut m = load();
+    let mut c = m.new_cache(32).unwrap();
+    m.forward(&[17, 4, 81], &mut c).unwrap();
+    c.truncate(2).unwrap();
+    let ids = c.tokens.clone();
+    break_last_layer(&mut m);
+    assert!(m.forward(&[29], &mut c).is_err());
+    assert!(c.replays());
+    assert_eq!(c.tokens, ids);
+}
 #[test]
 fn last_layer_failure_rolls_back_every_earlier_layer() {
     let mut m = load();
@@ -64,12 +118,7 @@ fn last_layer_failure_rolls_back_every_earlier_layer() {
     m.forward(&[17, 4, 81], &mut c).unwrap();
     let before = contents(&c);
     let ids = c.tokens.clone();
-    let h = m.config().hidden_size;
-    let ff = m.config().intermediate_size;
-    let last = m.blocks.last_mut().unwrap();
-    last.common.gate = Linear::new(vec![1000.0; h * ff], h);
-    last.common.up = Linear::new(vec![1000.0; h * ff], h);
-    last.common.down = Linear::new(vec![f32::MAX; h * ff], ff);
+    break_last_layer(&mut m);
     let mut reached = 0;
     assert!(
         m.forward_observed(&[29], &mut c, Some(&mut |i, _| reached = i))

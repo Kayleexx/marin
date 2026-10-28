@@ -1,48 +1,24 @@
-# Benchmark archive index
+# Benchmark logs
 
-BENCHMARKS.md is the living summary: accepted results, retained gates, material NO-GO decisions, commands.
-This folder holds the evidence behind it; the workload scripts are kept locally, not published. Nothing in the source tree, the tests or CI reads these files; they are
-read by people (and linked from BENCHMARKS.md and README.md). Some raw JSON, reference vectors and source copies were
-recorded under the ignored `bench-results/` folder of the measuring machine; an ignored path is not a promise that a
-file exists in a fresh checkout, and the tracked tables and commands stay here.
+BENCHMARKS.md is the short summary. This folder keeps the six logs that best show how Marin was built and checked. Each
+log states its gates first, then the results and the decision. Nothing in the source, the tests or CI reads these files.
 
-## Never edit: the pre-consolidation BENCHMARKS.md
+## Published here
 
-01-04 preserve every line of the 5,752-line BENCHMARKS.md as it stood before the 2026-10-15 consolidation. In
-filename order their bytewise concatenation has SHA-256
-`6cf53334a6d2e46d66d60f4203607023e35320cc274ad9a456b58a23fb8f90d0`. Section numbers, fixed gates, failed
-experiments and commands are unrewritten; later measurements may supersede an early number.
-
-| File | Original sections | Content |
+| Log | Milestone | Decision |
 |---|---|---|
-| [01-gpu-foundations.log](01-gpu-foundations.log) | 1-21 | GPU kernels, attention, quantization, KV, snapshots, first CPU audit. |
-| [02-cpu-stages.log](02-cpu-stages.log) | 22-31 | SIMD and threads, CPU INT8, growable KV, INT4 pilot, loading and consolidation audits. |
-| [03-loader-qwen35-planner.log](03-loader-qwen35-planner.log) | 32-40 | Packed loader, Qwen3.5-2B/4B execution, CUDA, static V9 planner. |
-| [04-granite-moe.log](04-granite-moe.log) | 41-46 | Granite 3.0 CPU/CUDA, strict parity NO-GOs, H-Tiny pilot. |
+| [06-server-scheduling](06-server-scheduling.log) | several requests at once | GO |
+| [10-shared-prefix](10-shared-prefix.log) | batched prefill (dropped) and a shared system prompt (kept) | NO-GO and GO |
+| [22-session-continuity](22-session-continuity.log) | hot and cold sessions on the server | GO |
+| [25-qwen35-int8-prefill](25-qwen35-int8-prefill.log) | CUDA INT8 prefill, 2.5x | GO |
+| [30-cpu-history-reuse-planner](30-cpu-history-reuse-planner.log) | CPU history reuse, 1,547 s to 468 s | GO |
+| [34-v01-final-pass](34-v01-final-pass.log) | v0.1.0 checks, coding audit, server_cold root causes | SHIP |
 
-## Milestone logs (one per accepted or rejected milestone)
+## Kept only on the author's machine (bench-results/archive)
 
-Each log states its gates before the results. Class: **decision** = the reasoning behind a lasting trade-off;
-**evidence** = raw numbers for a claim in BENCHMARKS.md.
-
-| Log | Milestone | Class |
-|---|---|---|
-| [04-server-sessions](04-server-sessions.log), [05-server-checkpoints](05-server-checkpoints.log) | server sessions, reuse | decision |
-| [06-server-scheduling](06-server-scheduling.log) | V7 multi-request scheduling | decision |
-| [07-batched-decode](07-batched-decode.log), [08-batched-memory](08-batched-memory.log) | V7b/V7c batched decode and memory | decision |
-| [09-batched-prefill](09-batched-prefill.log) (NO-GO), [10-shared-prefix](10-shared-prefix.log) (GO) | V8/V9 prefill | decision |
-| [11-coding-v0](11-coding-v0.log), [12-unified-terminal](12-unified-terminal.log), [13-stabilization](13-stabilization.log) | coding mode, one terminal | decision |
-| [14-durable-sessions](14-durable-sessions.log), [15-checkpoint-feasibility](15-checkpoint-feasibility.log), [16-terminal-bench-verify](16-terminal-bench-verify.log) | saved sessions, checkpoints, /bench /verify | decision |
-| [17-performance-and-memory](17-performance-and-memory.log), [18-inference-state-memory](18-inference-state-memory.log), [19-vram-pressure](19-vram-pressure.log) | state-marked passes, host marks | decision + evidence |
-| [20-speculation](20-speculation.log) | V8 speculative decoding, PARTIAL GO | decision + evidence |
-| [21-model-evaluation](21-model-evaluation.log) | V10-A model evaluation, routing NO-GO | decision + evidence |
-| [22-session-continuity](22-session-continuity.log) | V11 multi-session continuity, hot/cold sessions, GO | decision + evidence |
-| [23-model-hibernation](23-model-hibernation.log) | V11 model hibernation (--idle-unload), GO opt-in | decision + evidence |
-| [24-baseline-evaluation](24-baseline-evaluation.log) | Baseline evaluation of every installed model/backend on the V11 tree: matrix, paired regression check, HF verify, workflows, bottlenecks; gates first | decision + evidence |
-
-## Harnesses and raw outputs (not tracked)
-
-The one-off drivers, Rust probes (`*.rs.txt`), summarizers, prompt sets, transcripts and per-run outputs behind these logs
-(`06-load.py`, `11-code-eval.py`, `15-checkpoint-e2e.sh`, `17-` to `21-harness/`, ...) are no longer tracked; this folder keeps only
-the logs. They stay on the maintainer's machine and in git history: the last commit that contains them is `5a4a8ee`
-(`git show 5a4a8ee:docs/benchmarks/archive/<path>`). The workload scripts (`server_load.py` replaces `06-load.py`) are kept locally in `benchmarks/`, which is not published.
+Logs 01 to 05, 07 to 09, 11 to 21, 23 and 24, 26 to 29 and 31 to 33. They cover the first GPU and CPU work, the
+Granite pilot, server sessions and checkpoints, batched decode and memory, the coding mode, the unified terminal,
+durable sessions, speculation, model evaluation, hibernation, baselines, CPU decode limits, the performance profile, low-VRAM
+recovery, the assistant, code-mode recovery, and the rejected CPU 4-bit, CPU lookup speculation and answer-guard ideas.
+Their conclusions are in the tables in BENCHMARKS.md. Logs 01 to 04 are the original 5,752-line BENCHMARKS.md; joined in
+file-name order their SHA-256 is `6cf53334a6d2e46d66d60f4203607023e35320cc274ad9a456b58a23fb8f90d0`.

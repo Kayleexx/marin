@@ -28,9 +28,11 @@ pub struct Launch {
     pub precision: ChatPrecision,
     pub style: Style,
     pub caps: Caps,
-    /// The startup view is on screen, with the first prompt at this column (0 without a portrait).
-    /// It stays in the scrollback; the first submitted prompt starts the conversation below it.
-    pub splash: Option<usize>,
+    /// The startup view is on screen. It stays in the scrollback; the first submitted prompt starts the
+    /// conversation below it.
+    pub splash: bool,
+    /// Text to put in the input line for the user to read, change and send.
+    pub draft: Option<String>,
 }
 
 pub(super) enum Mode {
@@ -70,7 +72,7 @@ pub(super) struct App {
     /// What a model switch needs while no model is resident: the model to fall back to, its context and the settings.
     pub(super) parked: Option<Parked>,
     pub(super) dialog: Dialog,
-    pub(super) splash: Option<usize>,
+    pub(super) splash: bool,
     pub(super) interrupt: Interrupt,
     pub(super) home: Option<Home>,
     pub(super) backend: BackendChoice,
@@ -92,8 +94,7 @@ pub fn run(launch: Launch) -> Result<i32, CliError> {
         .as_ref()
         .map(Home::load_history)
         .unwrap_or_default();
-    let mut screen = Screen::new(launch.style);
-    screen.set_indent(launch.splash.unwrap_or(0));
+    let screen = Screen::new(launch.style);
     let mut app = App {
         screen,
         session: Some(launch.session),
@@ -112,6 +113,9 @@ pub fn run(launch: Launch) -> Result<i32, CliError> {
         exit_armed: false,
         cache: PanelCache::default(),
     };
+    if let Some(draft) = &launch.draft {
+        app.editor.insert(draft);
+    }
     let mut raw = RawMode::enable()?;
     app.event_loop(&mut raw)
 }

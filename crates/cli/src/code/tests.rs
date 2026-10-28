@@ -302,14 +302,18 @@ fn the_caller_can_end_a_reply_early() {
 
 #[test]
 fn nothing_listening_is_reported_as_unreachable() {
-    let addr = {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        listener.local_addr().unwrap()
-    };
-    assert!(matches!(
-        Client::new(addr).info().err(),
-        Some(ClientError::Unreachable(_))
-    ));
+    // A port that was just released can be taken by another program before the connect; any of a few free ports will do.
+    let unreachable = (0..5).any(|_| {
+        let addr = {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            listener.local_addr().unwrap()
+        };
+        matches!(
+            Client::new(addr).info().err(),
+            Some(ClientError::Unreachable(_))
+        )
+    });
+    assert!(unreachable);
 }
 
 #[test]

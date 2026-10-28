@@ -194,9 +194,9 @@ const PURGE_SCROLLBACK: &str = "\u{1b}[3J";
 #[test]
 fn the_welcome_stays_in_the_scrollback_above_the_conversation() {
     for (columns, lines, layout) in [
-        (160, 52, "extra-large portrait"),
-        (120, 35, "large portrait"),
-        (100, 30, "face crop"),
+        (160, 52, "wide"),
+        (120, 35, "large"),
+        (100, 30, "medium"),
         (80, 24, "compact"),
         (40, 20, "narrow"),
     ] {
@@ -220,26 +220,6 @@ fn the_welcome_stays_in_the_scrollback_above_the_conversation() {
             "{layout}: the first prompt is echoed as a conversation line"
         );
     }
-}
-
-/// With a portrait the first prompt belongs in the right-hand column, as in the reference.
-#[test]
-fn with_a_portrait_the_first_prompt_is_drawn_in_the_right_hand_column() {
-    let Some(screen) = session_output("column", (120, 35), true, false).unwrap() else {
-        return;
-    };
-    assert!(
-        screen.contains("\u{1b}[72G\u{1b}[J\u{1b}[38;5;147myou >\u{1b}[0m "),
-        "the prompt is drawn at column 72, right of the 68-column portrait: {:?}",
-        screen
-            .chars()
-            .rev()
-            .take(200)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect::<String>()
-    );
 }
 
 /// NO_COLOR gets a readable monochrome startup: no color codes, but the same layout.

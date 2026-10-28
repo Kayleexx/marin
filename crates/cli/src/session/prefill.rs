@@ -9,7 +9,7 @@ use crate::CliError;
 use crate::signal::Interrupt;
 
 /// Tokens read per pass, so a cancel is heard within one pass.
-const SLICE: usize = 64;
+pub(crate) const SLICE: usize = 64;
 
 /// What a prompt's start cost: tokens already in the cache, and tokens that were there as far as the record went but had
 /// to be read again because the cache cannot be cut back.

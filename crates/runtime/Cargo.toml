@@ -10,6 +10,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-kv = { version = "0.0.0", path = "../kv" }
-sampler = { version = "0.0.0", path = "../sampler" }
+kv = { version = "0.1.0", path = "../kv" }
+sampler = { version = "0.1.0", path = "../sampler" }
 thiserror = "2.0.21"

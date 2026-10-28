@@ -3,6 +3,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -92,11 +93,40 @@ impl<'a> Talker<'a> {
     }
 }
 
-/// Another program holds all of the GPU's free memory but `leave` bytes until the value is dropped.
+/// Another program holds all of the GPU's free memory but `leave` bytes until the value is dropped (a little more if other programs grow while it is taken). A first small
+/// allocation brings this process's own device state in, so `leave` is what is really left for others.
 pub fn take_gpu(leave: usize) -> Res<impl Sized> {
     let gpu = model::Gpu::new()?;
-    let free = gpu.info()?.free_bytes;
-    Ok((gpu.zeros(free.saturating_sub(leave) / 4)?, gpu))
+    drop(gpu.zeros(1)?);
+    let mut take = gpu.info()?.free_bytes.saturating_sub(leave);
+    loop {
+        match gpu.zeros(take / 4) {
+            Ok(held) => {
+                let free = gpu.info()?.free_bytes;
+                if free > leave.saturating_add(HOLD_SLACK) {
+                    return Err(
+                        format!("the hold left {free} bytes free, not about {leave}").into(),
+                    );
+                }
+                return Ok((held, gpu));
+            }
+            Err(_) if take > STEP => take = take.saturating_sub(STEP),
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+/// What a program that grew in the meantime costs: the hold is tried again that much smaller.
+const STEP: usize = 8 << 20;
+
+/// How far above the requested amount the GPU may still have free once the hold is in place.
+const HOLD_SLACK: usize = 64 << 20;
+
+static REAL_GPU: Mutex<()> = Mutex::new(());
+
+/// Held by a test that loads the real model or takes GPU memory: two of them at once would not both fit the card.
+pub fn exclusive_gpu() -> MutexGuard<'static, ()> {
+    REAL_GPU.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The real 4B folder, when the test environment names it (as the other real-checkpoint tests do).

@@ -38,6 +38,12 @@ pub fn resolve_ctx(
     }
 }
 
+/// Prompts are read in `SLICE` tokens per pass. A pass is admitted again against free memory for a second copy of the
+/// state on top of the one held, which `footprint` counts as three windows.
+pub fn pass_workspace(c: &model::qwen35::TextConfig, ctx: usize) -> Result<u64, CliError> {
+    Ok(c.workspace_bytes(crate::session::prefill::SLICE.min(ctx), ctx)? as u64)
+}
+
 pub fn footprint(
     dir: &ModelDir,
     cfg: &Qwen3Config,
@@ -115,8 +121,8 @@ pub fn footprint(
         let weights = model::qwen35::weight_bytes(&dir.weights, precision.weights)?;
         let kv = c.state_bytes(ctx)? as u64;
         let needed = weights
-            .checked_add(kv.saturating_mul(2))
-            .and_then(|n| n.checked_add(c.workspace_bytes(ctx, ctx).ok()? as u64))
+            .checked_add(kv.saturating_mul(3))
+            .and_then(|n| n.checked_add(pass_workspace(&c, ctx).ok()?))
             .and_then(|n| n.checked_add(model::CPU_SLACK_BYTES))
             .ok_or_else(|| CliError::BadOption("hybrid memory overflow".into()))?;
         return Ok(Footprint {
@@ -240,6 +246,25 @@ impl Footprint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hybrid_pass_is_budgeted_per_slice_not_per_window() {
+        let c = model::qwen35::TextConfig::parse(
+            include_str!("../../../tests/fixtures/tiny-qwen35/config.json"),
+            None,
+        )
+        .unwrap();
+        let slice = crate::session::prefill::SLICE;
+        assert_eq!(
+            pass_workspace(&c, 4096).unwrap(),
+            c.workspace_bytes(slice, 4096).unwrap() as u64
+        );
+        assert!(pass_workspace(&c, 4096).unwrap() < c.workspace_bytes(4096, 4096).unwrap() as u64);
+        assert_eq!(
+            pass_workspace(&c, 1).unwrap(),
+            c.workspace_bytes(1, 1).unwrap() as u64
+        );
+    }
 
     #[test]
     fn cpu_admission_budgets_the_whole_prefill_workspace() {

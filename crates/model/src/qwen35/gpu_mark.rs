@@ -17,7 +17,7 @@ enum Saved {
 /// A point in the history of a cache that it can be returned to exactly, without a second copy of the keys and values:
 /// those are only ever appended past the committed length, so cutting them back is enough. What a pass does change in
 /// place is the DeltaNet state, and that is what a mark holds, on the GPU or, when the GPU has no room, in host memory.
-pub struct Mark {
+pub struct GpuMark {
     saved: Saved,
     positions: usize,
     tokens: usize,
@@ -32,7 +32,7 @@ fn reserve<T>(len: usize) -> Result<Vec<T>, ModelError> {
     Ok(out)
 }
 
-impl Mark {
+impl GpuMark {
     /// Whether this mark is still the place to start reading again after the cache is cut back to `len` tokens: no cut
     /// went below it and it is the cache's own.
     pub(super) fn resumable(self, cache: u64, len: usize, epoch: u64) -> Option<Self> {
@@ -49,8 +49,8 @@ impl GpuCache {
         Ok(())
     }
 
-    fn marked(&self, saved: Saved) -> Mark {
-        Mark {
+    fn marked(&self, saved: Saved) -> GpuMark {
+        GpuMark {
             saved,
             positions: self.kv.len(),
             tokens: self.tokens.len(),
@@ -60,7 +60,7 @@ impl GpuCache {
     }
 
     /// A mark of the committed state kept on the GPU: a copy of the DeltaNet state and the lengths of the history.
-    pub(super) fn mark(&self, gpu: &Gpu) -> Result<Mark, ModelError> {
+    pub(super) fn mark(&self, gpu: &Gpu) -> Result<GpuMark, ModelError> {
         self.fresh()?;
         let mut delta = reserve(self.delta.len())?;
         for state in &self.delta {
@@ -76,7 +76,7 @@ impl GpuCache {
     }
 
     /// The same mark with the DeltaNet state in host memory, which needs no free GPU memory now or when it is put back.
-    pub(super) fn mark_in_host(&self, gpu: &Gpu) -> Result<Mark, ModelError> {
+    pub(super) fn mark_in_host(&self, gpu: &Gpu) -> Result<GpuMark, ModelError> {
         self.fresh()?;
         let mut host = reserve(self.delta.len())?;
         for state in &self.delta {
@@ -94,7 +94,7 @@ impl GpuCache {
     /// Returns to `mark`: the keys and values past its length are forgotten and its DeltaNet state put back. Refused if
     /// the history was cut back or restarted since, or the cache is not the one the mark came from. If the state
     /// cannot be put back the cache is left to be read again from the start, never partly restored.
-    pub(super) fn rewind(&mut self, gpu: &Gpu, mark: Mark) -> Result<(), ModelError> {
+    pub(super) fn rewind(&mut self, gpu: &Gpu, mark: GpuMark) -> Result<(), ModelError> {
         let holds = mark.cache == self.id
             && mark.epoch == self.epoch
             && (!self.replay || self.resume.is_some())
@@ -169,7 +169,7 @@ impl GpuCache {
 }
 
 #[cfg(test)]
-impl Mark {
+impl GpuMark {
     /// Makes a host mark that no longer fits the cache it came from.
     pub(super) fn drop_a_layer(&mut self) {
         if let Saved::Host(host) = &mut self.saved {

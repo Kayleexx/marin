@@ -19,6 +19,14 @@ pub struct DeviceQuantMatrix {
     scales: CudaSlice<f32>,
 }
 
+/// Which arithmetic a quantized matmul uses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Math {
+    Scalar,
+    Tensor,
+    Exact,
+}
+
 impl DeviceQuantMatrix {
     pub fn rows(&self) -> usize {
         self.rows
@@ -124,10 +132,11 @@ impl Gpu {
         tokens: usize,
         out: &mut Buffer,
     ) -> Result<(), CudaError> {
-        self.matmul_quant_with_cores(w, x, tokens, out, true)
+        self.matmul_quant_with_cores(w, x, tokens, out, Math::Tensor)
     }
 
-    /// FP32 activation math for strict hybrid-reference checks.
+    /// FP32 activation math for strict hybrid-reference checks. Int8 passes of 16 or more tokens use the tensor cores
+    /// with the activations split exactly, so only the f32 accumulation rounds; everything else takes the f32 kernels.
     pub fn matmul_quant_precise(
         &self,
         w: &DeviceQuantMatrix,
@@ -135,7 +144,9 @@ impl Gpu {
         tokens: usize,
         out: &mut Buffer,
     ) -> Result<(), CudaError> {
-        self.matmul_quant_with_cores(w, x, tokens, out, false)
+        let exact = w.scheme.bits == QuantBits::Int8 && tokens >= MMA_MIN_TOKENS;
+        let math = if exact { Math::Exact } else { Math::Scalar };
+        self.matmul_quant_with_cores(w, x, tokens, out, math)
     }
 
     fn matmul_quant_with_cores(
@@ -144,7 +155,7 @@ impl Gpu {
         x: &Buffer,
         tokens: usize,
         out: &mut Buffer,
-        allow_tensor_cores: bool,
+        math: Math,
     ) -> Result<(), CudaError> {
         expect_len("matmul input", tokens.checked_mul(w.cols), x)?;
         expect_len("matmul output", tokens.checked_mul(w.rows), out)?;
@@ -154,16 +165,17 @@ impl Gpu {
         if tokens == 1 {
             return self.matvec_quant(w, x, out);
         }
-        if !allow_tensor_cores && w.scheme.bits == QuantBits::Int8 && (2..=4).contains(&tokens) {
+        if math == Math::Scalar && w.scheme.bits == QuantBits::Int8 && (2..=4).contains(&tokens) {
             return self.matvec_quant_multi(w, x, tokens, out);
         }
-        let tensor_cores = allow_tensor_cores && tokens >= MMA_MIN_TOKENS;
+        let tensor_cores = math != Math::Scalar && tokens >= MMA_MIN_TOKENS;
         let k = &self.kernels;
-        let function = match (w.scheme.bits, tensor_cores) {
-            (QuantBits::Int8, false) => &k.matmul_q8,
-            (QuantBits::Int4, false) => &k.matmul_q4,
-            (QuantBits::Int8, true) => &k.matmul_q8_mma,
-            (QuantBits::Int4, true) => &k.matmul_q4_mma,
+        let function = match (w.scheme.bits, tensor_cores, math) {
+            (QuantBits::Int8, false, _) => &k.matmul_q8,
+            (QuantBits::Int4, false, _) => &k.matmul_q4,
+            (QuantBits::Int8, true, Math::Exact) => &k.matmul_q8_mma_exact,
+            (QuantBits::Int8, true, _) => &k.matmul_q8_mma,
+            (QuantBits::Int4, true, _) => &k.matmul_q4_mma,
         };
         let (rows_per_block, tokens_per_block, threads) = if tensor_cores {
             (MMA_ROWS, MMA_TOKENS, MMA_BLOCK)

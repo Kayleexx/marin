@@ -1,5 +1,6 @@
 use super::{Engine, EngineCache, GPU_SLACK_BYTES, wrong_backend};
 use crate::ModelError;
+use crate::qwen35::Mark;
 use kv::KvCache;
 use runtime::CausalLm;
 
@@ -18,6 +19,18 @@ impl Engine {
             Self::GraniteCuda(m) => Ok(m.gpu().bind_to_thread()?),
             Self::Cuda(m) => Ok(m.gpu().bind_to_thread()?),
             Self::Qwen35Cuda(m) => Ok(m.gpu().bind_to_thread()?),
+        }
+    }
+
+    /// GPU memory that is free right now, for the engines that keep sessions there.
+    pub fn gpu_free_bytes(&self) -> Option<u64> {
+        match self {
+            Self::Qwen35Cuda(m) => m
+                .gpu()
+                .info()
+                .ok()
+                .and_then(|i| u64::try_from(i.free_bytes).ok()),
+            _ => None,
         }
     }
 
@@ -45,29 +58,29 @@ impl Engine {
     /// A point of a Qwen3.5 GPU cache that `rewind` returns to, taking only the DeltaNet state (a few tens of MB) and no
     /// second copy of the keys and values. The state goes on the GPU when it has room to spare and into host memory
     /// when it has not, so a GPU short of memory still gets a mark. `None` for any other engine.
-    pub fn mark(&self, cache: &EngineCache) -> Result<Option<crate::qwen35::Mark>, ModelError> {
+    pub fn mark(&self, cache: &EngineCache) -> Result<Option<Mark>, ModelError> {
         match (self, cache) {
             (Self::Qwen35Cuda(m), EngineCache::Qwen35Cuda(kv)) => {
                 let free = u64::try_from(m.gpu().info()?.free_bytes).unwrap_or(0);
                 let bytes = u64::try_from(kv.mark_bytes()).unwrap_or(u64::MAX);
                 if free < bytes.saturating_add(GPU_SLACK_BYTES) {
-                    return Ok(m.mark_cache_in_host(kv).ok());
+                    return Ok(m.mark_cache_in_host(kv).ok().map(Mark::Gpu));
                 }
-                Ok(Some(m.mark_cache(kv)?))
+                Ok(Some(Mark::Gpu(m.mark_cache(kv)?)))
             }
-            (Self::Qwen35Cuda(_), _) => Err(wrong_backend()),
+            (Self::Qwen35(m), EngineCache::Qwen35(kv)) => Ok(Some(Mark::Cpu(m.mark_cache(kv)?))),
+            (Self::Qwen35Cuda(_) | Self::Qwen35(_), _) => Err(wrong_backend()),
             _ => Ok(None),
         }
     }
 
     /// Returns `cache` to `mark`. Refused if the history was cut back or restarted since the mark was taken.
-    pub fn rewind(
-        &self,
-        cache: &mut EngineCache,
-        mark: crate::qwen35::Mark,
-    ) -> Result<(), ModelError> {
-        match (self, cache) {
-            (Self::Qwen35Cuda(m), EngineCache::Qwen35Cuda(kv)) => m.rewind_cache(kv, mark),
+    pub fn rewind(&self, cache: &mut EngineCache, mark: Mark) -> Result<(), ModelError> {
+        match (self, cache, mark) {
+            (Self::Qwen35Cuda(m), EngineCache::Qwen35Cuda(kv), Mark::Gpu(mark)) => {
+                m.rewind_cache(kv, mark)
+            }
+            (Self::Qwen35(m), EngineCache::Qwen35(kv), Mark::Cpu(mark)) => m.rewind_cache(kv, mark),
             _ => Err(wrong_backend()),
         }
     }

@@ -13,19 +13,21 @@ mod gpu_state;
 mod gpu_transaction;
 mod gpu_weights;
 pub(crate) mod layout;
+mod mark;
 mod math;
 mod model;
 mod model_config;
 mod read;
 mod state;
 mod weights;
-pub use cache::Cache;
+pub use cache::{Cache, CpuMark};
 pub use gpu::{MAX_ROWS, Qwen35Gpu};
 pub use gpu_batch::MAX_BATCH;
 pub use gpu_budget::bytes as gpu_budget_bytes;
 pub use gpu_cache::GpuCache;
-pub use gpu_mark::Mark;
+pub use gpu_mark::GpuMark;
 pub use gpu_state::StateLayout;
+pub use mark::Mark;
 pub use model::{Qwen35, load_bytes, weight_bytes};
 pub use model_config::{TextConfig, is_qwen35};
 
@@ -251,5 +253,7 @@ mod gpu_mark_tests;
 mod gpu_rows_tests;
 #[cfg(test)]
 mod gpu_tests;
+#[cfg(test)]
+mod mark_tests;
 #[cfg(test)]
 mod model_tests;

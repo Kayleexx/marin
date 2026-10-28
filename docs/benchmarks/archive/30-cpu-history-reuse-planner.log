@@ -1,0 +1,24 @@
+CPU history reuse for Qwen3.5 and a tighter CPU memory plan
+
+GATES (fixed before the edits)
+  History reuse GO: complete tool conversation >=30% faster on the same CPU, equal greedy output, small change reusing the
+  rollback state, cancellation clean. Planner: lower only a demonstrably excessive CPU term, keep measured headroom, never
+  touch GPU admission, never bypass the live per-pass check. 4-bit CPU: only if a small change allows it (it does not).
+
+CHANGES
+  qwen35 CPU cache: mark/rewind on the existing begin/undo state (a mark = DeltaNet state + token count, ~50 MiB);
+  the server rewinds to its pre-pass checkpoint when a reused session's pass fails (needs no memory).
+  memory.rs/plan.rs: the Qwen3.5 CPU workspace term is one 64-token slice (what the session reads per pass), the state term
+  is three windows (held + the doubled copy the per-pass check asks for). GPU fields unchanged.
+
+RESULTS (Qwen3.5-4B-Q8 INT8, CPU only, Ryzen 7 260, release build)
+  16-question code-mode run, ctx 8192:  1,547 s -> 458 s and 468 s (turns 90-110 s -> 8-27 s); 4,683 MiB peak.
+  5-question run: 276 s -> 144 s; the ~1,064-token pass 30.9 s -> 2.6 s; greedy answers identical.
+  Peak RSS, ~7k-token prefill at ctx 8192: 4,946 MiB. Plan at ctx 8192: 8.32 GB -> 6.52 GB (still above the peak).
+  Constrained RAM (cgroup, no swap): 5.5 GB and 6.2 GB refused up front; 7.0 GB admitted and answered the 7k prompt.
+  A first draft (2x state) admitted 6.2 GB and the live check then refused after 184 s ("needs another 1324 MB, 1316 MB
+  available"): rejected, hence the 3x state term. Decode bandwidth: ~18 GB/s used of ~24 GB/s read; flat 2-16 threads.
+
+DECISION
+  History reuse: GO. Planner: GO (conservative). Native CPU 4-bit: NO-GO (no Qwen3.5 export/kernel/loader; bound ~1.7x
+  decode; no 4-bit dequant or quality measurement exists).

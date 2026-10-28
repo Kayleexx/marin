@@ -362,13 +362,18 @@ fn ctrl_c_stops_a_benchmark_and_a_check_and_leaves_the_session_alone() {
     ] {
         let interrupt = Interrupt::unhooked();
         let done = std::sync::atomic::AtomicBool::new(false);
+        let pressed = std::sync::atomic::AtomicBool::new(false);
         let result = std::thread::scope(|scope| {
             scope.spawn(|| {
                 while !done.load(Ordering::SeqCst) {
                     interrupt.cancel_flag().store(true, Ordering::SeqCst);
+                    pressed.store(true, Ordering::SeqCst);
                     std::thread::sleep(Duration::from_micros(50));
                 }
             });
+            while !pressed.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
             let result = run(&session, &interrupt);
             done.store(true, Ordering::SeqCst);
             result

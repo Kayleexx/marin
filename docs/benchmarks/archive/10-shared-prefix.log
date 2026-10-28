@@ -172,7 +172,7 @@ relative RMS 3.288e-6.
 
 Prefill is a flat 7.1–7.7 ms/token from 8 tokens (82% matmul, 17% recurrence, <2%
 launches/state/sync), so one pass over two prompts' rows cost −8% to +13% versus
-two passes, against a >= 10% gate ([archive](docs/benchmarks/archive/09-batched-prefill.log)).
+two passes, against a >= 10% gate (archive 09, kept locally).
 
 ## V9 shared prompt prefix — GO for Qwen3.5 CUDA
 
@@ -203,7 +203,7 @@ VRAM +0–64 MiB (gate 128). Next: 16 tokens of real prefill remain (user text a
 ## V8/V9 prompt prefill — batching NO-GO, shared prefix GO
 
 Prefill is a flat 7.1–7.7 ms/token from 8 tokens (82% matmul), so one pass over two
-prompts cost −8% to +13% against a >= 10% gate: not built ([archive](docs/benchmarks/archive/09-batched-prefill.log)).
+prompts cost −8% to +13% against a >= 10% gate: not built (archive 09, kept locally).
 Every default-system request starts with the same 31 token IDs (a leading newline merges
 with the last, so matching is by ID). Restoring a stored cache costs 0.45 ms against
 239 ms to recompute, bit-identical; one immutable cache is built at start (200 ms,

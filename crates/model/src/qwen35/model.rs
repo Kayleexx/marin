@@ -1,7 +1,7 @@
 use super::math::{invalid, size, zeros};
 use super::read::Reader;
 use super::state::admit;
-use super::{Cache, ReferenceBlock, TextConfig};
+use super::{Cache, CpuMark, ReferenceBlock, State, TextConfig};
 use crate::{ModelError, Qwen3Config};
 use loader::{Dtype, ModelDir, Weights};
 use runtime::{CausalLm, SequenceCache};
@@ -174,13 +174,20 @@ impl Qwen35 {
         for b in &self.blocks {
             states.push(b.new_state(capacity, usize::MAX)?);
         }
-        Ok(Cache {
-            states,
-            tokens: Vec::new(),
-            capacity,
-            replay: false,
-            owner: self.owner,
-        })
+        Ok(Cache::new(states, capacity, self.owner))
+    }
+    /// A mark of `cache` to `rewind_cache` to.
+    pub fn mark_cache(&self, cache: &Cache) -> Result<CpuMark, ModelError> {
+        if cache.owner != self.owner {
+            return Err(invalid("cache belongs to a different Qwen3.5 model"));
+        }
+        cache.mark()
+    }
+    pub fn rewind_cache(&self, cache: &mut Cache, mark: CpuMark) -> Result<(), ModelError> {
+        if cache.owner != self.owner {
+            return Err(invalid("cache belongs to a different Qwen3.5 model"));
+        }
+        cache.rewind(mark)
     }
     pub fn forward_observed(
         &self,
@@ -208,7 +215,7 @@ impl Qwen35 {
         &self,
         tokens: &[u32],
         cache: &mut Cache,
-        mut observe: crate::Observer<'_>,
+        observe: crate::Observer<'_>,
     ) -> Result<Vec<f32>, ModelError> {
         if tokens.is_empty() {
             return Err(ModelError::NoTokens);
@@ -247,7 +254,6 @@ impl Qwen35 {
             .checked_add(self.config.workspace_bytes(count, end)?)
             .ok_or_else(|| invalid("pass memory overflow"))?;
         admit(needed, usize::MAX)?;
-        let mut staged = cache.stage(self, end)?;
         let mut input = Vec::new();
         input
             .try_reserve_exact(count)
@@ -256,6 +262,24 @@ impl Qwen35 {
             input.extend_from_slice(&cache.tokens);
         }
         input.extend_from_slice(tokens);
+        let undo = cache.begin(self, end)?;
+        match self.run(&input, &mut cache.states, observe) {
+            Ok(logits) => {
+                cache.commit(tokens);
+                Ok(logits)
+            }
+            Err(error) => {
+                cache.undo(undo);
+                Err(error)
+            }
+        }
+    }
+    fn run(
+        &self,
+        input: &[u32],
+        states: &mut [State],
+        mut observe: crate::Observer<'_>,
+    ) -> Result<Vec<f32>, ModelError> {
         let mut hidden = zeros(size(input.len(), self.summary.hidden_size)?)?;
         for (id, row) in input
             .iter()
@@ -264,7 +288,7 @@ impl Qwen35 {
             self.embed.row_f32(*id as usize, row)?;
         }
         notify(&mut observe, 0, &hidden);
-        for (i, (block, state)) in self.blocks.iter().zip(&mut staged.states).enumerate() {
+        for (i, (block, state)) in self.blocks.iter().zip(states).enumerate() {
             hidden = block.forward_in_place(&hidden, state, None)?;
             notify(&mut observe, i.saturating_add(1), &hidden);
         }
@@ -277,8 +301,6 @@ impl Qwen35 {
         let mut logits = zeros(self.summary.vocab_size)?;
         self.embed.matmul(&last, &mut logits)?;
         tensor::ensure_finite(&logits, "Qwen3.5 logits")?;
-        staged.tokens.extend_from_slice(tokens);
-        *cache = staged;
         Ok(logits)
     }
 }

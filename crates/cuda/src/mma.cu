@@ -5,7 +5,8 @@
 // single bf16 rounding of the activations would not. Quantized codes are small integers, which bf16 holds exactly, so
 // they go through the tensor cores as they are; the products of one group are summed unscaled and the group's scale is
 // applied to that partial sum, so the result is the same as scaling every weight first. cols must be a multiple of
-// 16, and for quantized weights of the group size.
+// 16, and for quantized weights of the group size. With SPLITS = 3 the activations are split into three bf16 parts
+// (8 + 8 + 8 mantissa bits, the whole f32 mantissa), so the products are exact and only the f32 accumulation rounds.
 #define MMA_ROWS 64
 #define MMA_TOKENS 64
 #define MMA_PAD 24  // shared row length in bf16 values: 16 plus padding so fragment reads do not share banks
@@ -48,12 +49,13 @@ __device__ __forceinline__ uint4 stage_weights(const void* w, size_t first) {
                       pair_bf16((int)((c >> 24) & 15) - 8, (int)(c >> 28) - 8));
 }
 
-template <int FORMAT>
+template <int FORMAT, int SPLITS>
 __device__ void matmul_mma(const void* w, const float* scales, const float* x, float* y, unsigned int rows,
                            unsigned int cols, unsigned int tokens, unsigned int group) {
     __shared__ __align__(16) bf16_bits w_s[MMA_ROWS * MMA_PAD];
     __shared__ __align__(16) bf16_bits x_hi[MMA_TOKENS * MMA_PAD];
     __shared__ __align__(16) bf16_bits x_lo[MMA_TOKENS * MMA_PAD];
+    __shared__ __align__(16) bf16_bits x_mid[SPLITS == 3 ? MMA_TOKENS * MMA_PAD : 1];
     const unsigned int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, g = lane >> 2, t = lane & 3;
     const unsigned int row0 = blockIdx.x * MMA_ROWS, token0 = blockIdx.y * MMA_TOKENS;
     const unsigned int load_row = tid >> 1, load_k = (tid & 1) * 8;
@@ -76,8 +78,15 @@ __device__ void matmul_mma(const void* w, const float* scales, const float* x, f
         }
         for (int j = 0; j < 8; ++j) {
             const bf16_bits high = round_bf16(v[j]);
+            const float rest = v[j] - __uint_as_float((unsigned int)high << 16);
             x_hi[load_row * MMA_PAD + load_k + j] = high;
-            x_lo[load_row * MMA_PAD + load_k + j] = round_bf16(v[j] - __uint_as_float((unsigned int)high << 16));
+            if (SPLITS == 3) {
+                const bf16_bits middle = round_bf16(rest);
+                x_mid[load_row * MMA_PAD + load_k + j] = middle;
+                x_lo[load_row * MMA_PAD + load_k + j] = round_bf16(rest - __uint_as_float((unsigned int)middle << 16));
+            } else {
+                x_lo[load_row * MMA_PAD + load_k + j] = round_bf16(rest);
+            }
         }
         __syncthreads();
 
@@ -89,10 +98,17 @@ __device__ void matmul_mma(const void* w, const float* scales, const float* x, f
         for (int n = 0; n < MMA_TOKENS / 8; ++n) {
             const unsigned int offset = (n * 8 + g) * MMA_PAD + 2 * t;
             float* c = FORMAT == FORMAT_BF16 ? acc[n] : part[n];
-            mma_16816(c, a, *reinterpret_cast<const unsigned int*>(x_hi + offset),
+            float step[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            float* into = SPLITS == 3 ? step : c;
+            mma_16816(into, a, *reinterpret_cast<const unsigned int*>(x_hi + offset),
                       *reinterpret_cast<const unsigned int*>(x_hi + offset + 8));
-            mma_16816(c, a, *reinterpret_cast<const unsigned int*>(x_lo + offset),
+            if (SPLITS == 3)
+                mma_16816(into, a, *reinterpret_cast<const unsigned int*>(x_mid + offset),
+                          *reinterpret_cast<const unsigned int*>(x_mid + offset + 8));
+            mma_16816(into, a, *reinterpret_cast<const unsigned int*>(x_lo + offset),
                       *reinterpret_cast<const unsigned int*>(x_lo + offset + 8));
+            if (SPLITS == 3)
+                for (int i = 0; i < 4; ++i) c[i] += step[i];
         }
         __syncthreads();
 
@@ -121,17 +137,23 @@ __device__ void matmul_mma(const void* w, const float* scales, const float* x, f
 
 extern "C" __global__ void matmul_bf16_mma(const bf16_bits* w, const float* x, float* y, unsigned int rows,
                                            unsigned int cols, unsigned int tokens) {
-    matmul_mma<FORMAT_BF16>(w, nullptr, x, y, rows, cols, tokens, 0);
+    matmul_mma<FORMAT_BF16, 2>(w, nullptr, x, y, rows, cols, tokens, 0);
 }
 
 extern "C" __global__ void matmul_q8_mma(const signed char* codes, const float* scales, const float* x, float* y,
                                          unsigned int rows, unsigned int cols, unsigned int tokens,
                                          unsigned int group) {
-    matmul_mma<FORMAT_Q8>(codes, scales, x, y, rows, cols, tokens, group);
+    matmul_mma<FORMAT_Q8, 2>(codes, scales, x, y, rows, cols, tokens, group);
+}
+
+extern "C" __global__ void matmul_q8_mma_exact(const signed char* codes, const float* scales, const float* x, float* y,
+                                               unsigned int rows, unsigned int cols, unsigned int tokens,
+                                               unsigned int group) {
+    matmul_mma<FORMAT_Q8, 3>(codes, scales, x, y, rows, cols, tokens, group);
 }
 
 extern "C" __global__ void matmul_q4_mma(const unsigned char* codes, const float* scales, const float* x, float* y,
                                          unsigned int rows, unsigned int cols, unsigned int tokens,
                                          unsigned int group) {
-    matmul_mma<FORMAT_Q4>(codes, scales, x, y, rows, cols, tokens, group);
+    matmul_mma<FORMAT_Q4, 2>(codes, scales, x, y, rows, cols, tokens, group);
 }
