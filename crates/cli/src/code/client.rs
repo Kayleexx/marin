@@ -321,6 +321,14 @@ fn read_chunk(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, ClientError>
     Ok(Some(data))
 }
 
+/// `pending` held no complete event before `from`, so only the new bytes need scanning.
+fn event_end(pending: &[u8], from: usize) -> Option<usize> {
+    let tail = pending.get(from..)?;
+    tail.windows(2)
+        .position(|w| w == b"\n\n")
+        .and_then(|at| at.checked_add(from))
+}
+
 fn pump(stream: TcpStream, tx: &Sender<Event>) -> Result<(), ClientError> {
     let mut reader = BufReader::new(stream);
     let head = read_head(&mut reader)?;
@@ -331,11 +339,12 @@ fn pump(stream: TcpStream, tx: &Sender<Event>) -> Result<(), ClientError> {
     let mut reply = Reply::default();
     let mut pending = Vec::new();
     while let Some(chunk) = read_chunk(&mut reader)? {
+        let fresh = pending.len().saturating_sub(1);
         pending.extend_from_slice(&chunk);
-        if pending.len() > MAX_EVENT && !pending.windows(2).any(|w| w == b"\n\n") {
+        if pending.len() > MAX_EVENT && event_end(&pending, fresh).is_none() {
             return Err(ClientError::Protocol("an event that never ends".into()));
         }
-        while let Some(end) = pending.windows(2).position(|w| w == b"\n\n") {
+        while let Some(end) = event_end(&pending, 0) {
             let event: Vec<u8> = pending.drain(..end.saturating_add(2)).collect();
             if event_done(&event, &mut reply, tx)? {
                 let _ = tx.send(Event::Done(reply));
