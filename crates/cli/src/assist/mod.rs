@@ -1,10 +1,17 @@
-//! The opt-in background assistant: a small user process that keeps a private inbox of failed commands from repos
-//! the user allowed. It decides with rules only, never loads a model and does nothing while idle.
+//! The opt-in background assistant: a small user process that keeps a private inbox of suggestions from approved
+//! events (failed commands in allowed repos, allowed windows and tabs, pages shared by hand). One pipeline: approved
+//! event, privacy filter, bounded context, cheap rules, inbox, then a normal chat. It decides with rules only, never
+//! loads a model and does nothing while idle.
 
+mod activity;
 mod args;
+mod browser;
 mod client;
+mod config;
 mod context;
+mod control;
 mod daemon;
+mod desktop;
 mod inbox;
 mod protocol;
 mod redact;
@@ -17,6 +24,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
 pub use args::AssistAction;
+pub use control::Reply;
 use inbox::{Inbox, State};
 use protocol::Request;
 use store::{Store, socket_path};
@@ -62,7 +70,7 @@ fn repo_root(path: Option<&Path>) -> Result<String, CliError> {
 }
 
 /// Changes a suggestion through the running assistant, or directly in the inbox file when none is running.
-fn mark(store: &Store, socket: &Path, id: u32, state: State) -> Result<(), CliError> {
+pub(super) fn mark(store: &Store, socket: &Path, id: u32, state: State) -> Result<(), CliError> {
     if let Ok(answer) = client::send(
         socket,
         &Request::Mark {
@@ -84,8 +92,12 @@ fn mark(store: &Store, socket: &Path, id: u32, state: State) -> Result<(), CliEr
 }
 
 fn start(socket: &Path, notify: bool) -> Result<Next, CliError> {
+    say(launch(socket, notify)?)
+}
+
+fn launch(socket: &Path, notify: bool) -> Result<String, CliError> {
     if client::running(socket) {
-        return say("the background assistant is already running");
+        return Ok("the background assistant is already running".into());
     }
     let exe = std::env::current_exe()?;
     let mut daemon = Command::new("setsid");
@@ -112,8 +124,9 @@ fn start(socket: &Path, notify: bool) -> Result<Next, CliError> {
     let began = Instant::now();
     while began.elapsed() < Duration::from_secs(5) {
         if client::running(socket) {
-            return say(
-                "background assistant started (rules only; no model is loaded). Allow a repo with `marin assist allow`",
+            return Ok(
+                "background assistant started (rules only; no model is loaded). Allow a repo with `marin assist allow`"
+                    .into(),
             );
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -138,12 +151,65 @@ fn status(store: &Store, socket: &Path) -> Result<Next, CliError> {
     Ok(Next::Done)
 }
 
-fn unit() -> Result<Next, CliError> {
+fn unit_text() -> Result<String, CliError> {
     let exe = std::env::current_exe()?;
-    say(format!(
-        "[Unit]\nDescription=Marin background assistant (rules only, no model)\n\n[Service]\nExecStart={} assist daemon\nRestart=on-failure\nNice=10\nMemoryMax=64M\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=default.target",
+    let home = std::env::var_os("MARIN_HOME")
+        .map(|h| format!("Environment=MARIN_HOME={}\n", h.to_string_lossy()))
+        .unwrap_or_default();
+    Ok(format!(
+        "[Unit]\nDescription=Marin background assistant (rules only, no model)\n\n[Service]\n{home}ExecStart={} assist daemon\nRestart=on-failure\nNice=10\nMemoryMax=64M\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=default.target",
         exe.display()
     ))
+}
+
+fn unit() -> Result<Next, CliError> {
+    say(unit_text()?)
+}
+
+fn open(home: Option<&Home>) -> Result<(Store, PathBuf), CliError> {
+    let home = home.ok_or_else(|| {
+        CliError::BadOption("no home folder to keep the assistant's files in".into())
+    })?;
+    let store = Store::new(home.assist_dir());
+    let socket = socket_path(&store)?;
+    Ok((store, socket))
+}
+
+/// The terminal's `/awareness`, `/context`, `/suggestions` and `/why`: the same code as the `marin assist` commands.
+pub fn slash(home: Option<&Home>, command: &str, words: &str) -> Result<Reply, CliError> {
+    let (store, socket) = open(home)?;
+    match command {
+        "awareness" => control::awareness(&store, &socket, words),
+        "context" => Ok(control::context_view(&socket)),
+        "suggestions" => control::suggestions(&store, &socket, words),
+        "why" => control::why(&store, words),
+        other => Err(CliError::BadOption(format!("unknown control `{other}`"))),
+    }
+}
+
+fn show(reply: Reply) -> Result<Next, CliError> {
+    for line in &reply.lines {
+        out!("{line}");
+    }
+    Ok(match reply.draft {
+        Some((draft, repo)) => Next::Chat {
+            draft,
+            repo,
+            code: false,
+        },
+        None => Next::Done,
+    })
+}
+
+const SHARE_READ: u64 = 8192;
+
+fn shared_text() -> String {
+    use std::io::{IsTerminal, Read};
+    let mut text = String::new();
+    if !std::io::stdin().is_terminal() {
+        let _ = std::io::stdin().take(SHARE_READ).read_to_string(&mut text);
+    }
+    text
 }
 
 fn listing(inbox: &Inbox) -> Result<Next, CliError> {
@@ -166,12 +232,22 @@ fn find(inbox: &Inbox, id: u32) -> Result<&inbox::Suggestion, CliError> {
 }
 
 pub fn run(action: AssistAction, home: Option<&Home>) -> Result<Next, CliError> {
-    let home = home.ok_or_else(|| {
-        CliError::BadOption("no home folder to keep the assistant's files in".into())
-    })?;
-    let store = Store::new(home.assist_dir());
-    let socket = socket_path(&store)?;
+    let (store, socket) = open(home)?;
     match action {
+        AssistAction::Awareness { words } => {
+            show(control::awareness(&store, &socket, &words.join(" "))?)
+        }
+        AssistAction::Context => show(control::context_view(&socket)),
+        AssistAction::Suggestions { words } => {
+            show(control::suggestions(&store, &socket, &words.join(" "))?)
+        }
+        AssistAction::Share { title, url } => {
+            show(control::share(&socket, &title, &url, &shared_text())?)
+        }
+        AssistAction::Browser { what, from } if what == "host" => {
+            browser::host(&store, &socket, &from).map(|()| Next::Done)
+        }
+        AssistAction::Browser { what, .. } => show(control::browser_action(&store, &what)?),
         AssistAction::Daemon { notify } => daemon::run(store, socket, notify).map(|()| Next::Done),
         AssistAction::Start { notify } => start(&socket, notify),
         AssistAction::Stop => match client::send(&socket, &Request::Stop) {

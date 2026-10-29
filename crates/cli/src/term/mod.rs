@@ -2,6 +2,7 @@ pub mod actions;
 pub mod app;
 pub mod art;
 pub mod caps;
+mod control;
 pub mod editor;
 mod keys;
 pub mod menu;

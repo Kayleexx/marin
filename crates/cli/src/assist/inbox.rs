@@ -3,11 +3,14 @@ use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 
+use super::activity::Activity;
+
 pub const MAX_ITEMS: usize = 50;
 pub const TTL: u64 = 24 * 3600;
 pub const TAIL_BYTES: usize = 4096;
 const REPO_COOLDOWN: u64 = 300;
 const ACCEPTED_QUIET: u64 = 3600;
+pub const DOCS_WINDOW: u64 = 900;
 const HOUR: u64 = 3600;
 const MAX_PER_HOUR: usize = 6;
 
@@ -18,6 +21,19 @@ pub struct Event {
     pub command: String,
     pub exit: i32,
     pub tail: String,
+}
+
+/// Why a suggestion exists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// A command you watched failed in an allowed repo.
+    #[default]
+    Failure,
+    /// You opened a page about that error soon after the failure.
+    Docs,
+    /// You shared a page or window by hand.
+    Shared,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,6 +54,10 @@ pub struct Suggestion {
     pub last_seen: u64,
     pub count: u32,
     pub state: State,
+    #[serde(default)]
+    pub kind: Kind,
+    #[serde(default)]
+    pub page: Option<Activity>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -77,6 +97,17 @@ impl Suggestion {
     }
 
     pub fn headline(&self) -> String {
+        let title = self.page.as_ref().map_or("", |p| p.title.as_str());
+        match self.kind {
+            Kind::Shared => return format!("you shared: {title}"),
+            Kind::Docs => {
+                return format!(
+                    "you opened \"{title}\" after `{}` failed",
+                    self.event.command
+                );
+            }
+            Kind::Failure => {}
+        }
         let repo = self.event.repo.rsplit('/').next().unwrap_or("");
         let again = if self.count > 1 {
             format!(" (seen {} times)", self.count)
@@ -90,12 +121,37 @@ impl Suggestion {
     }
 
     pub fn why(&self) -> Vec<String> {
-        vec![
-            format!(
-                "trigger: `{}` exited with {} in {}",
-                self.event.command, self.event.exit, self.event.repo
+        let page = self.page.as_ref();
+        let (trigger, rule) = match (self.kind, page) {
+            (Kind::Shared, Some(p)) => (
+                format!(
+                    "trigger: you shared \"{}\" with `marin assist share`",
+                    p.title
+                ),
+                "rule: sharing is an explicit request, so it always gets a suggestion",
             ),
-            "rule: a command you ran with `marin assist watch` failed in a repo you allowed".into(),
+            (Kind::Docs, Some(p)) => (
+                format!(
+                    "trigger: you opened {} (\"{}\") within {} minutes of `{}` failing in {}; the page shares a distinctive word with the error",
+                    p.url,
+                    p.title,
+                    DOCS_WINDOW / 60,
+                    self.event.command,
+                    self.event.repo
+                ),
+                "rule: an approved site opened soon after a failure and about the same error",
+            ),
+            _ => (
+                format!(
+                    "trigger: `{}` exited with {} in {}",
+                    self.event.command, self.event.exit, self.event.repo
+                ),
+                "rule: a command you ran with `marin assist watch` failed in a repo you allowed",
+            ),
+        };
+        vec![
+            trigger,
+            rule.into(),
             format!("seen {} time(s) since {}", self.count, ago(self.first_seen)),
             format!(
                 "context kept: the last {} bytes of its output, secrets filtered",
@@ -143,6 +199,16 @@ impl Inbox {
 
     pub fn offer(&mut self, event: Event, now: u64) -> Offer {
         self.expire(now);
+        self.add(Self::build(Kind::Failure, event, None, now), now)
+    }
+
+    /// A page-based suggestion: docs opened after a failure (with that failure's event) or a hand-shared page.
+    pub fn offer_page(&mut self, kind: Kind, event: Event, page: Activity, now: u64) -> Offer {
+        self.expire(now);
+        self.add(Self::build(kind, event, Some(page), now), now)
+    }
+
+    fn build(kind: Kind, event: Event, page: Option<Activity>, now: u64) -> Suggestion {
         let mut suggestion = Suggestion {
             id: 0,
             fingerprint: 0,
@@ -151,8 +217,18 @@ impl Inbox {
             last_seen: now,
             count: 1,
             state: State::New,
+            kind,
+            page,
         };
-        suggestion.fingerprint = fingerprint(&suggestion.event, &suggestion.first_error());
+        let key = match &suggestion.page {
+            Some(p) => format!("{} {}", p.url, p.title),
+            None => suggestion.first_error(),
+        };
+        suggestion.fingerprint = fingerprint(&suggestion.event, &key);
+        suggestion
+    }
+
+    fn add(&mut self, mut suggestion: Suggestion, now: u64) -> Offer {
         let fp = suggestion.fingerprint;
         if let Some(old) = self.items.iter_mut().find(|i| i.fingerprint == fp) {
             match old.state {
@@ -170,10 +246,11 @@ impl Inbox {
             }
         }
         let repo = suggestion.event.repo.clone();
-        if self
-            .surfaced
-            .iter()
-            .any(|(r, t)| *r == repo && now.saturating_sub(*t) < REPO_COOLDOWN)
+        if suggestion.kind == Kind::Failure
+            && self
+                .surfaced
+                .iter()
+                .any(|(r, t)| *r == repo && now.saturating_sub(*t) < REPO_COOLDOWN)
         {
             return Offer::Quiet("cooling down after the last suggestion for this repo");
         }
@@ -193,6 +270,16 @@ impl Inbox {
             self.items.remove(drop);
         }
         Offer::Surfaced(self.next_id)
+    }
+
+    /// The newest failure in `repo` seen within `DOCS_WINDOW` seconds that has not been dismissed.
+    pub fn recent_failure(&self, repo: &str, now: u64) -> Option<&Suggestion> {
+        self.items.iter().rev().find(|i| {
+            i.kind == Kind::Failure
+                && i.event.repo == repo
+                && i.state != State::Dismissed
+                && now.saturating_sub(i.last_seen) < DOCS_WINDOW
+        })
     }
 
     pub fn find(&self, id: u32) -> Option<&Suggestion> {

@@ -23,6 +23,10 @@ pub enum Action {
     Save,
     Resume,
     Checkpoint,
+    Awareness,
+    Context,
+    Suggestions,
+    Why,
     Sessions,
     NewChat,
     Clear,
@@ -30,10 +34,11 @@ pub enum Action {
     Quit,
 }
 
-pub const SHORTCUTS: [&str; 7] = [
+pub const SHORTCUTS: [&str; 8] = [
     "enter send · alt+enter or ctrl+j new line · ↑/↓ history",
     "/ opens actions; type to search them, for example",
     "/mode code · /model · /status · /clear · /exit",
+    "/awareness · /context · /suggestions · /why  (the optional background helper)",
     "ctrl+o inspect the last reply",
     "ctrl+c cancels a reply; press it twice at an empty prompt to exit · ctrl+d exits",
     "ctrl+a / ctrl+e start / end of line · ctrl+u / ctrl+k delete to start / end · ctrl+w delete word",
@@ -128,6 +133,26 @@ pub fn palette(current: Talk) -> Menu<Action> {
             "also keep the model's state of a saved session (large, private; Qwen3.5 GPU)",
             Action::Checkpoint,
         ),
+        item(
+            "Awareness…",
+            "background helper: enable, disable, status, sources and allowlists",
+            Action::Awareness,
+        ),
+        item(
+            "Context",
+            "what the helper currently retains (memory only)",
+            Action::Context,
+        ),
+        item(
+            "Suggestions…",
+            "list, accept, dismiss, mute or snooze what the helper noticed",
+            Action::Suggestions,
+        ),
+        item(
+            "Why…",
+            "why the latest suggestion appeared and what accepting sends",
+            Action::Why,
+        ),
         item("Sessions", "list the saved conversations", Action::Sessions),
         item(
             "Benchmark…",
@@ -166,6 +191,13 @@ impl Action {
             Action::Save => "Save as (blank: the name it came from, or a new one)",
             Action::Resume => "Resume which (blank: the newest; Sessions lists them)",
             Action::Checkpoint => "Keep the model's state of which saved session (blank: this one)",
+            Action::Awareness => {
+                "Awareness: status, enable, disable, desktop on, browser on, allow-site HOST, allow-app NAME, autostart on (blank: status)"
+            }
+            Action::Suggestions => {
+                "Suggestions: list, accept N, dismiss N, mute N, snooze N (blank: list)"
+            }
+            Action::Why => "Why which suggestion (blank: the newest)",
             _ => return None,
         })
     }
@@ -296,12 +328,12 @@ mod tests {
     fn palette_lists_every_action_once() {
         let mut menu = palette(Talk::Chat);
         let mut seen = Vec::new();
-        for _ in 0..24 {
+        for _ in 0..28 {
             seen.push(*menu.current().unwrap());
             menu.down();
         }
         seen.dedup();
-        assert_eq!(seen.len(), 24);
+        assert_eq!(seen.len(), 28);
         for c in "tok".chars() {
             menu.push(c);
         }
@@ -328,6 +360,10 @@ mod tests {
         assert_eq!(typed("save"), Some(Action::Save));
         assert_eq!(typed("resume"), Some(Action::Resume));
         assert_eq!(typed("sessions"), Some(Action::Sessions));
+        assert_eq!(typed("awareness"), Some(Action::Awareness));
+        assert_eq!(typed("context"), Some(Action::Context));
+        assert_eq!(typed("suggestions"), Some(Action::Suggestions));
+        assert_eq!(typed("why"), Some(Action::Why));
         assert_eq!(typed("checkpoint"), Some(Action::Checkpoint));
         assert_eq!(typed("exit"), Some(Action::Quit));
         assert_eq!(typed("quit"), Some(Action::Quit));

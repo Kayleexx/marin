@@ -44,6 +44,31 @@ pub enum AssistAction {
         #[arg(long, default_value_t = 60)]
         minutes: u32,
     },
+    /// Awareness controls: `status`, `enable`, `disable`, `desktop on|off`, `browser on|off`, `allow-app NAME`,
+    /// `allow-site HOST`, `deny-app`, `deny-site`, `notify on|off`, `autostart on|off`
+    Awareness {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        words: Vec<String>,
+    },
+    /// What the helper currently retains (in its memory only)
+    Context,
+    /// `list` (default), `accept N`, `dismiss N`, `mute N`, `snooze N`, `unmute TOPIC`
+    Suggestions {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        words: Vec<String>,
+    },
+    /// Share a page or window by hand (text may come from stdin); it always gets a suggestion
+    Share {
+        title: String,
+        #[arg(long, default_value = "")]
+        url: String,
+    },
+    /// Firefox tab titles of sites you allowed: `install` or `remove` the link (the extension is in extras/browser)
+    Browser {
+        what: String,
+        #[arg(hide = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        from: Vec<String>,
+    },
     #[command(hide = true)]
     Daemon {
         #[arg(long)]

@@ -1,0 +1,21 @@
+{
+  "manifest_version": 2,
+  "name": "Marin awareness",
+  "version": "0.1.0",
+  "description": "Tells the local Marin assistant the title and address of the tab you are looking at. Nothing leaves your computer, and Marin ignores every site you did not allow.",
+  "permissions": [
+    "tabs",
+    "nativeMessaging"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "marin-awareness@marin.local"
+    }
+  },
+  "incognito": "not_allowed"
+}

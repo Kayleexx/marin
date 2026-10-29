@@ -1,11 +1,12 @@
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use super::config::Awareness;
 use super::inbox::Inbox;
 
 const MAX_FILE: u64 = 1 << 20;
@@ -15,8 +16,9 @@ pub struct Store {
     dir: PathBuf,
 }
 
-fn private_dir(dir: &Path) -> io::Result<()> {
-    DirBuilder::new().recursive(true).mode(0o700).create(dir)
+pub(super) fn private_dir(dir: &Path) -> io::Result<()> {
+    DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
 impl Store {
@@ -60,6 +62,14 @@ impl Store {
 
     pub fn save_inbox(&self, inbox: &Inbox) -> io::Result<()> {
         self.write("inbox.json", inbox)
+    }
+
+    pub fn awareness(&self) -> Awareness {
+        self.read("awareness.json")
+    }
+
+    pub fn save_awareness(&self, awareness: &Awareness) -> io::Result<()> {
+        self.write("awareness.json", awareness)
     }
 
     pub fn repos(&self) -> Vec<String> {
@@ -106,6 +116,13 @@ mod tests {
         store.save_inbox(&inbox).unwrap();
         let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dir.join("a")), 0o700);
+        fs::set_permissions(dir.join("a"), fs::Permissions::from_mode(0o755)).unwrap();
+        private_dir(&dir.join("a")).unwrap();
+        assert_eq!(
+            mode(&dir.join("a")),
+            0o700,
+            "an existing folder is tightened"
+        );
         assert_eq!(mode(&dir.join("a/inbox.json")), 0o600);
         assert_eq!(store.inbox().items.len(), 1);
         fs::write(dir.join("a/inbox.json"), "{not json").unwrap();

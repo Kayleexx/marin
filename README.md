@@ -58,19 +58,46 @@ is faster; if anything does not match, Marin simply reads the text again.
 and has no login, so keep it that way. Send `"marin_session_id":"new"` on the first turn and the returned id after that to
 reuse the cache. `--idle-unload SECONDS` frees the GPU when idle and reloads on the next request.
 
-## Background assistant (optional, off by default)
+## Background awareness (optional, off by default)
 
-A tiny helper that can suggest a fix when a command you chose to watch fails in a repo you allowed. It uses simple
-rules, never loads a model, and sleeps when idle (about 7 MB).
+A tiny helper that notices a few things you approve and offers help, without ever loading a model or touching the GPU.
+It never runs a command, edits a file or sends data anywhere. A suggestion only reaches a model when you accept it and
+press Enter in a normal chat. Idle, it uses 4 to 7 MB and no measurable CPU.
 
-```bash
-marin assist allow                 # in a git repo
-marin assist start
-marin assist watch -- cargo test   # runs your command as usual
-marin assist inbox                 # then: why 1 | accept 1 | dismiss 1 | stop | deny
-```
+Everything is a slash action in the normal chat (type `/`), and each also exists as `marin assist ...`:
 
-It keeps only the last 4 KiB of output, with secrets filtered. Run `marin assist --help` for the rest.
+| Action | What it does |
+|---|---|
+| `/awareness` | `enable`, `disable`, `status`, `desktop on`, `browser on`, `allow-app NAME`, `allow-site HOST`, `autostart on` |
+| `/context` | what the helper holds right now (memory only, at most 32 items for 30 minutes) |
+| `/suggestions` | `list`, `accept N`, `dismiss N`, `mute N`, `snooze N` |
+| `/why` | the rule behind a suggestion and exactly what accepting would put in your input line |
+
+Nothing is watched until you choose each source:
+
+- **Failed commands:** `marin assist allow` in a git repo, then `marin assist watch -- cargo test`. The last 4 KiB of output is kept, secrets filtered.
+- **Browser tabs (Firefox only):** `marin assist browser install` writes the link Firefox needs (a small manifest in
+  `~/.mozilla/native-messaging-hosts` and a launcher in Marin's folder; `browser remove` deletes both). Then add the
+  extension in `extras/browser/`. **Normal Firefox only runs signed extensions**, so a general user has two options:
+  load it temporarily (`about:debugging`, This Firefox, Load Temporary Add-on; it disappears when Firefox restarts), or
+  sign it yourself as an unlisted add-on (`web-ext sign` with your own addons.mozilla.org key) and install the `.xpi`.
+  Developer Edition, Nightly and ESR can also allow unsigned add-ons. Marin does not ship a signed build, and this has
+  only been tested with a temporary load in Firefox 155. Then `/awareness browser on` and `/awareness allow-site docs.rs`.
+  Only the title and address (host and path, no query) of allowed sites are sent, never page text. The extension is
+  set to `incognito: not_allowed` and also skips private tabs, so private windows are not observed. The link accepts
+  only the Marin extension's id, and the helper drops any site you did not allow.
+- **Windows (experimental, X11 only):** `/awareness desktop on` and `/awareness allow-app firefox`. It listens to the X
+  server's focus events (no polling), reads a title only for apps you allowed, and has not been verified on a real X11
+  session. Wayland does not let programs watch other windows, so there you use `marin assist share "title" --url URL`
+  (text may come from a pipe) to hand something over yourself.
+
+A suggestion appears only for a reason you can read with `/why`: a watched command failed, or an allowed page about the same
+error was opened within 15 minutes of it, or you shared something. Merely switching apps does nothing. Repeats are counted,
+not repeated; at most one suggestion per repo every 5 minutes and 6 per hour; `dismiss` silences it for a day and `mute`
+silences that repo or site until you unmute it. `/awareness disable` stops the helper and drops everything it held. It keeps
+running after the terminal closes; start it at login only if you ask: `/awareness autostart on`.
+
+Linux and other Unix systems only. Windows and macOS are not supported in v0.1: the helper uses Unix sockets and has no adapters for them. Only one helper runs at a time, and if it is killed nothing is left running.
 
 ## Models and speed
 
@@ -105,7 +132,7 @@ cheaper than the first one. More numbers and how we measured them: [BENCHMARKS.m
 ## Uninstall
 
 ```bash
-marin assist stop; marin assist deny     # only if you used the assistant
+marin assist awareness disable; marin assist awareness autostart off; marin assist browser remove   # only if you used awareness
 cargo uninstall cli                      # removes marin and marin-run
 rm -r ~/.config/marin ~/.local/state/marin
 ```

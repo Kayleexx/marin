@@ -320,3 +320,34 @@ fn a_backend_switch_attempt_leaves_a_working_prompt_and_a_restored_terminal() {
     );
     assert_cooked(&screen, "after the switch");
 }
+
+/// The helper's controls work inside the chat, with no helper running and no model involved.
+#[test]
+fn the_awareness_controls_are_slash_actions_in_the_chat() {
+    let session = Session {
+        name: "pty-awareness",
+        size: (140, 40),
+        color: false,
+        max_tokens: 4,
+        stty: false,
+    };
+    let keys = [
+        ("", PROMPT),
+        ("/awareness", Effect::Shows("Awareness…")),
+        ("\r", Effect::Shows("allow-site HOST")),
+        ("status\r", Effect::Shows("awareness: off")),
+        ("/context", Effect::Shows("Context")),
+        ("\r", Effect::Shows("not running")),
+        ("/suggestions", Effect::Shows("Suggestions…")),
+        ("\r", Effect::Shows("accept N")),
+        ("\r", Effect::Shows("no suggestions waiting")),
+        ("/why", Effect::Shows("Why…")),
+        ("\r", Effect::Shows("the newest")),
+        ("\r", Effect::Shows("no such suggestion")),
+    ];
+    let Some((screen, status)) = session.run(&keys).unwrap() else {
+        return;
+    };
+    assert!(screen.contains("browser tabs"), "{screen:?}");
+    assert!(status.success(), "{status:?}");
+}

@@ -67,6 +67,17 @@ impl App {
         raw: &mut RawMode,
     ) -> Result<Flow, CliError> {
         if let Some(question) = action.question() {
+            if matches!(
+                action,
+                Action::Awareness | Action::Suggestions | Action::Why
+            ) {
+                self.mode = Mode::Ask {
+                    action,
+                    question,
+                    editor: Editor::default(),
+                };
+                return Ok(Flow::Continue);
+            }
             let Some(session) = self.session.as_ref() else {
                 self.show_error(&CliError::ModelNotLoaded)?;
                 return Ok(Flow::Continue);
@@ -96,6 +107,7 @@ impl App {
             Action::Talk(talk) => self.set_talk(talk)?,
             Action::Status => self.show_status()?,
             Action::Sessions => self.show_sessions()?,
+            Action::Context => self.run_control("context", "")?,
             Action::Settings => self.open_tab(Tab::Settings)?,
             Action::Shortcuts => {
                 let lines: Vec<Line> = SHORTCUTS.iter().map(|l| Line::new(Kind::Dim, *l)).collect();
@@ -134,7 +146,7 @@ impl App {
         Ok(())
     }
 
-    fn print_dim(&self, lines: Vec<String>) -> io::Result<()> {
+    pub(super) fn print_dim(&self, lines: Vec<String>) -> io::Result<()> {
         let lines: Vec<Line> = lines
             .into_iter()
             .map(|l| Line::new(Kind::Dim, format!("  {l}")))
@@ -246,6 +258,15 @@ impl App {
     ) -> Result<(), CliError> {
         if matches!(action, Action::Bench | Action::Verify) {
             return self.run_perf(action, text, raw);
+        }
+        let control = match action {
+            Action::Awareness => Some("awareness"),
+            Action::Suggestions => Some("suggestions"),
+            Action::Why => Some("why"),
+            _ => None,
+        };
+        if let Some(command) = control {
+            return self.run_control(command, text);
         }
         let Some(session) = self.session.as_mut() else {
             return Ok(self.show_error(&CliError::ModelNotLoaded)?);
