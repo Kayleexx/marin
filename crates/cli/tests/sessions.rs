@@ -6,11 +6,12 @@ mod common;
 mod long;
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use common::{Sandbox, fixtures, text};
 use long::long_tiny;
@@ -182,6 +183,7 @@ fn nothing_is_written_unless_asked_and_a_cancelled_question_is_never_saved() -> 
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(!rig.home().join("sessions").exists(), "saving is opt-in");
 
+    let baseline = out.stdout.len();
     for (mode, ask) in [
         ("", "tell me a long story"),
         ("/mode code\n", "where is main?"),
@@ -192,12 +194,41 @@ fn nothing_is_written_unless_asked_and_a_cancelled_question_is_never_saved() -> 
             .take()
             .map(|mut i| i.write_all(format!("{mode}{ask}\n/save lost\n").as_bytes()))
             .transpose()?;
-        std::thread::sleep(Duration::from_secs(3));
+        let mut pipe = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("no stdout"))?;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0_u8; 4096];
+            while let Ok(n) = pipe.read(&mut buf) {
+                match buf.get(..n) {
+                    Some(chunk) if n > 0 => sink
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .extend_from_slice(chunk),
+                    _ => break,
+                }
+            }
+        });
+        // Interrupt once the answer is clearly streaming, however fast the model is.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while seen.lock().unwrap_or_else(PoisonError::into_inner).len() < baseline + 200 {
+            if Instant::now() > deadline || child.try_wait()?.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
         Command::new("kill")
             .args(["-INT", &child.id().to_string()])
             .status()?;
         let out = child.wait_with_output()?;
-        let shown = format!("{}{}", text(&out.stdout), text(&out.stderr));
+        reader
+            .join()
+            .map_err(|_| io::Error::other("the reader thread panicked"))?;
+        let streamed = seen.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let shown = format!("{}{}", text(&streamed), text(&out.stderr));
         assert!(shown.contains("nothing to save yet"), "{mode:?}: {shown}");
         assert!(!rig.file("lost").exists(), "{mode:?}");
     }

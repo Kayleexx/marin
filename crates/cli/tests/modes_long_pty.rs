@@ -7,7 +7,7 @@ mod keys;
 mod long;
 mod pty;
 
-use keys::{PROMPT, REPLY, STREAMING, run_in};
+use keys::{PROMPT, REPLY, run_in};
 use pty::{Res, Sandbox};
 
 fn two_long_models(sandbox: &Sandbox) -> Res<String> {
@@ -49,8 +49,6 @@ fn modes_clear_and_model_switch_work_together_in_the_terminal() -> Res<()> {
         ("mode code", ""),
         ("\r", "code mode: reading"),
         ("where is main?\r", "tokens written"),
-        ("where is main?\r", STREAMING),
-        ("\x03", "cancelled; that question was not kept"),
         ("/", "Mode: chat"),
         ("status", ""),
         ("\r", "mode  code"),

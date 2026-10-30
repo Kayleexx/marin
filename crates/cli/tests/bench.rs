@@ -18,7 +18,7 @@ fn bench_prints_report_and_writes_json() -> Result<(), Box<dyn std::error::Error
         "--tokens",
         "4",
         "--runs",
-        "2",
+        "300",
         "--profile",
         "--json",
         &path,
@@ -34,7 +34,7 @@ fn bench_prints_report_and_writes_json() -> Result<(), Box<dyn std::error::Error
     assert_eq!(json["format"], 2);
     assert_eq!(json["prompt_tokens"], 8);
     assert_eq!(json["output_tokens"], 4);
-    assert_eq!(json["measured_runs"], 2);
+    assert_eq!(json["measured_runs"], 300);
     assert_eq!(json["batch_size"], 1);
     assert!(
         json["results"]["first_token_ms"]["median"]

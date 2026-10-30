@@ -9,6 +9,11 @@ rust-version = "1.96"
 license = "Apache-2.0"
 publish = false
 
+# The tests run on the dev profile; unoptimized, the numeric ones and the real `marin` they start take minutes.
+# Debug assertions and overflow checks stay on.
+[profile.dev]
+opt-level = 1
+
 [workspace.lints.rust]
 unused = { level = "deny", priority = -1 }
 
