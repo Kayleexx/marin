@@ -1,7 +1,11 @@
 # Marin
 
 Marin is a private assistant that runs on your own computer. You talk to a language model in your terminal, and
-nothing leaves your machine. It is written in Rust, runs on a normal CPU, and uses an NVIDIA GPU when you have one.
+nothing leaves your machine.
+
+**Marin runs on its own inference runtime.** It does not wrap llama.cpp, Python or any other engine. The model loader,
+the CPU and GPU math, the cache, the sampler and the server are all written in Rust in this repository (the GPU kernels
+are CUDA). It runs on a normal CPU and uses an NVIDIA GPU when you have one.
 
 It runs selected Qwen3, Qwen3.5 and Granite models. It never downloads anything and never sends data anywhere.
 
@@ -113,11 +117,16 @@ GPU are comfortable. On a Ryzen 7 260 with an RTX 5050 laptop GPU (about 40 W), 
 
 | | Writing | Reading the prompt | First word (512-token prompt) |
 |---|---:|---:|---:|
-| GPU | 32 to 36 tokens/s | 319 tokens/s | 1.6 s |
+| GPU | 31 tokens/s (about 45 for the first 20 s) | about 500 tokens/s | 1.0 s |
 | CPU, 8 threads | 4.8 tokens/s | 44 tokens/s | 11.6 s |
 
 Qwen3-1.7B on the CPU writes about 13 tokens/s and Qwen3-0.6B about 37. Follow-up turns reuse the cache, so they are much
-cheaper than the first one. More numbers and how we measured them: [BENCHMARKS.md](BENCHMARKS.md).
+cheaper than the first one.
+
+**Compared with llama.cpp** (same machine, same model, 8-bit): Marin writes about 15% faster on the GPU, uses far less
+system memory (0.9 GB against 4.8 GB), and finishes short answers sooner. It reads long prompts more slowly (about 3.5 to 4
+times slower on the GPU), so the first word of a long prompt arrives later. On the CPU the two are close when writing.
+Details, caveats and how we measured: [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Things to know
 

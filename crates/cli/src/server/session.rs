@@ -276,7 +276,12 @@ pub(super) fn checkpoint(
         sched.forward(fresh, &mut active.cache)?;
     }
     active.retained = Retained::restored(history.to_vec());
-    Ok((sched.mark(&active.cache)?, keep))
+    match sched.mark(&active.cache) {
+        Ok(mark) => Ok((mark, keep)),
+        // A host cache that cannot be marked is read again after the answer instead.
+        Err(_) if matches!(active.cache, model::EngineCache::Qwen35(_)) => Ok((None, keep)),
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]

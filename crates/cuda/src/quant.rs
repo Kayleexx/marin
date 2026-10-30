@@ -10,6 +10,9 @@ use crate::{Buffer, CudaError, Gpu, Tokens};
 /// Rows each warp takes in the one-token kernels; matches `ROWS_PER_WARP` in quant.cu.
 const ROWS_PER_WARP: usize = 4;
 
+/// Tokens one block of `matmul_q8_imma` takes; matches `IMMA_TOKENS` in mma.cu.
+const INTEGER_TOKENS: usize = 32;
+
 /// A row-major weight matrix in GPU memory as int8 or int4 codes with one f32 scale per group of columns.
 pub struct DeviceQuantMatrix {
     rows: usize,
@@ -136,7 +139,8 @@ impl Gpu {
     }
 
     /// FP32 activation math for strict hybrid-reference checks. Int8 passes of 16 or more tokens use the tensor cores
-    /// with the activations split exactly, so only the f32 accumulation rounds; everything else takes the f32 kernels.
+    /// with the activations as 22-bit fixed point below the largest magnitude of each token and group (groups of 32,
+    /// 64 or 128; other groups split them into three bf16 parts instead); everything else takes the f32 kernels.
     pub fn matmul_quant_precise(
         &self,
         w: &DeviceQuantMatrix,
@@ -170,14 +174,20 @@ impl Gpu {
         }
         let tensor_cores = math != Math::Scalar && tokens >= MMA_MIN_TOKENS;
         let k = &self.kernels;
+        let integer = math == Math::Exact
+            && matches!(w.scheme.group, 32 | 64 | 128)
+            && w.cols.is_multiple_of(w.scheme.group);
         let function = match (w.scheme.bits, tensor_cores, math) {
             (QuantBits::Int8, false, _) => &k.matmul_q8,
             (QuantBits::Int4, false, _) => &k.matmul_q4,
+            (QuantBits::Int8, true, Math::Exact) if integer => &k.matmul_q8_imma,
             (QuantBits::Int8, true, Math::Exact) => &k.matmul_q8_mma_exact,
             (QuantBits::Int8, true, _) => &k.matmul_q8_mma,
             (QuantBits::Int4, true, _) => &k.matmul_q4_mma,
         };
-        let (rows_per_block, tokens_per_block, threads) = if tensor_cores {
+        let (rows_per_block, tokens_per_block, threads) = if integer {
+            (MMA_ROWS, INTEGER_TOKENS, MMA_BLOCK)
+        } else if tensor_cores {
             (MMA_ROWS, MMA_TOKENS, MMA_BLOCK)
         } else {
             (

@@ -81,6 +81,15 @@ fn revive(store: &Store, sched: Scheduled<'_>, entry: Entry) -> Result<Stored, S
     }
 }
 
+/// Cuts a cache of attention keys and values back to `history` in place. False if the history is not a start of what the
+/// cache holds, or if the cut would be a re-read (a cache with recurrent state).
+fn cut_to_history(active: &mut Stored, history: &[u32]) -> bool {
+    !history.is_empty()
+        && active.retained.tokens().starts_with(history)
+        && active.cache.truncate(history.len()).is_ok()
+        && !active.cache.replays()
+}
+
 pub(super) fn completion(
     ctx: Context<'_>,
     stream: &mut TcpStream,
@@ -198,8 +207,10 @@ pub(super) fn completion(
     let (checkpoint, skipped) = if persistent
         && !history.is_empty()
         && prompt.starts_with(&history)
-        && matches!(&loaded.model, model::Engine::Qwen35Cuda(_))
-    {
+        && matches!(
+            &loaded.model,
+            model::Engine::Qwen35Cuda(_) | model::Engine::Qwen35(_)
+        ) {
         match session::checkpoint(&mut active, plain, &history) {
             Ok((checkpoint, keep)) => (checkpoint, Some(keep)),
             Err(e) => {
@@ -341,7 +352,7 @@ pub(super) fn completion(
     }
     let mut replayed = 0;
     let rewound = checkpoint.is_some_and(|mark| plain.rewind(&mut active.cache, mark).is_ok());
-    if rewound {
+    if rewound || cut_to_history(&mut active, &history) {
         active.retained = Retained::restored(history);
     } else if persistent && !history.is_empty() && prompt.starts_with(&history) {
         active.cache.clear();

@@ -311,6 +311,31 @@ fn sessions_reuse_exact_prefix_and_half_close_works() -> Result<(), Box<dyn std:
 }
 
 #[test]
+fn a_session_turn_does_not_read_the_history_again_after_the_answer()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = Server::start()?;
+    let mut request = json!({"model":"tiny-chat","messages":[{"role":"user","content":"the cat sat"}],"max_tokens":6,"temperature":0,"marin_session_id":"new"});
+    let first = body(&server.request("POST", "/v1/chat/completions", Some(&request))?)?;
+    assert_eq!(first["marin_replayed_tokens"], 0, "{first}");
+    let answer = first["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or("missing answer")?;
+    request["marin_session_id"] = first["marin_session_id"].clone();
+    request["messages"] = json!([
+        {"role":"user","content":"the cat sat"},
+        {"role":"assistant","content":answer},
+        {"role":"user","content":"what next?"}
+    ]);
+    let second = body(&server.request("POST", "/v1/chat/completions", Some(&request))?)?;
+    assert_eq!(second["marin_replayed_tokens"], 0, "{second}");
+    assert!(
+        second["marin_reused_tokens"].as_u64().unwrap_or(0) > 0,
+        "{second}"
+    );
+    Ok(())
+}
+
+#[test]
 fn full_queue_returns_overload_and_waiters_remain_fifo() -> Result<(), Box<dyn std::error::Error>> {
     let server = Server::start()?;
     let mut active = TcpStream::connect(&server.address)?;
